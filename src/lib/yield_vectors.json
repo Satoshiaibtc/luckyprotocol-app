@@ -1,9 +1,10 @@
 {
-  "note": "Golden yield vectors for LuckyProtocol v3 (PROTOCOL-v3.md §3). Shared byte-identical by the Rust indexer and luckyprotocol-app; both test suites assert them. Only the last hex char of `hash` matters: 'f' → 1000, 'a'..'e' → 500, '0'..'9' → 100. Input is lowercased first, so an uppercase 'F' also yields 1000. One row per entry in the spec's golden table.",
+  "note": "LUCKY-20 golden yield vectors (PROTOCOL-v3.md §3). Duplicated in luckyprotocol-app/src/lib/yield_vectors.json; Rust `cargo test yield` and JS `npm test` both assert every row. Only the LAST hex char of `hash` matters: f→1000, a-e→500, 5-9→200, 0-4→100, case-insensitive.",
   "vectors": [
     { "hash": "0000000000000000000000000000000000000000000000000000000000000000", "yield": 100 },
-    { "hash": "0000000000000000000000000000000000000000000000000000000000000005", "yield": 100 },
-    { "hash": "0000000000000000000000000000000000000000000000000000000000000009", "yield": 100 },
+    { "hash": "0000000000000000000000000000000000000000000000000000000000000004", "yield": 100 },
+    { "hash": "0000000000000000000000000000000000000000000000000000000000000005", "yield": 200 },
+    { "hash": "0000000000000000000000000000000000000000000000000000000000000009", "yield": 200 },
     { "hash": "000000000000000000000000000000000000000000000000000000000000000a", "yield": 500 },
     { "hash": "000000000000000000000000000000000000000000000000000000000000000e", "yield": 500 },
     { "hash": "000000000000000000000000000000000000000000000000000000000000000f", "yield": 1000 },

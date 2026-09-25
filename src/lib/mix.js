@@ -4,10 +4,15 @@
 // indexer.minesByAddress rows) by the yield they settled at, so the UI can
 // put the observed shares next to the model shares from yield.js.
 
-import { bucketOfYield } from "./yield.js";
+import { BUCKETS, bucketOfYield } from "./yield.js";
+
+/** A zeroed per-bucket tally keyed by bucket id — { high, mid, low, base } today. */
+export function emptyCounts() {
+  return Object.fromEntries(BUCKETS.map((b) => [b.id, 0]));
+}
 
 /**
- * summarizeMix(rows) → { n, counts: { high, mid, base }, total, mean }
+ * summarizeMix(rows) → { n, counts: { <bucket id>: n, … }, total, mean }
  *
  * Counts only `status === "settled"` rows that were not cap-exhausted (a
  * cap-exhausted mine yields 0 and says nothing about the block digit). Rows
@@ -15,7 +20,7 @@ import { bucketOfYield } from "./yield.js";
  * null when n === 0.
  */
 export function summarizeMix(rows) {
-  const counts = { high: 0, mid: 0, base: 0 };
+  const counts = emptyCounts();
   let n = 0;
   let total = 0;
   for (const r of Array.isArray(rows) ? rows : []) {

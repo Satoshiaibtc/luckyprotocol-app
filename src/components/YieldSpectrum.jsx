@@ -1,8 +1,9 @@
 import { BUCKETS, DIGITS, DIGIT_SPACE, bucketOf, distributionSentence } from "../lib/yield.js";
 
 /**
- * The 16 possible last hex digits as a chamfered strip, colored by tier,
- * with the bucket brackets beneath and (unless `compact`) a legend.
+ * The 16 possible last hex digits as a chamfered strip, colored by tier
+ * (one colour group per BUCKETS entry), with the bucket brackets beneath
+ * (each spanning `count` cells) and (unless `compact`) a legend.
  * `tipDigit` marks the latest block's digit; `litDigit` marks a reveal.
  */
 export default function YieldSpectrum({ tipDigit = null, litDigit = null, compact = false }) {
@@ -31,7 +32,7 @@ export default function YieldSpectrum({ tipDigit = null, litDigit = null, compac
       )}
       <div className="spectrum-brackets" aria-hidden="true">
         {[...BUCKETS].reverse().map((b) => (
-          <span key={b.id} className={`b-${b.id} tier-${b.id}`}>
+          <span key={b.id} className={`b-${b.id} tier-${b.id}`} style={{ gridColumn: `span ${b.count}` }}>
             {`${b.label} · ${b.count}/${DIGIT_SPACE} · ${b.yield}`}
           </span>
         ))}

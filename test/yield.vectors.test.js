@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mineYield, yieldDigit, EXPECTED_YIELD } from "../src/lib/yield.js";
+import { mineYield, yieldDigit, yieldTierLabel, EXPECTED_YIELD } from "../src/lib/yield.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { vectors } = JSON.parse(
@@ -16,7 +16,8 @@ const { vectors } = JSON.parse(
 // The spec table has exactly these last-digit rows; guard against the
 // vectors file drifting away from it.
 const EXPECTED_ROWS = [
-  ["0", 100], ["5", 100], ["9", 100],
+  ["0", 100], ["4", 100],
+  ["5", 200], ["9", 200],
   ["a", 500], ["e", 500],
   ["f", 1000],
   ["F", 1000],
@@ -45,14 +46,17 @@ for (const bad of ["", "   ", "xyz", "00g", null, undefined, 42, {}]) {
   assert.strictEqual(yieldDigit(bad), null, `yieldDigit(${JSON.stringify(bad)}) must be null`);
 }
 
-// Every hex digit maps into exactly one bucket.
+// Every hex digit maps into exactly one bucket: f → 1000, a–e → 500, 5–9 → 200, 0–4 → 100.
 for (const d of "0123456789abcdef") {
   const y = mineYield(`${"0".repeat(63)}${d}`);
-  const want = d === "f" ? 1000 : d >= "a" ? 500 : 100;
+  const want = d === "f" ? 1000 : d >= "a" ? 500 : d >= "5" ? 200 : 100;
   assert.strictEqual(y, want, `digit ${d}`);
   assert.strictEqual(mineYield(`${"0".repeat(63)}${d.toUpperCase()}`), want, `digit ${d} upper`);
 }
 
-assert.strictEqual(EXPECTED_YIELD, 281.25, "expected yield per MINE (spec §3)");
+assert.deepEqual([1000, 500, 200, 100, 0, 250].map(yieldTierLabel), ["high", "mid", "low", "base", "unknown", "unknown"]);
+
+assert.strictEqual(EXPECTED_YIELD, 312.5, "expected yield per MINE (spec §3)");
+assert.strictEqual(21_000_000 / EXPECTED_YIELD, 67_200, "mines that exhaust a ticker exactly");
 
 console.log(`yield vectors: ${passed}/${vectors.length} passed; degenerate + full-digit sweeps ok`);

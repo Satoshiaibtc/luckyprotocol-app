@@ -26,10 +26,13 @@
   --accent-dim: rgba(53, 214, 255, 0.12);
   --accent-line: rgba(53, 214, 255, 0.4);
 
-  /* tiers */
+  /* tiers: hot (f) · cyan accent (a–e) · teal (5–9) · steel (0–4) */
   --steel: #6b8aa8;
   --steel-dim: rgba(107, 138, 168, 0.16);
   --steel-line: rgba(107, 138, 168, 0.55);
+  --teal: #4fc9ad;
+  --teal-dim: rgba(79, 201, 173, 0.14);
+  --teal-line: rgba(79, 201, 173, 0.5);
   --hot: #efeaff;
   --hot-dim: rgba(176, 148, 255, 0.16);
   --hot-line: rgba(176, 148, 255, 0.6);
@@ -39,6 +42,9 @@
   --tier-mid: var(--accent);
   --tier-mid-dim: var(--accent-dim);
   --tier-mid-line: var(--accent-line);
+  --tier-low: var(--teal);
+  --tier-low-dim: var(--teal-dim);
+  --tier-low-line: var(--teal-line);
   --tier-base: var(--steel);
   --tier-base-dim: var(--steel-dim);
   --tier-base-line: var(--steel-line);
@@ -46,6 +52,7 @@
   /* glows — same blur radius for every tier */
   --glow: rgba(53, 214, 255, 0.45);
   --glow-hot: rgba(176, 148, 255, 0.55);
+  --glow-teal: rgba(79, 201, 173, 0.45);
   --glow-steel: rgba(107, 138, 168, 0.45);
 
   /* status */
@@ -85,6 +92,12 @@
   --t-dim: var(--tier-mid-dim);
   --t-line: var(--tier-mid-line);
   --t-glow: var(--glow);
+}
+.tier-low {
+  --t: var(--tier-low);
+  --t-dim: var(--tier-low-dim);
+  --t-line: var(--tier-low-line);
+  --t-glow: var(--glow-teal);
 }
 .tier-base {
   --t: var(--tier-base);
@@ -1436,8 +1449,13 @@ input[type="search"]::-webkit-search-decoration {
   text-overflow: ellipsis;
   text-align: center;
 }
+/* Bracket widths come from BUCKETS (inline `grid-column: span <count>`);
+   these are the fallbacks for the same table. */
 .spectrum-brackets .b-base {
-  grid-column: span 10;
+  grid-column: span 5;
+}
+.spectrum-brackets .b-low {
+  grid-column: span 5;
 }
 .spectrum-brackets .b-mid {
   grid-column: span 5;
@@ -2650,6 +2668,9 @@ input[type="search"]::-webkit-search-decoration {
 }
 .y-mid {
   color: var(--tier-mid);
+}
+.y-low {
+  color: var(--tier-low);
 }
 .y-base {
   color: var(--tier-base);

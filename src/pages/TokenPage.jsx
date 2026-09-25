@@ -30,7 +30,7 @@ const DATA_TABS = [
   { id: "holders", label: "Holders" },
 ];
 
-/** "f 6.25% → 1000 · a–e 31.25% → 500 · 0–9 62.5% → 100" — from BUCKETS only. */
+/** "f 6.25% → 1000 · a–e 31.25% → 500 · 5–9 31.25% → 200 · 0–4 31.25% → 100" — from BUCKETS only. */
 const TIER_SUMMARY = BUCKETS.map((b) => `${b.label} ${probabilityPct(b)}% → ${b.yield}`).join(" · ");
 
 export default function TokenPage({ ticker, params, navigate }) {

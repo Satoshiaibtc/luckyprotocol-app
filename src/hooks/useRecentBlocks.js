@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
 import { bucketOfHash } from "../lib/yield.js";
+import { emptyCounts } from "../lib/mix.js";
 
 /**
  * The last `count` blocks up to `ceiling` (indexed_height first, so
@@ -110,7 +111,7 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
   return useMemo(() => {
     const cache = cacheRef.current;
     const tiles = [];
-    const tally = { high: 0, mid: 0, base: 0 };
+    const tally = emptyCounts(); // one counter per BUCKETS entry
     let loaded = false;
 
     if (ceiling !== null && ceiling !== undefined) {

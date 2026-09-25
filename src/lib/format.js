@@ -74,7 +74,7 @@ export function fmtBtc(sats) {
   return `${int}.${frac.padEnd(4, "0")}`;
 }
 
-/** Fixed decimals with trailing zeros trimmed: 281.25 → "281.25", 276 → "276", 533.33 (d=1) → "533.3". */
+/** Fixed decimals with trailing zeros trimmed: 312.5 → "312.5", 276 → "276", 533.33 (d=1) → "533.3". */
 export function fmtDec(x, d = 2) {
   if (x === null || x === undefined || !Number.isFinite(Number(x))) return "—";
   return String(Number(Number(x).toFixed(d)));

@@ -25,7 +25,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { hex, base64, bech32, bech32m } from "@scure/base";
 import * as btc from "@scure/btc-signer";
 import { pubECDSA, pubSchnorr } from "@scure/btc-signer/utils.js";
-import { mineYield } from "./yield.js";
+import { EXPECTED_YIELD, bucketOfYield, mineYield } from "./yield.js";
 import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, AVATAR_PROTOCOL_FEE_SATS } from "./payloads.js";
 import { buildListingPsbt, verifyListing, parseListing, decodeRawTx, LISTING_SIGHASH } from "./swap.js";
 import { parseEnvelopeFromWitness, checkEnvelopeLimits, bytesToDataUrl } from "./inscribe.js";
@@ -118,10 +118,14 @@ function blockHashAt(height) {
   const last = forced ?? raw[63];
   return `${"0".repeat(19)}${raw.slice(19, 63)}${last}`;
 }
+// Pin a block's last nibble to one of the digits that yields `y`, picked
+// deterministically from the bucket's digit set (BUCKETS in yield.js).
 function forceYield(height, y) {
+  const b = bucketOfYield(y);
+  if (!b) throw new Error(`mock: ${y} is not a yield tier`);
   const raw = h256(`block:${height}`);
   const pick = parseInt(raw[40], 16);
-  FORCED_DIGITS.set(height, y === 1000 ? "f" : y === 500 ? "abcde"[pick % 5] : String(pick % 10));
+  FORCED_DIGITS.set(height, b.digits[pick % b.digits.length]);
 }
 function blockTimeAt(height) {
   return LOAD_TS - (BASE_TIP - height) * 600 - 240;
@@ -140,7 +144,8 @@ const TOKEN_SEEDS = [
   { ticker: "VOLT", minted: 0, deploy_block: 969_799, holders: 0, base: 0, deployerType: "tr" }, // brand-new: no mines, no trades, no asks
 ];
 
-const YIELD_PATTERN = [100, 500, 100, 1000, 100, 100, 500, 100, 500, 100, 100, 1000, 100, 500, 100, 100, 500, 100, 100, 100];
+// Roughly the model mix over 20 rows: 1–2 × 1000, ~6 × 500, ~6 × 200, ~6 × 100.
+const YIELD_PATTERN = [100, 500, 200, 1000, 100, 200, 500, 100, 500, 200, 100, 1000, 200, 500, 100, 200, 500, 100, 200, 500];
 const FEED_TICKERS = ["LUCKY", "SATS", "LUCKY", "BLOK", "LUCKY", "NODE", "LUCKY", "SATS", "BLOK", "LUCKY", "ORE", "LUCKY", "GRID", "SATS", "LUCKY", "BLOK", "NODE", "LUCKY", "SATS", "BLOK"];
 const SENDERS = Array.from({ length: 7 }, (_, i) =>
   i % 3 === 2 ? fakeP2wpkh(`miner-${i}`) : fakeP2tr(`miner-${i}`),
@@ -170,7 +175,7 @@ function world() {
       deploy_txid: fakeTxid(`deploy-${s.ticker}`),
       deploy_block: s.deploy_block,
       holders: s.holders,
-      mine_count: Math.round(s.minted / 281.25),
+      mine_count: Math.round(s.minted / EXPECTED_YIELD),
       trade_count: 0,
       volume_sats: 0,
       avatar_txid: null,
@@ -334,7 +339,7 @@ function ensureSeeded(addr) {
 }
 
 const MY_SEEDED_MINES = (addr) =>
-  [1000, 100, 500].map((y, i) => {
+  [1000, 100, 500, 200].map((y, i) => {
     const height = BASE_TIP - 30 - i * 7;
     forceYield(height, y);
     return {

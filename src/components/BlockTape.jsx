@@ -4,7 +4,7 @@ import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { useRecentBlocks } from "../hooks/useRecentBlocks.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
-import { BUCKETS, mineYield, yieldDigit, bucketOfHash } from "../lib/yield.js";
+import { BUCKETS, DIGIT_SPACE, mineYield, yieldDigit, bucketOfHash } from "../lib/yield.js";
 import { blockUrl, fmtInt } from "../lib/format.js";
 import Panel from "./hud/Panel.jsx";
 import { ledFromPoll } from "./hud/Led.jsx";
@@ -88,7 +88,7 @@ export default function BlockTape() {
           <span className="c">{tally[b.id]}</span> × {b.yield}
         </span>
       ))}
-      <span className="model"> · model {BUCKETS.map((b) => fmtModel((b.count * COUNT) / 16)).join(" / ")}</span>
+      <span className="model"> · model {BUCKETS.map((b) => fmtModel((b.count * COUNT) / DIGIT_SPACE)).join(" / ")}</span>
     </span>
   ) : null;
 
