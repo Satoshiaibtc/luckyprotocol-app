@@ -551,7 +551,7 @@ export async function mockGet(path) {
   const q = url.searchParams;
   let m;
 
-  if (p === "/") {
+  if (p === "/" || p === "/health") {
     const tip = tipHeight();
     return {
       network: "mainnet",

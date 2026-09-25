@@ -428,7 +428,16 @@ function _page(env, maxTotal, sanitize) {
 
 /** GET / — health + tip envelope. */
 export async function health(signal) {
-  const env = await _httpGet("/", signal);
+  // `/health` is an alias of `/` (spec §5); prefer it because some edge
+  // configurations answer the bare root path with an error page. Fall back
+  // to `/` for an indexer that predates the alias.
+  let env;
+  try {
+    env = await _httpGet("/health", signal);
+  } catch (e) {
+    if (!_is404(e)) throw e;
+    env = await _httpGet("/", signal);
+  }
   return {
     network: _safeStr(env && env.network, 32) || "unknown",
     indexed_height: _safeInt(env && env.indexed_height, 1e9),
