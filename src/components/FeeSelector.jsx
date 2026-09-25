@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
+import { presetUnavailableText } from "../lib/feechoice.js";
 
 /**
  * Compact segmented fee-rate control (fits 375 px): Fast / Normal / Slow /
@@ -10,11 +11,13 @@ import { MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
 export default function FeeSelector({ fee, disabled = false }) {
   const inputId = useId();
   const isCustom = fee.choice.kind === "custom";
+  const overCap = fee.presets.some((p) => p.reason === "over-cap");
   return (
     <div className="fee-sel">
       <div className="fee-sel-head">
         <span className="label">Fee rate</span>
-        {!fee.feesAvailable && <span className="fee-sel-note">No estimates from the indexer — presets off, Custom still works.</span>}
+        {!fee.feesAvailable && !overCap && <span className="fee-sel-note">No estimates from the indexer — presets off, Custom still works.</span>}
+        {overCap && <span className="fee-sel-note">Fee estimate unavailable — the indexer reports rates above the {MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB safety cap; they are rejected, not clamped. Custom still works.</span>}
       </div>
       <div className="fee-seg" role="radiogroup" aria-label="Fee rate">
         {fee.presets.map((p) => {
@@ -28,7 +31,7 @@ export default function FeeSelector({ fee, disabled = false }) {
               className={`fee-opt${on ? " on" : ""}`}
               disabled={disabled || p.satVb === null}
               onClick={() => fee.pickPreset(p.id)}
-              title={p.satVb !== null ? `${p.label} — ${p.satVb} sat/vB, ${p.eta}` : `${p.label} — no estimate`}
+              title={p.satVb !== null ? `${p.label} — ${p.satVb} sat/vB, ${p.eta}` : `${p.label} — ${presetUnavailableText(p.reason) || "estimate unavailable"}`}
             >
               <span className="fo-l">{p.label}</span>
               <span className="fo-v">{p.satVb !== null ? p.satVb : "—"}</span>

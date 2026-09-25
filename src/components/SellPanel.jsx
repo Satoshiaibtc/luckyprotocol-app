@@ -183,7 +183,7 @@ export default function SellPanel({ ticker, token, onSettled }) {
         utxos: utxoRes.utxos,
         tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
         tokenUtxos: [{ txid: utxo.txid, vout: utxo.vout, ...(carrierSats ? { sats: carrierSats } : {}) }],
-        feeRateSatVb: feeInfo.halfHourFee,
+        feeRateSatVb: requireRate(feeInfo.halfHourFee),
         ticker,
         amount,
         toAddress: address,
@@ -382,6 +382,11 @@ export default function SellPanel({ ticker, token, onSettled }) {
       </div>
     </div>
   );
+}
+
+function requireRate(v) {
+  if (!Number.isInteger(v) || v < 1) throw new Error("No fee estimate from the indexer — try again later.");
+  return v;
 }
 
 function fmtUnitInput(v) {

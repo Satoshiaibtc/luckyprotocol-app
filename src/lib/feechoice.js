@@ -72,18 +72,34 @@ export function serializeFeeChoice(choice) {
 }
 
 /**
+ * Why a preset has no usable rate: 'missing' (no /fees, or the key is
+ * absent / malformed), 'over-cap' (the indexer's value exceeds the
+ * MAX_FEE_RATE_SAT_VB safety cap — a wrong estimate is REJECTED, never
+ * clamped to a number that still overpays; audit L-11), or null when it
+ * resolves.
+ */
+export function presetUnavailableReason(id, feesData) {
+  const preset = FEE_PRESETS.find((p) => p.id === id);
+  if (!preset || !feesData) return "missing";
+  const v = Number(feesData[preset.key]);
+  if (!Number.isInteger(v) || v < MIN_FEE_RATE_SAT_VB) return "missing";
+  if (v > MAX_FEE_RATE_SAT_VB) return "over-cap";
+  return null;
+}
+
+/**
  * The sat/vB to use for a choice given the latest /fees read (may be null
- * when the indexer is unreachable). A preset without fee data resolves to
- * null — the caller disables the action until the user picks Custom.
+ * when the indexer is unreachable). A preset without fee data — or with a
+ * value above the safety cap — resolves to null: the caller disables the
+ * action until the user picks Custom. Only the explicitly typed Custom
+ * value is clamped.
  */
 export function resolveFeeRate(choice, feesData) {
   if (!choice) return null;
   if (choice.kind === "custom") return Number.isInteger(choice.value) ? Math.min(MAX_FEE_RATE_SAT_VB, Math.max(MIN_FEE_RATE_SAT_VB, choice.value)) : null;
+  if (presetUnavailableReason(choice.id, feesData) !== null) return null;
   const preset = FEE_PRESETS.find((p) => p.id === choice.id);
-  if (!preset || !feesData) return null;
-  const v = Number(feesData[preset.key]);
-  if (!Number.isInteger(v) || v < MIN_FEE_RATE_SAT_VB) return null;
-  return Math.min(MAX_FEE_RATE_SAT_VB, v);
+  return Number(feesData[preset.key]);
 }
 
 /**
@@ -96,7 +112,20 @@ export function missingFeeHint(choice, satVb, action = "continue") {
   return `No fee estimate from the indexer — choose Custom and enter a sat/vB to ${action}.`;
 }
 
-/** Preset rows for the selector: `{ id, label, eta, satVb | null }`. */
+/** Preset rows for the selector: `{ id, label, eta, satVb | null, reason: null | 'missing' | 'over-cap' }`. */
 export function presetRows(feesData) {
-  return FEE_PRESETS.map((p) => ({ id: p.id, label: p.label, eta: p.eta, satVb: resolveFeeRate({ kind: "preset", id: p.id }, feesData) }));
+  return FEE_PRESETS.map((p) => ({
+    id: p.id,
+    label: p.label,
+    eta: p.eta,
+    satVb: resolveFeeRate({ kind: "preset", id: p.id }, feesData),
+    reason: presetUnavailableReason(p.id, feesData),
+  }));
+}
+
+/** Short reason text for a preset without a rate (tooltip / note). */
+export function presetUnavailableText(reason) {
+  if (reason === "over-cap") return `estimate unavailable — the indexer's value is above the ${MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB safety cap and looks wrong`;
+  if (reason === "missing") return "estimate unavailable";
+  return null;
 }

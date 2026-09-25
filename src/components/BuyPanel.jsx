@@ -147,6 +147,11 @@ export default function BuyPanel({ ticker, token, onSettled }) {
   );
 }
 
+function requireRate(v) {
+  if (!Number.isInteger(v) || v < 1) throw new Error("No fee estimate from the indexer — try again later.");
+  return v;
+}
+
 function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, onClose, onReset }) {
   const [checks, setChecks] = useState(() => CHECK_ORDER.map((c) => ({ ...c, state: "pending", detail: "" })));
   const [full, setFull] = useState(null);
@@ -154,7 +159,7 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
   const runRef = useRef(0);
 
   const connected = wallet.status === "connected";
-  const feeRate = fees.data?.halfHourFee ?? 8;
+  const feeRate = fees.data?.halfHourFee ?? null;
 
   // Run the §7.2 checks whenever the sheet opens for an order.
   const verify = useCallback(async () => {
@@ -218,7 +223,7 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
   const anyFail = checks.some((c) => c.state === "fail");
   const est = (() => {
     try {
-      return estimateFillCost({ order, address: wallet.address || order.seller, feeRateSatVb: feeRate });
+      return feeRate ? estimateFillCost({ order, address: wallet.address || order.seller, feeRateSatVb: feeRate }) : null;
     } catch {
       return null;
     }
@@ -244,7 +249,7 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
         pubkeyHex,
         utxos: utxoRes.utxos,
         tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
-        feeRateSatVb: feeInfo.halfHourFee,
+        feeRateSatVb: requireRate(feeInfo.halfHourFee),
         minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8: an inscribed sat here would go to the seller
       });
       setFlow({ phase: "signing", feeSats: built.feeSats, totalSats: built.totalSats, inputs: built.inputs, assetSafe: utxoRes.assetSafe, detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"} from your wallet` });
@@ -317,7 +322,7 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
             <dd className="mono">{fmtSats(SEND_PROTOCOL_FEE_SATS)}</dd>
           </div>
           <div>
-            <dt>Network fee {flow.feeSats == null ? `(est. @ ${feeRate} sat/vB)` : ""}</dt>
+            <dt>Network fee {flow.feeSats == null ? (feeRate ? `(est. @ ${feeRate} sat/vB)` : "(no estimate)") : ""}</dt>
             <dd className="mono">{feeSats != null ? fmtSats(feeSats) : "—"}</dd>
           </div>
           <div className="total">

@@ -439,14 +439,18 @@ function _sanitizeTxStatus(txid, s, known = true) {
   };
 }
 
+// A missing or malformed value is null — never a made-up default — and an
+// absurd one (> 1e6 sat/vB) is dropped here; anything above the
+// MAX_FEE_RATE_SAT_VB safety cap survives as-is so feechoice can REJECT
+// it visibly ("estimate unavailable") instead of clamping (audit L-11).
 function _sanitizeFees(f) {
-  const pick = (k, dflt) => _safeInt(f && f[k], 100_000) ?? dflt;
+  const pick = (k) => _safeInt(f && f[k], 1_000_000);
   return {
-    fastestFee: pick("fastestFee", 10),
-    halfHourFee: pick("halfHourFee", 8),
-    hourFee: pick("hourFee", 5),
-    economyFee: pick("economyFee", 3),
-    minimumFee: pick("minimumFee", 1),
+    fastestFee: pick("fastestFee"),
+    halfHourFee: pick("halfHourFee"),
+    hourFee: pick("hourFee"),
+    economyFee: pick("economyFee"),
+    minimumFee: pick("minimumFee"),
   };
 }
 

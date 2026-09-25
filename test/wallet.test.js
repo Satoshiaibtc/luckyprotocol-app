@@ -30,6 +30,8 @@ import {
   clampCustomFee,
   parseFeeChoice,
   presetRows,
+  presetUnavailableReason,
+  presetUnavailableText,
   resolveFeeRate,
   serializeFeeChoice,
 } from "../src/lib/feechoice.js";
@@ -164,7 +166,18 @@ assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, FEES), 8);
 assert.equal(resolveFeeRate({ kind: "preset", id: "slow" }, FEES), 5);
 assert.equal(resolveFeeRate({ kind: "preset", id: "economy" }, FEES), 3);
 assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, null), null, "no /fees → preset resolves to null (action disabled)");
-assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: 50_000 }), MAX_FEE_RATE_SAT_VB, "a wild /fees value is capped");
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: 50_000 }), null, "a /fees value above the cap is REJECTED, not clamped (L-11)");
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: MAX_FEE_RATE_SAT_VB + 1 }), null);
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: MAX_FEE_RATE_SAT_VB }), MAX_FEE_RATE_SAT_VB, "exactly the cap is allowed");
+assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, { fastestFee: 12, halfHourFee: null }), null, "a missing key is unavailable, never a default");
+assert.equal(presetUnavailableReason("fast", { fastestFee: 50_000 }), "over-cap");
+assert.equal(presetUnavailableReason("fast", { fastestFee: 12 }), null);
+assert.equal(presetUnavailableReason("fast", null), "missing");
+assert.equal(presetUnavailableReason("normal", { fastestFee: 12 }), "missing");
+assert.deepEqual(presetRows({ fastestFee: 50_000, halfHourFee: 8 }).map((p) => [p.id, p.satVb, p.reason]), [["fast", null, "over-cap"], ["normal", 8, null], ["slow", null, "missing"], ["economy", null, "missing"]]);
+assert.match(presetUnavailableText("over-cap"), /safety cap/);
+assert.equal(presetUnavailableText("missing"), "estimate unavailable");
+assert.equal(presetUnavailableText(null), null);
 assert.equal(resolveFeeRate({ kind: "custom", value: 27 }, null), 27, "custom works without /fees");
 assert.equal(resolveFeeRate({ kind: "custom", value: null }, FEES), null);
 assert.deepEqual(
