@@ -19,6 +19,9 @@ import {
   extractRawTxHex,
   expectPsbtPayload,
   buildPayPsbt,
+  filterSpendable,
+  minFeeInputSats,
+  MIN_FEE_INPUT_SATS_UNSAFE,
 } from "../src/lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, payloadToString } from "../src/lib/payloads.js";
 
@@ -220,6 +223,48 @@ assert.throws(
   }
   assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "lucky" }), /A-Z 0-9/);
   assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "TOOLONGTKN" }), /length/);
+}
+
+// ---- M-8: fee-input floor on non-asset-safe UTXO lists ----------------------------------------------
+{
+  assert.equal(MIN_FEE_INPUT_SATS_UNSAFE, 10_000);
+  assert.equal(minFeeInputSats(true), 0, "asset-safe list: no floor");
+  assert.equal(minFeeInputSats(false), 10_000);
+  assert.equal(minFeeInputSats("inscriptions-only"), 10_000, "inscriptions-only still cannot see runes");
+  assert.equal(minFeeInputSats(null), 10_000);
+  // filterSpendable: the §4 rules always apply; the floor drops the 3,000-sat output too
+  assert.deepEqual(filterSpendable(utxos, tokenOutpoints).map((u) => u.sats), [3_000, 90_000]);
+  assert.deepEqual(filterSpendable(utxos, tokenOutpoints, { minSats: 10_000 }).map((u) => u.sats), [90_000]);
+  assert.deepEqual(filterSpendable([{ txid: T(7), vout: 0, sats: 10_000 }], [], { minSats: 10_000 }).map((u) => u.sats), [10_000], "exactly the floor qualifies");
+  // buildMinePsbt with the floor never selects the 3,000-sat output
+  const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY", minInputSats: MIN_FEE_INPUT_SATS_UNSAFE });
+  const ins = parse(r.psbtHex).ins;
+  assert.equal(ins.length, 1);
+  assert.equal(hex.encode(ins[0].txid), T(4), "only the 90,000-sat output qualifies");
+  assert.deepEqual(r.inputs, [{ txid: T(4), vout: 2, sats: 90_000 }], "inputs are reported for the signing step");
+  // nothing above the floor → a clear error naming the floor and the remedy
+  assert.throws(
+    () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(6), vout: 0, sats: 9_999 }], tokenOutpoints: [], feeRateSatVb: 8, ticker: "LUCKY", minInputSats: MIN_FEE_INPUT_SATS_UNSAFE }),
+    /no asset-safe UTXO list.*10,000 sats/,
+  );
+  // SEND: the carrier is pinned regardless of the floor; the fee inputs obey it
+  {
+    const s = buildSendPsbt({
+      address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints,
+      tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 100, toAddress: p2wpkhAddr, minInputSats: MIN_FEE_INPUT_SATS_UNSAFE,
+    });
+    const sIns = parse(s.psbtHex).ins.map((i) => hex.encode(i.txid));
+    assert.ok(sIns.includes(T(3)), "carrier pinned");
+    assert.ok(!sIns.includes(T(2)), "3,000-sat output never a fee input under the floor");
+    assert.throws(
+      () => buildSendPsbt({
+        address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(2), vout: 1, sats: 3_000 }], tokenOutpoints: [],
+        tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr, minInputSats: MIN_FEE_INPUT_SATS_UNSAFE,
+      }),
+      /no asset-safe UTXO list/,
+    );
+  }
+  console.log("psbt floor: non-asset-safe lists never spend outputs under 10,000 sats");
 }
 
 // ---- M-1: sign-time payload guard ---------------------------------------------------------------

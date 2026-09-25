@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { hex, base64 } from "@scure/base";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
-import { buildPayPsbt, expectPsbtPayload, outpointKey } from "../lib/psbt.js";
+import { buildPayPsbt, expectPsbtPayload, minFeeInputSats, outpointKey } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
 import {
   adoptExistingCommit,
@@ -196,6 +196,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         feeRateSatVb,
         toAddress: rec.commitAddress,
         amountSats: rec.commitAmount,
+        minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8
       });
       // Duplicate-commit guard, part 1: note the attempt BEFORE the wallet can
       // sign or broadcast anything, so a resume after a mid-flight failure
@@ -204,7 +205,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       if (!writeAvatarRecord(attempted)) {
         throw new Error("This browser blocks localStorage — the recovery record could not be updated, so the commit was not signed.");
       }
-      setAv((s) => ({ ...s, phase: "commit-signing", record: attempted, commitFeeSats: built.feeSats, commitFeeRate: built.feeRateSatVb, utxoSource: utxoRes.source }));
+      setAv((s) => ({ ...s, phase: "commit-signing", record: attempted, commitFeeSats: built.feeSats, commitFeeRate: built.feeRateSatVb, utxoSource: utxoRes.source, assetSafe: utxoRes.assetSafe, signingInputs: built.inputs }));
       // Sign-time guard: the commit is a plain payment — no OP_RETURN at all.
       expectPsbtPayload(built.psbtHex, { op: null });
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
@@ -351,8 +352,9 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         tokenOutpoints,
         feeRateSatVb,
         ticker,
+        minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8
       });
-      setAv((s) => ({ ...s, phase: "reveal-signing", revealFeeSats: built.feeSats, revealFeeRate: built.feeRateSatVb, revealInputCount: built.walletInputIndexes.length, utxoSource: utxoRes.source }));
+      setAv((s) => ({ ...s, phase: "reveal-signing", revealFeeSats: built.feeSats, revealFeeRate: built.feeRateSatVb, revealInputCount: built.walletInputIndexes.length, utxoSource: utxoRes.source, assetSafe: utxoRes.assetSafe, signingInputs: built.inputs }));
       // Sign-time guard (M-1): exactly one OP_RETURN and it is AVATAR|<this ticker>.
       expectPsbtPayload(built.psbtHex, { op: "AVATAR", ticker });
       // 1. wallet: its inputs only, finalized

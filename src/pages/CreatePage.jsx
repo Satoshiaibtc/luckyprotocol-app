@@ -5,7 +5,7 @@ import * as wallet from "../lib/wallet.js";
 import { useTxStatus } from "../hooks/useTxStatus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
-import { buildDeployPsbt, estimateDeployFeeSats, expectPsbtPayload } from "../lib/psbt.js";
+import { buildDeployPsbt, estimateDeployFeeSats, expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
 import { missingFeeHint } from "../lib/feechoice.js";
 import { ACTIVATION_HEIGHT, DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
@@ -100,12 +100,15 @@ export default function CreatePage({ params, navigate }) {
         tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
         feeRateSatVb: feeRate,
         ticker: t,
+        minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8
       });
       setFlow({
         phase: "signing",
         ticker: t,
         feeSats: built.feeSats,
         feeRateSatVb: built.feeRateSatVb,
+        inputs: built.inputs,
+        assetSafe: utxoRes.assetSafe,
         detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"}${utxoRes.source === "indexer" ? " · inputs from indexer" : ""}`,
       });
       // Sign-time guard: exactly one OP_RETURN, and it is DEPLOY|<this ticker>.

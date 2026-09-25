@@ -2395,6 +2395,14 @@ input[type="search"]::-webkit-search-decoration {
   gap: 8px;
   flex-wrap: wrap;
 }
+.spent-inputs {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.spent-inputs.warn {
+  color: var(--warn, #e9b44c);
+}
 .status .actions .sweep-row {
   display: inline-flex;
   gap: 8px;

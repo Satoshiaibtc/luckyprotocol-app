@@ -37,6 +37,7 @@ import {
   inputVsize,
   checkedFeeRate,
   makeOpReturnScript,
+  noSpendableError,
   outpointKey,
   checkExpectedPayload,
   isOpReturnScript,
@@ -369,7 +370,7 @@ export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 
  *
  * @returns {{ psbtHex, inputIndexes: number[] (buyer's only), feeSats, totalSats, priceSats, changeSats }}
  */
-export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb }) {
+export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, minInputSats = 0 }) {
   const v = verifyListing({ psbtHex: listingPsbtHex, order });
   if (!v.ok) {
     const bad = v.checks.filter((c) => !c.ok).map((c) => `${c.label}: ${c.detail}`).join("; ");
@@ -389,11 +390,11 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   const priceSats = Number(tx.getOutput(0).amount);
   const listedKey = `${hex.encode(in0.txid)}:${in0.index}`;
 
-  // §4 filter, plus never re-spend the listed outpoint itself.
-  const spendable = filterSpendable(utxos, tokenOutpoints).filter((u) => outpointKey(u) !== listedKey);
-  if (spendable.length === 0) {
-    throw new Error(`no spendable BTC at ${address} — every UTXO is either ≤ ${DUST_SATS} sats or token-bearing`);
-  }
+  // §4 filter (+ the non-asset-safe floor, M-8: an inscribed sat in a buyer
+  // input would land in the seller's price output), plus never re-spend the
+  // listed outpoint itself.
+  const spendable = filterSpendable(utxos, tokenOutpoints, { minSats: minInputSats }).filter((u) => outpointKey(u) !== listedKey);
+  if (spendable.length === 0) throw noSpendableError(address, minInputSats);
   const satVb = checkedFeeRate(feeRateSatVb);
 
   const payload = buildSendPayload({ ticker: order.ticker, amount: order.amount, toOutIdx: FILL_TO_OUT, changeOutIdx: FILL_CHANGE_OUT });
@@ -448,6 +449,7 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   return {
     psbtHex: hex.encode(tx.toPSBT()),
     inputIndexes,
+    inputs: selected.map((u) => ({ txid: u.txid, vout: u.vout, sats: Number(u.sats) })),
     feeSats: fee,
     priceSats,
     totalSats: priceSats + DUST_SATS + SEND_PROTOCOL_FEE_SATS + fee,

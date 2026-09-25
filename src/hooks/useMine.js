@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
-import { buildMinePsbt, expectPsbtPayload } from "../lib/psbt.js";
+import { buildMinePsbt, expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { mineYield } from "../lib/yield.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { friendlyError } from "./useWallet.js";
@@ -49,6 +49,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
         tokenOutpoints,
         feeRateSatVb,
         ticker,
+        minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8: 10,000-sat floor on non-asset-safe lists
       });
       setMine({
         phase: "signing",
@@ -56,6 +57,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
         feeSats: built.feeSats,
         feeRateSatVb: built.feeRateSatVb,
         inputCount: built.inputIndexes.length,
+        inputs: built.inputs,
         utxoSource: utxoRes.source,
         assetSafe: utxoRes.assetSafe,
       });

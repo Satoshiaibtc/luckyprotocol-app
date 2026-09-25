@@ -7,7 +7,7 @@ import { usePoll } from "../hooks/usePoll.js";
 import { useTxStatus } from "../hooks/useTxStatus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { buildFillPsbt, finalizeFill, verifyListing, estimateFillCost } from "../lib/swap.js";
-import { expectPsbtPayload } from "../lib/psbt.js";
+import { expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
 import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, shortAddr } from "../lib/format.js";
@@ -245,8 +245,9 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
         utxos: utxoRes.utxos,
         tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
         feeRateSatVb: feeInfo.halfHourFee,
+        minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8: an inscribed sat here would go to the seller
       });
-      setFlow({ phase: "signing", feeSats: built.feeSats, totalSats: built.totalSats, detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"} from your wallet` });
+      setFlow({ phase: "signing", feeSats: built.feeSats, totalSats: built.totalSats, inputs: built.inputs, assetSafe: utxoRes.assetSafe, detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"} from your wallet` });
       // Sign-time guard (M-1): a fill is a SEND of exactly this order — never
       // sign a PSBT whose OP_RETURN says anything else (e.g. an AVATAR that
       // would ride on the seller's bearer signature).

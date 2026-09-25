@@ -167,6 +167,57 @@ export function chipLabel(providerId, shortAddress) {
   return m ? `${m.short} · ${shortAddress}` : shortAddress;
 }
 
+/**
+ * Outpoints ("txid:vout") of the inscriptions in one `getInscriptions`
+ * page. Both UniSat and OKX answer `{ total, list: [{ inscriptionId,
+ * output: "txid:vout", location: "txid:vout:offset", utxo: { txid, vout }, … }] }`
+ * — any of the three shapes is accepted; malformed rows are skipped.
+ */
+export function inscriptionOutpoints(page) {
+  const list = Array.isArray(page) ? page : Array.isArray(page?.list) ? page.list : [];
+  const out = [];
+  for (const row of list) {
+    if (!row || typeof row !== "object") continue;
+    let txid = null;
+    let vout = null;
+    const parse = (s) => {
+      const m = /^([0-9a-fA-F]{64}):(\d+)/.exec(String(s || ""));
+      return m ? [m[1].toLowerCase(), Number(m[2])] : null;
+    };
+    const fromOutput = parse(row.output) || parse(row.location);
+    if (fromOutput) [txid, vout] = fromOutput;
+    else if (row.utxo && typeof row.utxo === "object") {
+      const t = String(row.utxo.txid || "").toLowerCase();
+      if (TXID_RE.test(t) && Number.isInteger(Number(row.utxo.vout))) [txid, vout] = [t, Number(row.utxo.vout)];
+    }
+    if (txid && Number.isInteger(vout) && vout >= 0) out.push(`${txid}:${vout}`);
+  }
+  return out;
+}
+
+/**
+ * Page through a provider's `getInscriptions(cursor, size)` and collect
+ * every inscription outpoint. Stops when a page is short, when `total`
+ * is reached, or after `maxPages` (a runaway provider must not hang the
+ * build). Throws if a page throws — the caller then falls back to
+ * `assetSafe:false`. → Set<"txid:vout">
+ */
+export async function collectInscriptionOutpoints(getPage, { size = 100, maxPages = 50 } = {}) {
+  const found = new Set();
+  let cursor = 0;
+  for (let i = 0; i < maxPages; i++) {
+    const page = await getPage(cursor, size);
+    const rows = inscriptionOutpoints(page);
+    for (const k of rows) found.add(k);
+    const listLen = Array.isArray(page) ? page.length : Array.isArray(page?.list) ? page.list.length : 0;
+    const total = Number(page?.total);
+    cursor += listLen;
+    if (listLen < size || listLen === 0) break;
+    if (Number.isFinite(total) && cursor >= total) break;
+  }
+  return found;
+}
+
 function _msg(e) {
   return String(e?.message || e || "unknown error");
 }

@@ -73,6 +73,7 @@ import {
   isOpReturnScript,
   isP2tr,
   makeOpReturnScript,
+  noSpendableError,
   outputVsize,
   selectInputs,
   xOnlyFromCompressedHex,
@@ -394,7 +395,7 @@ export function maxCommitAmountFor(leafScriptLen) {
  *
  * → { psbtHex, walletInputIndexes, feeSats, changeSats, changeOmitted, estimatedVsize, inputs }
  */
-export function buildRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAddress, deployerPubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker }) {
+export function buildRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAddress, deployerPubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats = 0 }) {
   validateTicker(ticker);
   if (!commit || typeof commit.txid !== "string" || !/^[0-9a-f]{64}$/i.test(commit.txid) || !Number.isInteger(commit.vout) || !Number.isInteger(Number(commit.sats)) || Number(commit.sats) < DUST_SATS) {
     throw new Error("reveal: commit outpoint { txid, vout, sats } is required");
@@ -405,8 +406,9 @@ export function buildRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAdd
   const satVb = checkedFeeRate(feeRateSatVb);
   const commitSats = Number(commit.sats);
 
-  const spendable = filterSpendable(utxos, tokenOutpoints).filter((u) => !(u.txid.toLowerCase() === commit.txid.toLowerCase() && u.vout === commit.vout));
+  const spendable = filterSpendable(utxos, tokenOutpoints, { minSats: minInputSats }).filter((u) => !(u.txid.toLowerCase() === commit.txid.toLowerCase() && u.vout === commit.vout));
   if (spendable.length === 0) {
+    if (minInputSats > DUST_SATS) throw noSpendableError(deployerAddress, minInputSats);
     throw new Error(`no spendable BTC at ${deployerAddress} for the reveal — a deployer-owned input is required (§8.3)`);
   }
 

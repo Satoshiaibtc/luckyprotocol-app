@@ -315,6 +315,15 @@ function runScenario(label, sellerType, buyerType) {
     () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: utxos.slice(0, 2), tokenOutpoints, feeRateSatVb: 8 }),
     /no spendable BTC/,
   );
+  // M-8: on a non-asset-safe list the fee-input floor applies to the buyer's inputs too
+  {
+    const floored = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, minInputSats: 50_000 });
+    assert.deepEqual(floored.inputs, [{ txid: T(5), vout: 2, sats: 90_000 }], `${label}: only the 90,000-sat output clears a 50,000-sat floor`);
+    assert.throws(
+      () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, minInputSats: 100_000 }),
+      /no asset-safe UTXO list/,
+    );
+  }
   // Fee-rate safety cap applies to fills too
   assert.throws(
     () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 5_000 }),

@@ -30,6 +30,7 @@ import {
   PROVIDER_IDS,
   PROVIDER_META,
   WALLET_STORAGE_KEY,
+  collectInscriptionOutpoints,
   defaultProviderId,
   firstAccount,
   isConflictError,
@@ -315,15 +316,22 @@ export async function getBalance() {
 }
 
 /**
- * Spendable BTC UTXOs as `[{ txid, vout, sats }]`.
+ * Spendable BTC UTXOs as `{ source, assetSafe, utxos: [{ txid, vout, sats }], excludedOutpoints }`.
  *
  * `assetSafe:true` when the provider offers its own asset-aware list
  * (UniSat `getBitcoinUtxos()` excludes inscription / rune carriers).
  * OKX has no such method (the mock omits it on purpose), so the rows come
- * from the indexer's `/btc-utxos/:addr` CONFIRMED set with `assetSafe:false`
- * — the UI warns that Ordinals / Runes on that address could be spent as
- * fees. Either way the PSBT builder applies the §4 filter (≤546 sats +
- * token outpoints) on top.
+ * from the indexer's `/btc-utxos/:addr` CONFIRMED set. On that path
+ * (audit M-8):
+ *   * if the provider has `getInscriptions`, every inscription outpoint is
+ *     paged out and dropped → `assetSafe:"inscriptions-only"` (runes are
+ *     still not covered — no provider exposes a runes UTXO list and the
+ *     indexer is bitcoind-only); a failing pager degrades to `false`
+ *   * otherwise `assetSafe:false`
+ * Either way the builders apply the §4 filter (≤ 546 sats + token
+ * outpoints) and, for any `assetSafe !== true` list, the 10,000-sat
+ * fee-input floor (psbt.minFeeInputSats); the UI shows the notice and
+ * lists the inputs at signing time.
  */
 export async function getBitcoinUtxos(address) {
   const p = need();
@@ -335,14 +343,23 @@ export async function getBitcoinUtxos(address) {
     } catch (e) {
       throw new Error(`${name} getBitcoinUtxos failed: ${e?.message || e}`);
     }
-    return { source: current.id, assetSafe: true, utxos: normalizeUtxoList(raw) };
+    return { source: current.id, assetSafe: true, utxos: normalizeUtxoList(raw), excludedOutpoints: [] };
   }
   const rows = await indexer.btcUtxos(address);
-  return {
-    source: "indexer",
-    assetSafe: false,
-    utxos: rows.filter((u) => u.confirmed).map(({ txid, vout, sats }) => ({ txid, vout, sats })),
-  };
+  let utxos = rows.filter((u) => u.confirmed).map(({ txid, vout, sats }) => ({ txid, vout, sats }));
+  let assetSafe = false;
+  let excludedOutpoints = [];
+  if (typeof p.getInscriptions === "function") {
+    try {
+      const inscribed = await collectInscriptionOutpoints((cursor, size) => p.getInscriptions(cursor, size));
+      excludedOutpoints = utxos.filter((u) => inscribed.has(`${u.txid}:${u.vout}`)).map(({ txid, vout }) => ({ txid, vout }));
+      utxos = utxos.filter((u) => !inscribed.has(`${u.txid}:${u.vout}`));
+      assetSafe = "inscriptions-only";
+    } catch {
+      assetSafe = false; // the pager failed: treat the whole list as unsafe
+    }
+  }
+  return { source: "indexer", assetSafe, utxos, excludedOutpoints };
 }
 
 /**

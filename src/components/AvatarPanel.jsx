@@ -9,6 +9,7 @@ import { fmtInt, fmtTime, txUrl, shortTxid, shortAddr } from "../lib/format.js";
 import TokenAvatar from "./TokenAvatar.jsx";
 import FeeSelector from "./FeeSelector.jsx";
 import UtxoSafetyNotice from "./UtxoSafetyNotice.jsx";
+import { SpentInputs } from "./TxProgress.jsx";
 import Led from "./hud/Led.jsx";
 
 const PHASES = ["Commit", "Reveal", "Confirm"];
@@ -536,6 +537,7 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
           network fee <span className="mono">{fmtInt(av.commitFeeSats)} sats</span>
           {av.commitFeeRate ? ` @ ${av.commitFeeRate} sat/vB` : ""}
           {av.utxoSource === "indexer" ? " · inputs from indexer (no wallet UTXO API)" : ""}
+          <SpentInputs inputs={av.signingInputs} assetSafe={av.assetSafe} />
         </>
       );
       break;
@@ -560,6 +562,7 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
         <>
           {av.revealInputCount} wallet input{av.revealInputCount === 1 ? "" : "s"} · network fee <span className="mono">{fmtInt(av.revealFeeSats)} sats</span>
           {av.revealFeeRate ? ` @ ${av.revealFeeRate} sat/vB` : ""} · {links}
+          <SpentInputs inputs={av.signingInputs} assetSafe={av.assetSafe} />
         </>
       );
       break;

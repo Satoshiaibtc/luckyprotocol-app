@@ -5,7 +5,7 @@ import { estimateMineFeeSats } from "../lib/psbt.js";
 import { missingFeeHint } from "../lib/feechoice.js";
 import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS, ACTIVATION_HEIGHT } from "../lib/payloads.js";
 import { fmtInt, fmtTime, txUrl, shortTxid } from "../lib/format.js";
-import { ConnectPrompt } from "./TxProgress.jsx";
+import { ConnectPrompt, SpentInputs } from "./TxProgress.jsx";
 import TipReadout from "./TipReadout.jsx";
 import EVReadout from "./EVReadout.jsx";
 import HashReveal from "./HashReveal.jsx";
@@ -177,6 +177,7 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk, fee, feeRate }) 
           {mine.inputCount} input{mine.inputCount === 1 ? "" : "s"} · network fee <span className="mono">{fmtInt(mine.feeSats)} sats</span>
           {mine.feeRateSatVb ? ` @ ${mine.feeRateSatVb} sat/vB` : ""}
           {mine.utxoSource === "indexer" ? " · inputs from indexer (no wallet UTXO API)" : ""}
+          <SpentInputs inputs={mine.inputs} assetSafe={mine.assetSafe} />
         </>
       );
       break;

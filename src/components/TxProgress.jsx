@@ -1,12 +1,41 @@
 import { fmtInt, txUrl, shortTxid } from "../lib/format.js";
+import { MIN_FEE_INPUT_SATS_UNSAFE } from "../lib/psbt.js";
 import { isMobileBrowser } from "../lib/wallet.js";
 import { PROVIDER_IDS, PROVIDER_META } from "../lib/walletShapes.js";
 import { useApp } from "../context.js";
 import WalletMobileGuide from "./WalletMobileGuide.jsx";
 
 /**
+ * The inputs a PSBT is about to spend, shown at signing time (audit M-8).
+ * With an asset-safe list it is a plain listing; without one it carries
+ * the warning that any of these outputs could hold Ordinals or Runes the
+ * indexer cannot see (inscriptions are excluded when the wallet can list
+ * them; outputs under the floor are never used).
+ */
+export function SpentInputs({ inputs, assetSafe }) {
+  if (!Array.isArray(inputs) || inputs.length === 0) return null;
+  const unsafe = assetSafe !== true;
+  return (
+    <div className={`spent-inputs${unsafe ? " warn" : ""}`}>
+      <span className="label">Spending</span>{" "}
+      {inputs.map((u, i) => (
+        <span key={`${u.txid}:${u.vout}`} className="mono" title={`${u.txid}:${u.vout}`}>
+          {i ? " · " : ""}
+          {shortTxid(u.txid, 6, 4)}:{u.vout} ({fmtInt(u.sats)} sats)
+        </span>
+      ))}
+      {unsafe ? (
+        <span className="muted">
+          {" "}— this wallet has no asset-safe UTXO list: {assetSafe === "inscriptions-only" ? "inscriptions the wallet lists are excluded and Runes cannot be detected" : "Ordinals or Runes on these outputs cannot be detected"}; outputs under {fmtInt(MIN_FEE_INPUT_SATS_UNSAFE)} sats are never used.
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * One status line for every sign-and-broadcast flow (buy / sell / split /
- * cancel / create). `flow` = { phase, txid, error, feeSats, detail } with
+ * cancel / create). `flow` = { phase, txid, error, feeSats, detail, inputs, assetSafe } with
  * phase ∈ idle | verifying | building | signing | broadcasting | pending | confirmed | error.
  */
 export default function TxProgress({ flow, status, labels = {}, onReset, idleText }) {
@@ -38,6 +67,7 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
           network fee <span className="mono">{fmtInt(flow.feeSats)} sats</span>
           {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}
           {flow.detail ? ` · ${flow.detail}` : ""}
+          <SpentInputs inputs={flow.inputs} assetSafe={flow.assetSafe} />
         </>
       ) : flow.detail || null;
       break;

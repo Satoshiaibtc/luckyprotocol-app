@@ -8,7 +8,9 @@ import {
   PROVIDER_META,
   WALLET_STORAGE_KEY,
   chipLabel,
+  collectInscriptionOutpoints,
   defaultProviderId,
+  inscriptionOutpoints,
   firstAccount,
   isConflictError,
   normalizeBalance,
@@ -108,6 +110,40 @@ assert.equal(chipLabel("nope", "bc1p…62s"), "bc1p…62s");
   assert.equal(defaultProviderId(null, ["unisat", "okx"]), null, "two injected → user must choose");
   assert.equal(defaultProviderId("unisat", ["unisat", "okx"]), "unisat", "connected one wins");
   assert.equal(defaultProviderId(null, []), null);
+}
+
+// ---- M-8: inscription outpoints from getInscriptions pages ------------------------------------------
+{
+  const A = "aa".repeat(32);
+  const B = "bb".repeat(32);
+  const C = "cc".repeat(32);
+  assert.deepEqual(
+    inscriptionOutpoints({ total: 3, list: [{ inscriptionId: `${A}i0`, output: `${A.toUpperCase()}:1` }, { location: `${B}:0:333` }, { utxo: { txid: C, vout: "2" } }, { output: "nope" }, null] }),
+    [`${A}:1`, `${B}:0`, `${C}:2`],
+    "output / location / utxo shapes, malformed rows skipped",
+  );
+  assert.deepEqual(inscriptionOutpoints([{ output: `${A}:0` }]), [`${A}:0`], "bare array page");
+  assert.deepEqual(inscriptionOutpoints(undefined), []);
+  // paging: 2 full pages + 1 short page, cursor advances by list length
+  const pages = [
+    { total: 5, list: [{ output: `${A}:0` }, { output: `${A}:1` }] },
+    { total: 5, list: [{ output: `${B}:0` }, { output: `${B}:1` }] },
+    { total: 5, list: [{ output: `${C}:0` }] },
+  ];
+  const calls = [];
+  const set = await collectInscriptionOutpoints((cursor, size) => { calls.push([cursor, size]); return pages[calls.length - 1]; }, { size: 2 });
+  assert.deepEqual([...set].sort(), [`${A}:0`, `${A}:1`, `${B}:0`, `${B}:1`, `${C}:0`]);
+  assert.deepEqual(calls, [[0, 2], [2, 2], [4, 2]]);
+  // total reached exactly at a page boundary → no extra call
+  const calls2 = [];
+  await collectInscriptionOutpoints((cursor) => { calls2.push(cursor); return { total: 2, list: [{ output: `${A}:0` }, { output: `${A}:1` }] }; }, { size: 2 });
+  assert.deepEqual(calls2, [0]);
+  // maxPages bounds a runaway provider
+  let n = 0;
+  await collectInscriptionOutpoints(() => { n += 1; return { total: 1e9, list: [{ output: `${A}:${n}` }, { output: `${B}:${n}` }] }; }, { size: 2, maxPages: 3 });
+  assert.equal(n, 3);
+  // a throwing pager rejects (the wallet layer then falls back to assetSafe:false)
+  await assert.rejects(collectInscriptionOutpoints(() => { throw new Error("provider down"); }), /provider down/);
 }
 
 // ---- conflict detection ------------------------------------------------------------------------

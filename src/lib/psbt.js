@@ -349,17 +349,48 @@ export function estimateMineFeeSats({ address, ticker, feeRateSatVb, inputCount 
 export const outpointKey = (u) => `${u.txid}:${u.vout}`;
 
 /**
- * Apply the §4 builder obligation: drop every UTXO with value ≤ DUST_SATS
- * and every outpoint listed in `tokenOutpoints`. Returns spendable rows.
+ * Fee-input floor when the UTXO list is NOT asset-safe (OKX Wallet and the
+ * mock have no asset-aware list; the indexer's raw BTC view cannot tell an
+ * inscription or rune carrier from plain BTC). ord's default postage is
+ * 10,000 sats, so anything below it is treated as a possible carrier and
+ * never spent as a fee input (audit M-8). Runes are still not detectable
+ * this way — the notice says so.
  */
-export function filterSpendable(utxos, tokenOutpoints) {
+export const MIN_FEE_INPUT_SATS_UNSAFE = 10_000;
+
+/** The `minInputSats` a builder should use for a UTXO list with this `assetSafe` flag. */
+export function minFeeInputSats(assetSafe) {
+  return assetSafe === true ? 0 : MIN_FEE_INPUT_SATS_UNSAFE;
+}
+
+/**
+ * Apply the §4 builder obligation: drop every UTXO with value ≤ DUST_SATS
+ * and every outpoint listed in `tokenOutpoints`; with `minSats`, also drop
+ * everything below that floor (see MIN_FEE_INPUT_SATS_UNSAFE). Returns
+ * spendable rows.
+ */
+export function filterSpendable(utxos, tokenOutpoints, { minSats = 0 } = {}) {
   const exclude = new Set((tokenOutpoints || []).map(outpointKey));
+  const floor = Number.isFinite(Number(minSats)) ? Number(minSats) : 0;
   return (utxos || []).filter((u) => {
     const sats = Number(u.sats);
     if (!Number.isInteger(sats) || sats <= DUST_SATS) return false;
+    if (sats < floor) return false;
     if (exclude.has(outpointKey(u))) return false;
     return true;
   });
+}
+
+/** The "nothing to spend" error, naming the floor when one was applied. */
+export function noSpendableError(address, minSats) {
+  if (minSats > DUST_SATS) {
+    return new Error(
+      `no usable fee input at ${address}: this wallet has no asset-safe UTXO list, so only outputs of at least ` +
+      `${minSats.toLocaleString("en-US")} sats that are not token-bearing are spent (smaller ones may carry Ordinals) — ` +
+      `send more than ${minSats.toLocaleString("en-US")} sats of plain BTC to this address, or use a wallet with an asset-safe UTXO list`,
+    );
+  }
+  return new Error(`no spendable BTC at ${address} — every UTXO is either ≤ ${DUST_SATS} sats or token-bearing`);
 }
 
 /**
@@ -409,16 +440,13 @@ function buildUnsigned({
   outputs,
   opReturnData,
   requireChange,
+  minInputSats = 0,
 }) {
   const { type, script } = decodeAddress(address);
   const tapInternalKey = type === "tr" ? xOnlyFromCompressedHex(pubkeyHex) : null;
 
-  const spendable = filterSpendable(utxos, tokenOutpoints);
-  if (spendable.length === 0) {
-    throw new Error(
-      `no spendable BTC at ${address} — every UTXO is either ≤ ${DUST_SATS} sats or token-bearing`,
-    );
-  }
+  const spendable = filterSpendable(utxos, tokenOutpoints, { minSats: minInputSats });
+  if (spendable.length === 0) throw noSpendableError(address, minInputSats);
 
   const satVb = checkedFeeRate(feeRateSatVb);
 
@@ -535,7 +563,7 @@ function buildUnsigned({
  * matters: a token-bearing input here would strict-burn its tokens. Used
  * for the §8.5 avatar commit (paying the commit P2TR address).
  */
-export function buildPayPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, toAddress, amountSats }) {
+export function buildPayPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, toAddress, amountSats, minInputSats = 0 }) {
   decodeAddress(toAddress);
   const amount = Number(amountSats);
   if (!Number.isInteger(amount) || amount < DUST_SATS) {
@@ -550,6 +578,7 @@ export function buildPayPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRat
     outputs: [{ address: toAddress, value: amount }], // vout0 payment
     opReturnData: null,
     requireChange: false,                             // vout1 change, optional
+    minInputSats,
   });
 }
 
@@ -568,7 +597,7 @@ export function estimatePayFeeSats({ address, toAddress, feeRateSatVb, inputCoun
  * The §4 filter matters here more than anywhere: a DEPLOY funded with a
  * token UTXO burns those tokens.
  */
-export function buildDeployPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker }) {
+export function buildDeployPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats = 0 }) {
   const payload = buildDeployPayload(ticker);
   return buildUnsigned({
     address,
@@ -582,6 +611,7 @@ export function buildDeployPsbt({ address, pubkeyHex, utxos, tokenOutpoints, fee
     ],
     opReturnData: payload,                                              // vout2
     requireChange: false,                                               // vout3 optional
+    minInputSats,
   });
 }
 
@@ -607,7 +637,7 @@ export function estimateDeployFeeSats({ address, ticker, feeRateSatVb, inputCoun
  *
  * @returns {{ psbtHex: string, feeSats: number, inputIndexes: number[], ... }}
  */
-export function buildMinePsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker }) {
+export function buildMinePsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats = 0 }) {
   const payload = buildMinePayload(ticker);
   return buildUnsigned({
     address,
@@ -621,6 +651,7 @@ export function buildMinePsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRa
     ],
     opReturnData: payload,                                         // vout2
     requireChange: false,                                          // vout3 optional
+    minInputSats,
   });
 }
 
@@ -641,6 +672,7 @@ export function buildSendPsbt({
   ticker,
   amount,
   toAddress,
+  minInputSats = 0,
 }) {
   decodeAddress(toAddress);
   const payload = buildSendPayload({ ticker, amount, toOutIdx: 0, changeOutIdx: 3 });
@@ -674,7 +706,7 @@ export function buildSendPsbt({
 
   const { type, script } = decodeAddress(address);
   const tapInternalKey = type === "tr" ? xOnlyFromCompressedHex(pubkeyHex) : null;
-  const spendable = filterSpendable(feeUtxos, tokenOutpoints);
+  const spendable = filterSpendable(feeUtxos, tokenOutpoints, { minSats: minInputSats });
 
   const satVb = checkedFeeRate(feeRateSatVb);
 
@@ -693,6 +725,7 @@ export function buildSendPsbt({
   for (let pass = 0; pass < 3; pass++) {
     const target = fixedOutValue + fee + DUST_SATS - carrierValue;
     if (target > 0) {
+      if (spendable.length === 0) throw noSpendableError(address, minInputSats);
       ({ selected, total } = selectInputs({ utxos: spendable, target, excludeKeys: [] }));
     } else {
       selected = [];
@@ -740,6 +773,7 @@ export function buildSendPsbt({
     psbtHex: hex.encode(tx.toPSBT()),
     feeSats: fee,
     inputIndexes,
+    inputs: [...carriers, ...selected].map((u) => ({ txid: u.txid, vout: u.vout, sats: Number(u.sats) })),
     changeSats: change,
     changeOmitted: false,
     feeRateSatVb: satVb,
