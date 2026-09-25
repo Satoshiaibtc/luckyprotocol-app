@@ -134,7 +134,8 @@ export default function TokenPage({ ticker, params, navigate }) {
           <div className="token-head-main">
             <h1 className="ticker">{token.ticker}</h1>
             <div className="meta">
-              by <AddrLink address={token.deployer} self={address} head={4} tail={4} /> · tx <TxLink txid={token.deploy_txid} head={4} tail={3} /> ·{" "}
+              {/* No "tx …" segment on phones — the age must fit on the one line. */}
+              by <AddrLink address={token.deployer} self={address} head={4} tail={4} /> ·{" "}
               <a className="mono" href={blockUrl(token.deploy_block)} target="_blank" rel="noopener noreferrer">
                 #{fmtInt(token.deploy_block)}
               </a>

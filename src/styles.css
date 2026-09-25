@@ -618,8 +618,21 @@ input[type="search"]::-webkit-search-decoration {
   .wordmark .mark {
     display: none;
   }
+  .wordmark {
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
   .tip-chip {
     display: none;
+  }
+  /* "SIM · bc1p…62s" chip (still 44px tall) and the SYS pill tighten so the wordmark keeps its room */
+  .topbar-right .wallet-addr {
+    padding: 0 6px;
+    gap: 5px;
+    font-size: 11px;
+  }
+  .topbar-right .pill {
+    padding: 0 6px;
   }
 }
 
@@ -1034,6 +1047,14 @@ input[type="search"]::-webkit-search-decoration {
     font-size: 19px;
   }
 }
+/* 360px phones: three ~89px columns — the tip height (6 digits + comma, no '#') needs 17px. */
+@media (max-width: 400px) {
+  .telemetry .hero-num {
+    font-size: 17px;
+    letter-spacing: -0.01em;
+  }
+}
+
 .board-controls {
   display: flex;
   align-items: center;

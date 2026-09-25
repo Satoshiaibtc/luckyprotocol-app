@@ -7,7 +7,7 @@ import { ledFromPoll } from "../components/hud/Led.jsx";
 import { fmtInt } from "../lib/format.js";
 import { DEPLOY_PROTOCOL_FEE_SATS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
-
+import { useIsMobile } from "../hooks/useMediaQuery.js";
 
 const SORTS = [
   { id: "active", label: "Active" },
@@ -32,6 +32,7 @@ export function sortTokens(items, sort) {
 
 export default function Board({ notice }) {
   const { tokens, health, navigate } = useApp();
+  const mobile = useIsMobile();
   const [sort, setSort] = useState("active");
   const [q, setQ] = useState("");
 
@@ -66,11 +67,12 @@ export default function Board({ notice }) {
           <Panel as="div" title="Tokens" led={led}>
             <div className="hero-num">{fmtInt(health.data?.token_count ?? items.length)}</div>
           </Panel>
-          <Panel as="div" title="Mines settled" led={led}>
+          <Panel as="div" title={mobile ? "Mines" : "Mines settled"} led={led}>
             <div className="hero-num">{fmtInt(health.data?.mine_count)}</div>
           </Panel>
           <Panel as="div" title="Tip block" led={led}>
-            <div className="hero-num">{health.data?.tip_height ? `#${fmtInt(health.data.tip_height)}` : "—"}</div>
+            {/* Phones drop the '#': "#969,800" ellipsizes in a 360px-wide three-up. */}
+            <div className="hero-num hero-num-tip">{health.data?.tip_height ? `${mobile ? "" : "#"}${fmtInt(health.data.tip_height)}` : "—"}</div>
           </Panel>
         </div>
       </section>
