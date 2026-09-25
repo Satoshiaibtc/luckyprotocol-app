@@ -3,6 +3,7 @@
 // Node, no framework.
 import assert from "node:assert/strict";
 import { buildHeaders, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
+import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHost.js";
 
 // ---- L-14: _headers generated from VITE_INDEXER_URL ----------------------------------------------------
 {
@@ -34,4 +35,17 @@ import { buildHeaders, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-h
   console.log("headers: production CSP names only the indexer origin; no loopback, no mempool.space, no 'unsafe-inline'");
 }
 
-console.log("web: headers ok");
+// ---- L-15: *.pages.dev → canonical host ------------------------------------------------------------------
+{
+  assert.equal(CANONICAL_HOST, "app.luckyprotocolai.com");
+  assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", pathname: "/", search: "", hash: "#/token/LUCKY" }), "https://app.luckyprotocolai.com/#/token/LUCKY", "same path + hash on the canonical host");
+  assert.equal(canonicalRedirectTarget({ hostname: "abc123.luckyprotocol-app.pages.dev", pathname: "/", hash: "#/me" }), "https://app.luckyprotocolai.com/#/me", "preview deployments too");
+  assert.equal(canonicalRedirectTarget({ hostname: "LUCKYPROTOCOL-APP.PAGES.DEV", hash: "" }), "https://app.luckyprotocolai.com/", "case-insensitive");
+  assert.equal(canonicalRedirectTarget({ hostname: "app.luckyprotocolai.com", hash: "#/x" }), null, "already canonical");
+  assert.equal(canonicalRedirectTarget({ hostname: "localhost", hash: "#/x" }), null);
+  assert.equal(canonicalRedirectTarget({ hostname: "evil.pages.dev.example", hash: "" }), null, "suffix match, not substring");
+  assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", dev: true }), null, "dev builds never redirect");
+  assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", mock: true }), null, "mock builds never redirect");
+}
+
+console.log("web: headers, canonical host ok");
