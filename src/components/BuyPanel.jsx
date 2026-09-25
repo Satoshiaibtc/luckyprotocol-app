@@ -124,8 +124,8 @@ export default function BuyPanel({ ticker, token, onSettled }) {
       </div>
 
       <p className="fineprint">
-        A fill completes the seller&apos;s signed listing into a SEND. You pay the ask + {DUST_SATS} sats (your token slot) +{" "}
-        {SEND_PROTOCOL_FEE_SATS} sats protocol fee + network fee; your BTC change comes back as vout4 (≥ {DUST_SATS} sats, required).
+        A fill completes the seller&apos;s signed listing into a SEND. You pay the ask + {DUST_SATS} sats (your token slot, vout1) +{" "}
+        {SEND_PROTOCOL_FEE_SATS} sats protocol fee + {DUST_SATS} sats (your residual slot, vout4 — always present) + network fee; BTC change comes back as vout5 when it is at least {DUST_SATS} sats, otherwise it folds into the fee.
         If another buyer fills first, the network rejects yours and your funds stay exactly where they were.
       </p>
 
@@ -268,7 +268,9 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
         if (unisat.isConflictError(e)) throw new Error(RACE_MESSAGE);
         throw e;
       }
-      addPendingTokenOutpoints([{ txid, vout: 1 }]);
+      // vout1 = token slot, vout4 = residual slot (any other ticker riding on
+      // the seller's carrier is routed there); vout5, when present, is plain BTC.
+      addPendingTokenOutpoints([{ txid, vout: 1 }, { txid, vout: 4 }]);
       setFlow((f) => ({ ...f, phase: "pending", txid }));
     } catch (e) {
       setFlow((f) => ({ ...f, phase: "error", error: friendlyError(e) }));
@@ -320,6 +322,10 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
           <div>
             <dt>Protocol fee</dt>
             <dd className="mono">{fmtSats(SEND_PROTOCOL_FEE_SATS)}</dd>
+          </div>
+          <div>
+            <dt>Your residual slot</dt>
+            <dd className="mono">{fmtSats(DUST_SATS)}</dd>
           </div>
           <div>
             <dt>Network fee {flow.feeSats == null ? (feeRate ? `(est. @ ${feeRate} sat/vB)` : "(no estimate)") : ""}</dt>

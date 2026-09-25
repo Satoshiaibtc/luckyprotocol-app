@@ -3,7 +3,10 @@
 // with btc-signer, and asserts the spec §2/§4/§6 layout rules:
 //   * dust (≤546) and token-bearing outpoints are never selected as inputs
 //   * vout0 546 → self/recipient, vout1 546 → PROJECT_FEE_ADDRESS, vout2 OP_RETURN
-//   * MINE folds sub-dust change into the fee; SEND refuses to build without change
+//   * MINE folds sub-dust change into the fee
+//   * SEND (H-1(A)): every token carrier is exactly 546 sats — vout0 recipient
+//     slot, vout3 residual slot (ALWAYS present) — and BTC change is a separate
+//     vout4 that folds into the fee when sub-dust; payload stays |0|3
 //   * P2TR inputs carry tapInternalKey; P2WPKH inputs do not
 //   * inputs − outputs == reported fee
 import assert from "node:assert/strict";
@@ -15,6 +18,10 @@ import {
   buildDeployPsbt,
   estimateMineFeeSats,
   estimateDeployFeeSats,
+  estimateSendFeeSats,
+  SEND_TO_OUT,
+  SEND_CHANGE_OUT,
+  SEND_BTC_CHANGE_VOUT,
   decodeAddress,
   extractRawTxHex,
   expectPsbtPayload,
@@ -139,40 +146,126 @@ assert.throws(
   /no spendable BTC/,
 );
 
-// ---- SEND p2tr → p2wpkh ----------------------------------------------------------------------
+// ---- SEND layout (H-1(A)) -------------------------------------------------------------------------
+//   vout0 546 → recipient · vout1 546 → fee · vout2 OP_RETURN |0|3 · vout3 546 → self (residual
+//   slot, always) · vout4 BTC change → self (only when ≥ 546)
+assert.equal(SEND_TO_OUT, 0);
+assert.equal(SEND_CHANGE_OUT, 3);
+assert.equal(SEND_BTC_CHANGE_VOUT, 4);
+
+/** Assert the fixed part of the H-1(A) SEND layout; returns the parsed tx parts. */
+function checkSendLayout(label, r, { self, to, payload }) {
+  const { ins, outs } = parse(r.psbtHex);
+  assert.ok(outs.length === 4 || outs.length === 5, `${label}: 4 outputs (change folded) or 5 (with change), got ${outs.length}`);
+  assert.equal(outs.length, r.outputCount, `${label}: outputCount reported`);
+  assert.equal(addrOf(outs[0].script), to, `${label}: vout0 → recipient`);
+  assert.equal(outs[0].amount, 546n, `${label}: vout0 recipient slot is exactly 546`);
+  assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS, `${label}: vout1 → fee address`);
+  assert.equal(outs[1].amount, 546n, `${label}: vout1 exact protocol fee`);
+  assert.equal(outs[2].script[0], 0x6a, `${label}: vout2 OP_RETURN`);
+  assert.equal(outs[2].amount, 0n);
+  assert.equal(payloadToString(outs[2].script.slice(2)), payload, `${label}: payload string unchanged (|0|3)`);
+  assert.equal(addrOf(outs[3].script), self, `${label}: vout3 residual slot → sender`);
+  assert.equal(outs[3].amount, 546n, `${label}: vout3 residual slot is exactly 546 (always present)`);
+  assert.equal(r.residualVout, 3);
+  if (outs.length === 5) {
+    assert.equal(r.changeOmitted, false, `${label}: changeOmitted false with 5 outputs`);
+    assert.equal(r.changeVout, 4);
+    assert.equal(addrOf(outs[4].script), self, `${label}: vout4 BTC change → sender`);
+    assert.equal(outs[4].amount, BigInt(r.changeSats), `${label}: vout4 == changeSats`);
+    assert.ok(outs[4].amount >= 546n, `${label}: vout4 ≥ dust`);
+  } else {
+    assert.equal(r.changeOmitted, true, `${label}: changeOmitted true with 4 outputs`);
+    assert.equal(r.changeVout, null);
+    assert.equal(r.changeSats, 0);
+  }
+  // every carrier output is exactly 546 sats
+  for (const i of [0, 1, 3]) assert.equal(outs[i].amount, 546n, `${label}: vout${i} is a 546-sat output`);
+  const inSum = ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n);
+  const outSum = outs.reduce((s, o) => s + o.amount, 0n);
+  assert.equal(inSum - outSum, BigInt(r.feeSats), `${label}: fee == inputs − outputs`);
+  return { ins, outs };
+}
+
+// ---- SEND p2tr → p2wpkh, with BTC change (5 outputs) ------------------------------------------------
 {
   const r = buildSendPsbt({
     address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints,
     tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 100, toAddress: p2wpkhAddr,
   });
-  const { ins, outs } = parse(r.psbtHex);
-  assert.equal(outs.length, 4, "SEND: 4 outputs");
+  const { ins, outs } = checkSendLayout("SEND p2tr→p2wpkh", r, { self: p2trAddr, to: p2wpkhAddr, payload: "LUCKY-20|SEND|LUCKY|100|0|3" });
+  assert.equal(outs.length, 5, "SEND: 5 outputs when change is ≥ dust");
   assert.equal(hex.encode(ins[0].txid), T(3), "SEND: token carrier pinned as input 0");
-  // The carrier is a 20_000-sat token-bearing UTXO (a prior SEND's residual
-  // change output, not dust). It MUST be spent at its real value: the
+  // The carrier here is a 20_000-sat token-bearing UTXO (a third-party
+  // builder's fat carrier). It MUST be spent at its real value: the
   // segwit/taproot sighash commits to the input amount, so signing it as
   // 546 would produce an invalid signature. Resolved from `utxos` by outpoint.
   assert.equal(ins[0].witnessUtxo.amount, 20_000n, "SEND: carrier spent at its real on-chain value");
-  assert.equal(addrOf(outs[0].script), p2wpkhAddr, "SEND: vout0 recipient");
-  assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS);
-  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKY-20|SEND|LUCKY|100|0|3");
-  assert.equal(addrOf(outs[3].script), p2trAddr, "SEND: vout3 change → self");
-  assert.ok(outs[3].amount >= 546n, "SEND: change ≥ dust");
-  const inSum = ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n);
-  const outSum = outs.reduce((s, o) => s + o.amount, 0n);
-  assert.equal(inSum - outSum, BigInt(r.feeSats));
+  assert.equal(ins.length, 1, "SEND: the fat carrier alone funds 3 × 546 + fee, no fee input needed");
+  // sign-time guard sees TO=0 / CHANGE=3
+  assert.deepEqual(expectPsbtPayload(r.psbtHex, { op: "SEND", ticker: "LUCKY", amount: 100 }), { op: "SEND", ticker: "LUCKY", amount: 100, toOutIdx: 0, changeOutIdx: 3 });
 }
 
-// ---- SEND must refuse when change would be sub-dust ------------------------------------------
-// 2_500 funding + a 546-sat carrier covers the 1_092 fixed outputs + fee but
-// leaves change < 546 → the committed vout3 would be missing → refuse.
+// ---- SEND p2wpkh → p2tr with a 546-sat carrier: fee inputs get selected ----------------------------
+{
+  const r = buildSendPsbt({
+    address: p2wpkhAddr, pubkeyHex: P2WPKH_PUB, utxos, tokenOutpoints: [],
+    tokenUtxos: [{ txid: T(1), vout: 0 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 7, toAddress: p2trAddr,
+  });
+  const { ins, outs } = checkSendLayout("SEND p2wpkh→p2tr", r, { self: p2wpkhAddr, to: p2trAddr, payload: "LUCKY-20|SEND|LUCKY|7|0|3" });
+  assert.equal(outs.length, 5);
+  assert.equal(hex.encode(ins[0].txid), T(1), "546-sat carrier pinned as input 0 at its real value");
+  assert.equal(ins[0].witnessUtxo.amount, 546n);
+  assert.ok(ins.length >= 2, "a fee input was added");
+  for (const inp of ins.slice(1)) assert.ok(inp.witnessUtxo.amount > 546n, "fee inputs are never dust");
+  assert.equal(ins[1].tapInternalKey, undefined, "no tapInternalKey on P2WPKH");
+}
+
+// ---- SEND folds sub-dust BTC change into the fee (residual slot stays) ----------------------------------
+{
+  // Learn the one-fee-input fee, then fund exactly 3 × 546 + fee + 100 − carrier:
+  // change would be 100 sats < 546 → folded (4 outputs), never a missing slot.
+  const probe = buildSendPsbt({
+    address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(5), vout: 0, sats: 500_000 }], tokenOutpoints: [],
+    tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr,
+  });
+  assert.equal(parse(probe.psbtHex).ins.length, 2);
+  const feeWithChange = probe.feeSats;
+  const tight = [{ txid: T(5), vout: 0, sats: 3 * 546 + feeWithChange + 100 - 546 }];
+  const r = buildSendPsbt({
+    address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: tight, tokenOutpoints: [],
+    tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr,
+  });
+  const { outs } = checkSendLayout("SEND folded", r, { self: p2trAddr, to: p2wpkhAddr, payload: "LUCKY-20|SEND|LUCKY|1|0|3" });
+  assert.equal(outs.length, 4, "sub-dust change folds into the fee — vout3 residual slot still present");
+  assert.equal(r.changeOmitted, true);
+  assert.ok(r.feeSats > feeWithChange - 50 && r.feeSats < feeWithChange + 200, `folded fee absorbs the remainder: ${r.feeSats}`);
+  // …and with the dust headroom back it builds with vout4 == 546 + 100
+  const ok = buildSendPsbt({
+    address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(5), vout: 0, sats: tight[0].sats + 546 }], tokenOutpoints: [],
+    tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr,
+  });
+  checkSendLayout("SEND +headroom", ok, { self: p2trAddr, to: p2wpkhAddr, payload: "LUCKY-20|SEND|LUCKY|1|0|3" });
+  assert.equal(ok.changeSats, 646, "change accounted exactly");
+  assert.equal(ok.changeVout, 4);
+}
+
+// ---- SEND insufficient: a lone 546-sat carrier + 1,200 sats cannot pay 3 slots + fee -------------------------
 assert.throws(
   () => buildSendPsbt({
-    address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(5), vout: 0, sats: 2_500 }], tokenOutpoints: [],
+    address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(5), vout: 0, sats: 1_200 }], tokenOutpoints: [],
     tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr,
   }),
-  /change output required|insufficient funds/,
+  /insufficient funds/,
 );
+
+// ---- SEND fee preview ----------------------------------------------------------------------------------
+{
+  const prevS = estimateSendFeeSats({ address: p2trAddr, toAddress: p2wpkhAddr, ticker: "LUCKY", amount: 100, feeRateSatVb: 8 });
+  assert.ok(prevS.vsize > 200 && prevS.vsize < 330, `send preview vsize plausible (2 inputs, 4 address outputs + OP_RETURN): ${prevS.vsize}`);
+  assert.ok(Math.abs(prevS.feeSats - prevS.vsize * 8) <= 8, "fee == rate × (unrounded) vsize");
+  assert.equal(prevS.slotSats, 3 * 546, "recipient slot + protocol fee + residual slot");
+}
 
 // ---- SEND must refuse a carrier whose on-chain value is unknown ----------------------------------
 assert.throws(
@@ -256,6 +349,7 @@ assert.throws(
     const sIns = parse(s.psbtHex).ins.map((i) => hex.encode(i.txid));
     assert.ok(sIns.includes(T(3)), "carrier pinned");
     assert.ok(!sIns.includes(T(2)), "3,000-sat output never a fee input under the floor");
+    checkSendLayout("SEND floored", s, { self: p2trAddr, to: p2wpkhAddr, payload: "LUCKY-20|SEND|LUCKY|100|0|3" });
     assert.throws(
       () => buildSendPsbt({
         address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(2), vout: 1, sats: 3_000 }], tokenOutpoints: [],

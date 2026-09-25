@@ -49,13 +49,18 @@ export const LISTING_SIGHASH = 0x83;
 export const MIN_PRICE_SATS = DUST_SATS;            // §7.1 price_sats ≥ 546
 export const MAX_PRICE_SATS = 21e14;                 // §7.4
 /**
- * Fill layout (§7.2): vout1 = buyer token slot (TO_OUT), vout4 = buyer
- * change (CHANGE_OUT, mandatory ≥ 546 — it doubles as the residual slot).
- * The two MUST differ: equal indices do not parse (§2.3) and the indexer
- * would strict-burn the seller's tokens.
+ * Fill layout (§7.2, H-1(A)): vout1 = buyer token slot (TO_OUT, 546),
+ * vout4 = buyer residual slot (CHANGE_OUT, 546 — ALWAYS present), vout5 =
+ * buyer BTC change (optional, folded into the fee when < 546). TO_OUT and
+ * CHANGE_OUT MUST differ: equal indices do not parse (§2.3), the tx would
+ * be a plain spend and default routing would hand the seller's tokens to
+ * vout0 — i.e. back to the seller, with the buyer's price gone.
  */
 export const FILL_TO_OUT = 1;
 export const FILL_CHANGE_OUT = 4;
+export const FILL_BTC_CHANGE_VOUT = 5;
+/** Sats a fill adds on top of the price and the network fee: token slot + protocol fee + residual slot. */
+export const FILL_SLOT_SATS = DUST_SATS + SEND_PROTOCOL_FEE_SATS + DUST_SATS;
 
 const TXID_RE = /^[0-9a-f]{64}$/i;
 
@@ -327,7 +332,8 @@ function fillVsize({ sellerType, buyerType, buyerInputCount, outputAddresses, op
 
 /**
  * Display-only preview of a fill's cost before any UTXO is fetched: one
- * buyer input + the mandatory change output. Clamps the rate instead of throwing.
+ * buyer input, the three 546-sat slots and a change output. Clamps the
+ * rate instead of throwing.
  */
 export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 }) {
   const buyerType = decodeAddress(address).type;
@@ -337,7 +343,7 @@ export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 
     sellerType,
     buyerType,
     buyerInputCount: inputCount,
-    outputAddresses: [order.seller || address, address, PROJECT_FEE_ADDRESS, address],
+    outputAddresses: [order.seller || address, address, PROJECT_FEE_ADDRESS, address, address],
     opReturnScriptLen: makeOpReturnScript(payload).length,
   });
   const rate = Math.min(1_000, Math.max(1, Number(feeRateSatVb) || 1));
@@ -347,28 +353,55 @@ export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 
     vsize: Math.ceil(vsize),
     feeSats,
     priceSats: price,
-    totalSats: price + DUST_SATS + SEND_PROTOCOL_FEE_SATS + feeSats,
+    slotSats: FILL_SLOT_SATS,
+    totalSats: price + FILL_SLOT_SATS + feeSats,
   };
 }
 
 /**
+ * Structural check of a fill's outputs (shared by buildFillPsbt's self-check
+ * and finalizeFill's broadcast guard): vout[TO_OUT] and vout[CHANGE_OUT]
+ * are 546-sat address outputs (never OP_RETURN), the OP_RETURN sits at
+ * vout3, and the output count is 5 (no BTC change) or 6 (with it). Throws
+ * with a reason; returns { outputCount, hasChange }.
+ */
+export function checkFillLayout(tx) {
+  const n = tx.outputsLength;
+  if (n !== 5 && n !== 6) throw new Error(`fill has ${n} outputs — expected 5 (no BTC change) or 6`);
+  const scripts = outputScripts(tx);
+  if (!isOpReturnScript(scripts[3])) throw new Error("fill: vout3 is not the OP_RETURN output");
+  for (const [vout, what] of [[FILL_TO_OUT, "token slot"], [FILL_CHANGE_OUT, "residual slot"]]) {
+    const o = tx.getOutput(vout);
+    if (isOpReturnScript(o.script)) throw new Error(`fill: vout${vout} (${what}) must not be an OP_RETURN`);
+    if (o.amount !== BigInt(DUST_SATS)) throw new Error(`fill: vout${vout} (${what}) is ${o.amount} sats — a token carrier is exactly ${DUST_SATS}`);
+  }
+  if (tx.getOutput(2).amount !== BigInt(SEND_PROTOCOL_FEE_SATS)) throw new Error("fill: vout2 is not the exact protocol fee");
+  if (n === 6 && tx.getOutput(FILL_BTC_CHANGE_VOUT).amount < BigInt(DUST_SATS)) throw new Error("fill: vout5 BTC change is sub-dust");
+  return { outputCount: n, hasChange: n === 6 };
+}
+
+/**
  * Buyer side. Takes the seller's signed listing and completes it into the
- * §7.2 SEND layout:
+ * §7.2 SEND layout (H-1(A)):
  *
  *   vout0  price_sats → seller        (from the listing — untouched)
  *   vout1  546        → buyer         (token slot; TO_OUT = 1)
  *   vout2  546        → PROJECT_FEE_ADDRESS
  *   vout3  OP_RETURN  LUCKY-20|SEND|<T>|<AMT>|1|4
- *   vout4  change     → buyer         (CHANGE_OUT = 4; MANDATORY ≥ 546 —
- *                                      the payload commits it, so the build
- *                                      THROWS rather than fold it into the fee)
+ *   vout4  546        → buyer         (residual slot; CHANGE_OUT = 4 —
+ *                                      ALWAYS present, even when nothing
+ *                                      is left over)
+ *   vout5  BTC change → buyer         (optional; folded into the fee when
+ *                                      < 546, exactly like a MINE's change)
  *
  * Buyer inputs are filtered by the §4 builder obligation (≤546 sats and
  * every indexer-reported token outpoint are excluded). This is not just
- * hygiene: a token-bearing buyer input would make the input pool multi-
- * ticker and the indexer strict-burns anything a valid SEND does not route.
+ * hygiene: under per-ticker routing a token-bearing buyer input would have
+ * its tokens routed together with the seller's residual into vout4 — not
+ * destroyed, but moved without the buyer asking — and an inscribed sat
+ * would land in the seller's price output.
  *
- * @returns {{ psbtHex, inputIndexes: number[] (buyer's only), feeSats, totalSats, priceSats, changeSats }}
+ * @returns {{ psbtHex, inputIndexes: number[] (buyer's only), feeSats, totalSats, priceSats, changeSats, changeOmitted, changeVout, residualVout }}
  */
 export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, minInputSats = 0 }) {
   const v = verifyListing({ psbtHex: listingPsbtHex, order });
@@ -399,37 +432,48 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
 
   const payload = buildSendPayload({ ticker: order.ticker, amount: order.amount, toOutIdx: FILL_TO_OUT, changeOutIdx: FILL_CHANGE_OUT });
   const opReturnScript = makeOpReturnScript(payload);
-  const fixedOutValue = priceSats + DUST_SATS + SEND_PROTOCOL_FEE_SATS;
-  // vout4 (change) is committed by the payload, so it is part of the fixed
-  // layout: the estimate always counts it and the target always carries the
-  // dust headroom for it — exactly like buildSendPsbt's vout3.
-  const outputAddresses = [sellerAddress || address, address, PROJECT_FEE_ADDRESS, address];
+  // Fixed layout: price + token slot + fee + residual slot. The residual slot
+  // (vout4) is a 546-sat carrier the payload commits, so it is always in the
+  // estimate; vout5 (BTC change) is only there when `withChange`.
+  const fixedOutValue = priceSats + FILL_SLOT_SATS;
+  const fixedAddresses = [sellerAddress || address, address, PROJECT_FEE_ADDRESS, address];
 
-  let selected = [];
-  let total = 0;
-  let fee = 0;
-  for (let pass = 0; pass < 3; pass++) {
-    const target = fixedOutValue + fee + DUST_SATS - carrierSats;
-    ({ selected, total } = selectInputs({ utxos: spendable, target: Math.max(1, target), excludeKeys: [] }));
-    const vsize = fillVsize({
-      sellerType,
-      buyerType,
-      buyerInputCount: selected.length,
-      outputAddresses,
-      opReturnScriptLen: opReturnScript.length,
-    });
-    const newFee = Math.ceil(vsize * satVb);
-    if (newFee === fee) break;
-    fee = newFee;
+  const attempt = (withChange) => {
+    const outputAddresses = withChange ? fixedAddresses.concat([address]) : fixedAddresses;
+    let selected = [];
+    let total = 0;
+    let fee = 0;
+    for (let pass = 0; pass < 3; pass++) {
+      const target = fixedOutValue + fee + (withChange ? DUST_SATS : 0) - carrierSats;
+      ({ selected, total } = selectInputs({ utxos: spendable, target: Math.max(1, target), excludeKeys: [] }));
+      const vsize = fillVsize({
+        sellerType,
+        buyerType,
+        buyerInputCount: selected.length,
+        outputAddresses,
+        opReturnScriptLen: opReturnScript.length,
+      });
+      const newFee = Math.ceil(vsize * satVb);
+      if (newFee === fee) break;
+      fee = newFee;
+    }
+    return { selected, total, fee };
+  };
+
+  let sel;
+  let changeOmitted = false;
+  try {
+    sel = attempt(true);
+  } catch (e) {
+    if (!/insufficient funds/.test(String(e.message))) throw e;
+    sel = attempt(false);
+    changeOmitted = true;
   }
-
+  const { selected, total, fee } = sel;
   const change = carrierSats + total - fixedOutValue - fee;
-  if (change < DUST_SATS) {
-    throw new Error(
-      `change output required (payload commits change_out_idx=${FILL_CHANGE_OUT} for residual tokens) ` +
-      `but change is ${change} sat < dust ${DUST_SATS} — refusing to build`,
-    );
-  }
+  if (change < 0) throw new Error(`insufficient funds after fee (${fee.toLocaleString("en-US")} sats)`);
+  if (!changeOmitted && change < DUST_SATS) changeOmitted = true;
+  const finalFee = changeOmitted ? fee + change : fee;
 
   const inputIndexes = [];
   for (const u of selected) {
@@ -440,20 +484,27 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   tx.addOutputAddress(address, BigInt(DUST_SATS), NETWORK);                          // vout1 token slot
   tx.addOutputAddress(PROJECT_FEE_ADDRESS, BigInt(SEND_PROTOCOL_FEE_SATS), NETWORK); // vout2 fee
   tx.addOutput({ script: opReturnScript, amount: 0n });                             // vout3 OP_RETURN
-  tx.addOutputAddress(address, BigInt(change), NETWORK);                            // vout4 change — mandatory
+  tx.addOutputAddress(address, BigInt(DUST_SATS), NETWORK);                          // vout4 residual slot — always
+  if (!changeOmitted) tx.addOutputAddress(address, BigInt(change), NETWORK);        // vout5 BTC change — optional
 
   // Self-check before handing the PSBT to the wallet: exactly one OP_RETURN,
-  // and it is the SEND of this order (M-1 / M-3).
+  // it is the SEND of this order (M-1 / M-3), and the slots are laid out as
+  // the payload's indices say.
   checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), { op: "SEND", ticker: order.ticker, amount: order.amount });
+  checkFillLayout(tx);
 
   return {
     psbtHex: hex.encode(tx.toPSBT()),
     inputIndexes,
     inputs: selected.map((u) => ({ txid: u.txid, vout: u.vout, sats: Number(u.sats) })),
-    feeSats: fee,
+    feeSats: finalFee,
     priceSats,
-    totalSats: priceSats + DUST_SATS + SEND_PROTOCOL_FEE_SATS + fee,
-    changeSats: change,
+    slotSats: FILL_SLOT_SATS,
+    totalSats: priceSats + FILL_SLOT_SATS + finalFee,
+    changeSats: changeOmitted ? 0 : change,
+    changeOmitted,
+    changeVout: changeOmitted ? null : FILL_BTC_CHANGE_VOUT,
+    residualVout: FILL_CHANGE_OUT,
     feeRateSatVb: satVb,
     seller: sellerAddress,
   };
@@ -469,8 +520,10 @@ export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
   if (tx.inputsLength < 2) throw new Error("fill has no buyer inputs");
   // Broadcast-time guard (M-1 / M-3): the tx we are about to extract must be
   // a single-OP_RETURN SEND — never an AVATAR / MINE / DEPLOY riding on the
-  // seller's bearer signature, never a second OP_RETURN a wallet injected.
+  // seller's bearer signature, never a second OP_RETURN a wallet injected —
+  // laid out with 546-sat token / residual slots at the payload's indices.
   checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), expect);
+  if (!expect || expect.op === "SEND") checkFillLayout(tx);
   if (tx.inputStatus(0) !== "finalized") tx.finalizeIdx(0);
   for (let i = 0; i < tx.inputsLength; i++) {
     const st = tx.inputStatus(i);

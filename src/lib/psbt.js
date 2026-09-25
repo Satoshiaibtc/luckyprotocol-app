@@ -14,15 +14,23 @@
 //                       vout2 OP_RETURN  LUCKY-20|MINE|<TICKER>
 //                       vout3 change → self (omitted if < dust; folded into fee)
 //
-// SEND layout (§2.3):   vout0 546 → recipient
+// SEND layout (§2.3, H-1(A) — token carriers are ALWAYS 546-sat outputs):
+//                       vout0 546 → recipient          (TO_OUT = 0)
 //                       vout1 546 → PROJECT_FEE_ADDRESS
 //                       vout2 OP_RETURN  LUCKY-20|SEND|<TICKER>|<AMT>|0|3
-//                       vout3 change → self  (MUST exist — throws otherwise)
+//                       vout3 546 → self               (CHANGE_OUT = 3: the residual
+//                                                       token slot — ALWAYS present,
+//                                                       even when the residual is 0)
+//                       vout4 BTC change → self        (optional; folded into the fee
+//                                                       when < 546)
 //
 // Builder obligation (§4): never spend a token-bearing UTXO as a fee input.
 // Every UTXO with value ≤ 546 sats is dropped (all LuckyProtocol carriers are
 // 546-sat outputs), and every outpoint the indexer reports as token-bearing
-// is excluded explicitly.
+// is excluded explicitly. Under DEFAULT ROUTING a payload-less spend of a
+// carrier does not destroy its tokens — it hands them to the tx's first
+// non-OP_RETURN output — so a carrier spent as a fee input would GIFT its
+// tokens to whoever that output pays.
 //
 // Mainnet only.
 
@@ -426,10 +434,11 @@ export function selectInputs({ utxos, target, excludeKeys }) {
  * Shared pipeline. `outputs` are the fixed protocol outputs in final vout
  * order (excluding change). Change to `address` is appended last.
  *
- * `requireChange`: SEND commits change_out_idx = outputs.length in its
- * payload, so the change output MUST exist (≥ dust) or we refuse to build.
- * MINE routes everything to vout0, so sub-dust change can safely fold into
- * the miner fee.
+ * `requireChange`: refuse to build unless the change output exists (≥
+ * dust). No current caller needs it — DEPLOY / MINE / the avatar commit
+ * route nothing through their change output, and SEND has its own builder
+ * whose residual slot is a fixed 546-sat output — so sub-dust change folds
+ * into the miner fee.
  */
 function buildUnsigned({
   address,
@@ -483,8 +492,8 @@ function buildUnsigned({
   };
 
   // Prefer a real change output. Only when the wallet cannot cover the
-  // dust headroom do we (for MINE) fall back to folding sub-dust change
-  // into the miner fee; SEND must never fold (its payload commits vout3).
+  // dust headroom do we fall back to folding sub-dust change into the
+  // miner fee (unless the caller set requireChange).
   let sel;
   let changeOmitted = false;
   try {
@@ -502,7 +511,7 @@ function buildUnsigned({
   }
   if (!changeOmitted && change < DUST_SATS) {
     // Cannot happen (target includes the headroom) — guard the invariant
-    // loudly rather than silently burning a committed change slot.
+    // loudly rather than silently dropping a required change slot.
     if (requireChange) {
       throw new Error(
         `change output required (payload commits change_out_idx=${outputs.length} for residual ` +
@@ -655,12 +664,42 @@ export function buildMinePsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRa
   });
 }
 
+/** SEND payload indices (§2.3): TO_OUT = vout0, CHANGE_OUT = vout3 (the residual slot). */
+export const SEND_TO_OUT = 0;
+export const SEND_CHANGE_OUT = 3;
+/** vout of the optional BTC change output of a SEND (present only when ≥ 546 sats). */
+export const SEND_BTC_CHANGE_VOUT = 4;
+
 /**
- * Build an unsigned SEND PSBT. `tokenUtxos` are the sender's token-bearing
- * outpoints for `ticker` (from /utxos/:addr); they are spent as inputs so
- * their balances form the tx's input pool. The change output (vout3) is
- * mandatory — residual tokens route there — so this throws if change would
- * be sub-dust.
+ * Display-only fee preview for a SEND (one carrier input + `inputCount` fee
+ * inputs of the wallet's type; recipient slot, fee, OP_RETURN, residual slot
+ * and a change output). Clamps instead of throwing.
+ */
+export function estimateSendFeeSats({ address, toAddress, ticker, amount = 1, feeRateSatVb, inputCount = 1, carrierCount = 1 }) {
+  const type = isP2tr(address) ? "tr" : "wpkh";
+  const payload = buildSendPayload({ ticker, amount, toOutIdx: SEND_TO_OUT, changeOutIdx: SEND_CHANGE_OUT });
+  const vsize = estimateVsize({
+    inputCount: carrierCount + inputCount,
+    inputType: type,
+    outputAddresses: [toAddress || address, PROJECT_FEE_ADDRESS, address, address],
+    opReturnScriptLen: makeOpReturnScript(payload).length,
+  });
+  const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate), slotSats: DUST_SATS * 2 + SEND_PROTOCOL_FEE_SATS };
+}
+
+/**
+ * Build an unsigned SEND PSBT (H-1(A) layout — see the header). `tokenUtxos`
+ * are the sender's token-bearing outpoints for `ticker` (from /utxos/:addr);
+ * they are spent as inputs so their balances form the tx's input pool.
+ *
+ * Every token slot is a 546-sat output: vout0 (recipient) and vout3 (the
+ * residual slot, ALWAYS present — the payload commits CHANGE_OUT = 3 and
+ * the indexer routes the residual pool there even when it is 0). BTC change
+ * is a separate vout4 that exists only when it is ≥ 546 sats; below that it
+ * folds into the miner fee exactly like MINE's change.
+ *
+ * @returns {{ psbtHex, feeSats, inputIndexes, inputs, changeSats, changeOmitted, changeVout, residualVout, outputCount, feeRateSatVb }}
  */
 export function buildSendPsbt({
   address,
@@ -675,17 +714,18 @@ export function buildSendPsbt({
   minInputSats = 0,
 }) {
   decodeAddress(toAddress);
-  const payload = buildSendPayload({ ticker, amount, toOutIdx: 0, changeOutIdx: 3 });
+  const payload = buildSendPayload({ ticker, amount, toOutIdx: SEND_TO_OUT, changeOutIdx: SEND_CHANGE_OUT });
 
   // Token carriers are pinned as inputs (their balances form the input pool)
   // and the fee selector funds the rest. They MUST be spent at their EXACT
   // on-chain value: the segwit/taproot sighash commits to each input's
   // amount, so a wrong witnessUtxo.amount yields an invalid signature (tx
-  // rejected) and wrong fee/change math. Carriers are usually 546-sat dust,
-  // but a SEND's vout3 change output carries residual tokens on top of
-  // arbitrary BTC change — never assume 546. Resolve each carrier's sats
-  // from the wallet's full UTXO list (the indexer's /btc-utxos includes
-  // token dust; UniSat's own list may not) and refuse to build otherwise.
+  // rejected) and wrong fee/change math. This builder only ever makes
+  // 546-sat carriers, but the indexer's settlement is index-agnostic and a
+  // third-party builder may have parked tokens on a fatter output — never
+  // assume 546. Resolve each carrier's sats from the wallet's full UTXO list
+  // (the indexer's /btc-utxos includes token dust; UniSat's own list may
+  // not) and refuse to build otherwise.
   const satsByKey = new Map((utxos || []).map((u) => [outpointKey(u), Number(u.sats)]));
   const carriers = (tokenUtxos || []).map((u) => {
     const own = Number(u.sats);
@@ -710,45 +750,68 @@ export function buildSendPsbt({
 
   const satVb = checkedFeeRate(feeRateSatVb);
 
-  const outputs = [
-    { address: toAddress, value: DUST_SATS },                          // vout0 recipient
+  // Fixed layout: the two slots before the OP_RETURN and the residual slot
+  // after it. All three are 546-sat carriers.
+  const preOutputs = [
+    { address: toAddress, value: DUST_SATS },                          // vout0 recipient slot
     { address: PROJECT_FEE_ADDRESS, value: SEND_PROTOCOL_FEE_SATS },   // vout1 fee
   ];
+  const residualOutput = { address, value: DUST_SATS };                // vout3 residual slot
   const opReturnScript = makeOpReturnScript(payload);
-  const fixedOutValue = outputs.reduce((s, o) => s + o.value, 0);
-  const outputAddresses = outputs.map((o) => o.address).concat([address]);
+  const fixedOutValue = preOutputs.reduce((s, o) => s + o.value, 0) + residualOutput.value;
+  const fixedAddresses = preOutputs.map((o) => o.address).concat([residualOutput.address]);
   const carrierValue = carriers.reduce((s, u) => s + u.sats, 0);
 
-  let selected = [];
-  let total = 0;
-  let fee = 0;
-  for (let pass = 0; pass < 3; pass++) {
-    const target = fixedOutValue + fee + DUST_SATS - carrierValue;
-    if (target > 0) {
-      if (spendable.length === 0) throw noSpendableError(address, minInputSats);
-      ({ selected, total } = selectInputs({ utxos: spendable, target, excludeKeys: [] }));
-    } else {
-      selected = [];
-      total = 0;
+  // Same iterative selection + fee refinement as buildUnsigned; `withChange`
+  // says whether vout4 (BTC change) is in the estimate and the target.
+  const attempt = (withChange) => {
+    const outputAddresses = withChange ? fixedAddresses.concat([address]) : fixedAddresses;
+    let selected = [];
+    let total = 0;
+    let fee = 0;
+    for (let pass = 0; pass < 3; pass++) {
+      const target = fixedOutValue + fee + (withChange ? DUST_SATS : 0) - carrierValue;
+      if (target > 0) {
+        if (spendable.length === 0) throw noSpendableError(address, minInputSats);
+        ({ selected, total } = selectInputs({ utxos: spendable, target, excludeKeys: [] }));
+      } else {
+        selected = [];
+        total = 0;
+      }
+      const vsize = estimateVsize({
+        inputCount: carriers.length + selected.length,
+        inputType: type,
+        outputAddresses,
+        opReturnScriptLen: opReturnScript.length,
+      });
+      const newFee = Math.ceil(vsize * satVb);
+      if (newFee === fee) break;
+      fee = newFee;
     }
-    const vsize = estimateVsize({
-      inputCount: carriers.length + selected.length,
-      inputType: type,
-      outputAddresses,
-      opReturnScriptLen: opReturnScript.length,
-    });
-    const newFee = Math.ceil(vsize * satVb);
-    if (newFee === fee) break;
-    fee = newFee;
+    const vsize = estimateVsize({ inputCount: carriers.length + selected.length, inputType: type, outputAddresses, opReturnScriptLen: opReturnScript.length });
+    return { selected, total, fee, vsize };
+  };
+
+  // Prefer a real BTC change output; when the wallet cannot cover the dust
+  // headroom, fold the remainder into the fee. The residual TOKEN slot
+  // (vout3) is part of the fixed layout and is never folded.
+  let sel;
+  let changeOmitted = false;
+  try {
+    sel = attempt(true);
+  } catch (e) {
+    if (!/insufficient funds/.test(String(e.message))) throw e;
+    sel = attempt(false);
+    changeOmitted = true;
   }
+  const { selected, total, fee } = sel;
 
   const change = carrierValue + total - fixedOutValue - fee;
-  if (change < DUST_SATS) {
-    throw new Error(
-      `change output required (payload commits change_out_idx=3 for residual tokens) ` +
-      `but change is ${change} sat < dust ${DUST_SATS} — refusing to build`,
-    );
+  if (change < 0) {
+    throw new Error(`insufficient funds after fee (${fee.toLocaleString("en-US")} sats)`);
   }
+  if (!changeOmitted && change < DUST_SATS) changeOmitted = true;
+  const finalFee = changeOmitted ? fee + change : fee;
 
   const tx = new btc.Transaction({
     allowUnknownInputs: false,
@@ -765,17 +828,22 @@ export function buildSendPsbt({
     if (tapInternalKey) input.tapInternalKey = tapInternalKey;
     inputIndexes.push(tx.addInput(input));
   }
-  for (const o of outputs) tx.addOutputAddress(o.address, BigInt(o.value), NETWORK);
-  tx.addOutput({ script: opReturnScript, amount: 0n });
-  tx.addOutputAddress(address, BigInt(change), NETWORK); // vout3 — mandatory
+  for (const o of preOutputs) tx.addOutputAddress(o.address, BigInt(o.value), NETWORK);      // vout0, vout1
+  tx.addOutput({ script: opReturnScript, amount: 0n });                                        // vout2
+  tx.addOutputAddress(residualOutput.address, BigInt(residualOutput.value), NETWORK);         // vout3 — always
+  if (!changeOmitted) tx.addOutputAddress(address, BigInt(change), NETWORK);                  // vout4 — optional
 
   return {
     psbtHex: hex.encode(tx.toPSBT()),
-    feeSats: fee,
+    feeSats: finalFee,
     inputIndexes,
     inputs: [...carriers, ...selected].map((u) => ({ txid: u.txid, vout: u.vout, sats: Number(u.sats) })),
-    changeSats: change,
-    changeOmitted: false,
+    changeSats: changeOmitted ? 0 : change,
+    changeOmitted,
+    changeVout: changeOmitted ? null : SEND_BTC_CHANGE_VOUT,
+    residualVout: SEND_CHANGE_OUT,
+    outputCount: 4 + (changeOmitted ? 0 : 1),
+    estimatedVsize: Math.ceil(sel.vsize),
     feeRateSatVb: satVb,
   };
 }

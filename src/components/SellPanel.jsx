@@ -175,6 +175,8 @@ export default function SellPanel({ ticker, token, onSettled }) {
       ]);
       // The carrier's exact sats come from the indexer's BTC view (UniSat's
       // asset-safe list may omit 546-sat dust); the sighash commits to it.
+      // This app only makes 546-sat carriers, but a third-party SEND may
+      // have parked tokens on a fatter output, so the real value is used.
       const allSats = new Map((btcUtxos.data || []).map((u) => [outKey(u), u.sats]));
       const carrierSats = utxo.sats ?? allSats.get(outKey(utxo)) ?? null;
       const built = buildSendPsbt({
@@ -195,6 +197,8 @@ export default function SellPanel({ ticker, token, onSettled }) {
       const signed = await unisat.signPsbt(built.psbtHex, built.inputIndexes, address);
       setChain((c) => ({ ...c, phase: "broadcasting" }));
       const txid = await unisat.broadcastSignedPsbt(signed);
+      // vout0 = the new carrier, vout3 = the residual slot (both 546-sat token
+      // outputs); vout4, when present, is plain BTC change.
       addPendingTokenOutpoints([{ txid, vout: 0 }, { txid, vout: 3 }]);
       setChain((c) => ({ ...c, phase: "pending", txid }));
       refreshMine();
@@ -339,8 +343,8 @@ export default function SellPanel({ ticker, token, onSettled }) {
           <details className="split">
             <summary>Want to sell only part of it? Split first</summary>
             <p className="fineprint">
-              A listing always sells a whole UTXO. A split is a SEND to yourself: vout0 becomes a new {ticker} UTXO carrying the amount you enter,
-              vout3 keeps the rest. After it confirms, list the new vout0.
+              A listing always sells a whole UTXO. A split is a SEND to yourself: vout0 becomes a new 546-sat {ticker} carrier holding the amount you enter,
+              vout3 (also 546 sats) keeps the rest; any BTC change comes back separately as vout4. After it confirms, list the new vout0.
             </p>
             <div className="price-grid">
               <label>
@@ -353,7 +357,7 @@ export default function SellPanel({ ticker, token, onSettled }) {
                 </button>
               </div>
             </div>
-            <div className="fineprint">Cost: {DUST_SATS} sats carrier + {DUST_SATS} sats protocol fee + network fee.</div>
+            <div className="fineprint">Cost: {DUST_SATS} sats new carrier + {DUST_SATS} sats residual carrier + {DUST_SATS} sats protocol fee + network fee.</div>
           </details>
         </div>
       )}
