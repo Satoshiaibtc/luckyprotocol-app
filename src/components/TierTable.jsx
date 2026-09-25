@@ -40,7 +40,7 @@ export default function TierTable({ ticker = "", compact = false }) {
             Probability
           </span>
           <span className="label" role="columnheader" aria-hidden="true" />
-          <span className="label" role="columnheader" style={{ textAlign: "right" }}>
+          <span className="label th-right" role="columnheader">
             Yield
           </span>
         </div>

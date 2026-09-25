@@ -40,7 +40,7 @@ export default function HashReveal({ mine, ticker, reconcileLine, onReset }) {
         </>
       )}
       <div className="reveal-reconcile">{reconcileLine}</div>
-      <div className="actions" style={{ paddingLeft: 0 }}>
+      <div className="actions actions-flush">
         <button className="btn btn-sm" type="button" onClick={onReset}>
           Clear
         </button>

@@ -2395,6 +2395,16 @@ input[type="search"]::-webkit-search-decoration {
   gap: 8px;
   flex-wrap: wrap;
 }
+/* Static inline styles moved to classes so the CSP's style-src can be 'self'
+   without 'unsafe-inline' (audit L-14). The remaining dynamic style props
+   (bar widths, grid columns, the reveal stagger index) are applied by React
+   through the CSSOM, which CSP does not restrict. */
+.reveal .actions.actions-flush {
+  padding-left: 0;
+}
+.tier-table .th .th-right {
+  text-align: right;
+}
 .spent-inputs {
   display: block;
   margin-top: 4px;

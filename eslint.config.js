@@ -77,9 +77,9 @@ export default [
     },
   },
 
-  // Node-side test script (plain `node test/...`, no framework).
+  // Node-side test scripts (plain `node test/...`, no framework) and build scripts.
   {
-    files: ["test/**/*.js"],
+    files: ["test/**/*.js", "scripts/**/*.mjs"],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
