@@ -143,8 +143,11 @@ export function buildAvatarPayload(ticker) {
  * Parse an OP_RETURN payload string back into its fields, or return null
  * when it is not a LuckyProtocol payload. Mirrors the indexer's grammar:
  * DEPLOY|T, MINE|T, AVATAR|T, SEND|T|AMT|TO|CHG — anything else is "not a
- * protocol tx". Used by the mock indexer and by display code; never by
- * consensus.
+ * protocol tx". SEND is EXACTLY six fields: a five-field SEND (no
+ * CHANGE_OUT) and a seven-field one are both invalid, and TO == CHG is
+ * invalid (§2.3; the same vectors live in protocol.rs and in
+ * test/payloads.test.js — audit M-2). Used by the mock indexer, by the
+ * sign-time guard in psbt.js and by display code; never by consensus.
  */
 export function parsePayload(str) {
   if (typeof str !== "string") return null;
