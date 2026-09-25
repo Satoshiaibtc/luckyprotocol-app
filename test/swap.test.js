@@ -9,7 +9,7 @@
 //   * buyer signs inputs 1..n, finalizeFill finalizes input0 from the
 //     seller's signature and extracts a raw tx
 //   * output0 is byte-identical to the listing, OP_RETURN payload is
-//     LUCKYPROTOCOL|SEND|<T>|<AMT>|1|4, vout4 change is mandatory (≥ 546,
+//     LUCKY-20|SEND|<T>|<AMT>|1|4, vout4 change is mandatory (≥ 546,
 //     never folded), inputs − outputs == feeSats
 import assert from "node:assert/strict";
 import * as btc from "@scure/btc-signer";
@@ -201,7 +201,7 @@ function runScenario(label, sellerType, buyerType) {
     assert.equal(o(2).amount, 546n);
     assert.equal(o(3).script[0], 0x6a, "vout3 OP_RETURN");
     const payloadStr = payloadToString(o(3).script.slice(2));
-    assert.equal(payloadStr, "LUCKYPROTOCOL|SEND|LUCKY|1200|1|4");
+    assert.equal(payloadStr, "LUCKY-20|SEND|LUCKY|1200|1|4");
     assert.ok(payloadStr.endsWith("|1|4"), "TO_OUT=1, CHANGE_OUT=4 (distinct — equal indices do not parse)");
     assert.equal(tx.outputsLength, 5, "vout4 change is mandatory");
     assert.equal(addrOf(o(4).script), buyer.address, "vout4 change → buyer");
@@ -238,7 +238,7 @@ function runScenario(label, sellerType, buyerType) {
   assert.equal(d.outputs[1].address, buyer.address);
   assert.equal(d.outputs[3].address, null);
   assert.deepEqual(d.payload, { op: "SEND", ticker: "LUCKY", amount: 1200, toOutIdx: 1, changeOutIdx: 4 });
-  assert.equal(d.payloadText, "LUCKYPROTOCOL|SEND|LUCKY|1200|1|4");
+  assert.equal(d.payloadText, "LUCKY-20|SEND|LUCKY|1200|1|4");
   assert.equal(d.outputs[4].address, buyer.address, "raw tx vout4 → buyer");
   assert.ok(d.outputs[4].sats >= 546, "raw tx vout4 ≥ dust");
   const fin = parse(signedFill);

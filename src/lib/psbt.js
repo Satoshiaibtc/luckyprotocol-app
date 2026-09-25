@@ -6,17 +6,17 @@
 //
 // DEPLOY layout (§2.1): vout0 546 → self (deployer proof)
 //                       vout1 5,460 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  LUCKYPROTOCOL|DEPLOY|<TICKER>
+//                       vout2 OP_RETURN  LUCKY-20|DEPLOY|<TICKER>
 //                       vout3 change → self (omitted if < dust; folded into fee)
 //
 // MINE layout (§2.2):   vout0 546 → self (yield slot)
 //                       vout1 546 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  LUCKYPROTOCOL|MINE|<TICKER>
+//                       vout2 OP_RETURN  LUCKY-20|MINE|<TICKER>
 //                       vout3 change → self (omitted if < dust; folded into fee)
 //
 // SEND layout (§2.3):   vout0 546 → recipient
 //                       vout1 546 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|0|3
+//                       vout2 OP_RETURN  LUCKY-20|SEND|<TICKER>|<AMT>|0|3
 //                       vout3 change → self  (MUST exist — throws otherwise)
 //
 // Builder obligation (§4): never spend a token-bearing UTXO as a fee input.

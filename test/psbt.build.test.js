@@ -97,7 +97,7 @@ assert.equal(prev.feeSats, Math.ceil(prev.vsize * 8));
 {
   const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
   const { outs } = checkCommon("MINE p2tr", r, { expectOutputs: 4, expectTap: true, self: p2trAddr, vout0: p2trAddr });
-  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|MINE|LUCKY");
+  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKY-20|MINE|LUCKY");
   assert.equal(r.changeOmitted, false);
   // Smallest-first: 3_000 alone cannot cover 1_092 + fee (~1.8k) + dust headroom,
   // so the selector takes T(2) first and then T(4); T(1) (dust) and T(3) (token) never.
@@ -150,7 +150,7 @@ assert.throws(
   assert.equal(ins[0].witnessUtxo.amount, 20_000n, "SEND: carrier spent at its real on-chain value");
   assert.equal(addrOf(outs[0].script), p2wpkhAddr, "SEND: vout0 recipient");
   assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS);
-  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|SEND|LUCKY|100|0|3");
+  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKY-20|SEND|LUCKY|100|0|3");
   assert.equal(addrOf(outs[3].script), p2trAddr, "SEND: vout3 change → self");
   assert.ok(outs[3].amount >= 546n, "SEND: change ≥ dust");
   const inSum = ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n);
@@ -209,7 +209,7 @@ assert.throws(
     assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS, `DEPLOY ${label}: vout1 → fee address`);
     assert.equal(outs[1].amount, 5_460n, `DEPLOY ${label}: exact 5,460-sat protocol fee`);
     assert.equal(outs[2].script[0], 0x6a);
-    assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|DEPLOY|NEWTKN");
+    assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKY-20|DEPLOY|NEWTKN");
     assert.equal(addrOf(outs[3].script), address, `DEPLOY ${label}: change → self`);
     assert.ok(outs[3].amount >= 546n);
     const inSum = ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n);

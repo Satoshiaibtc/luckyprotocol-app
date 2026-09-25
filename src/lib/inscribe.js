@@ -388,7 +388,7 @@ export function maxCommitAmountFor(leafScriptLen) {
  *              authorization
  *   vout0      546 → deployer (the inscribed sat)
  *   vout1      546 → PROJECT_FEE_ADDRESS
- *   vout2      OP_RETURN LUCKYPROTOCOL|AVATAR|<T>
+ *   vout2      OP_RETURN LUCKY-20|AVATAR|<T>
  *   vout3      change → deployer (folded into the fee when < 546; AVATAR routes no tokens)
  *
  * → { psbtHex, walletInputIndexes, feeSats, changeSats, changeOmitted, estimatedVsize, inputs }

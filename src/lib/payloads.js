@@ -7,14 +7,14 @@
 //
 // Wire formats (ASCII, `|`-delimited, no trailing newline, ≤ 80 bytes):
 //
-//   DEPLOY:  LUCKYPROTOCOL|DEPLOY|<TICKER>
-//   MINE:    LUCKYPROTOCOL|MINE|<TICKER>              (no tier / pick / indices)
-//   SEND:    LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>
-//   AVATAR:  LUCKYPROTOCOL|AVATAR|<TICKER>            (§8; image rides in input0's witness)
+//   DEPLOY:  LUCKY-20|DEPLOY|<TICKER>
+//   MINE:    LUCKY-20|MINE|<TICKER>              (no tier / pick / indices)
+//   SEND:    LUCKY-20|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>
+//   AVATAR:  LUCKY-20|AVATAR|<TICKER>            (§8; image rides in input0's witness)
 
 // ---- §1 constants ----------------------------------------------------------
 
-export const PROTOCOL_PREFIX = "LUCKYPROTOCOL";
+export const PROTOCOL_PREFIX = "LUCKY-20";
 export const ACTIVATION_HEIGHT = 968_750;          // FINAL (spec §1); protocol txs below this height are ignored
 export const SNAPSHOT_VERSION = 12;
 export const REQUIRED_TOKEN_SUPPLY = 21_000_000;   // implicit on every DEPLOY
@@ -79,7 +79,7 @@ function capPayload(bytes) {
 // ---- encoders ------------------------------------------------------------------
 
 /**
- * `LUCKYPROTOCOL|DEPLOY|<TICKER>` — registers the ticker with supply 21,000,000.
+ * `LUCKY-20|DEPLOY|<TICKER>` — registers the ticker with supply 21,000,000.
  * The tx must also pay exactly DEPLOY_PROTOCOL_FEE_SATS to
  * PROJECT_FEE_ADDRESS (consensus rule, §2.1).
  */
@@ -89,7 +89,7 @@ export function buildDeployPayload(ticker) {
 }
 
 /**
- * `LUCKYPROTOCOL|MINE|<TICKER>` — yield is credited to vout0; the yield-slot and
+ * `LUCKY-20|MINE|<TICKER>` — yield is credited to vout0; the yield-slot and
  * change-slot indices are implicit (both 0, §2.2) and NOT encoded. Nothing
  * else is encoded: the yield is a pure function of the confirming block's
  * hash.
@@ -100,7 +100,7 @@ export function buildMinePayload(ticker) {
 }
 
 /**
- * `LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>` (§2.3).
+ * `LUCKY-20|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>` (§2.3).
  * `amount` is whole tokens (1 ≤ AMT ≤ 21,000,000). The residual input
  * pool routes to vout[CHANGE_OUT], so a builder must always emit that
  * output — see buildSendPsbt. `TO_OUT` and `CHANGE_OUT` MUST differ: the
@@ -128,7 +128,7 @@ export function buildSendPayload({ ticker, amount, toOutIdx, changeOutIdx }) {
 }
 
 /**
- * `LUCKYPROTOCOL|AVATAR|<TICKER>` (§8.1) — exactly three fields. The image
+ * `LUCKY-20|AVATAR|<TICKER>` (§8.1) — exactly three fields. The image
  * itself is not in the payload: it is the ord-style envelope revealed in
  * input0's witness (see src/lib/inscribe.js). The tx must also pay exactly
  * AVATAR_PROTOCOL_FEE_SATS to PROJECT_FEE_ADDRESS and spend at least one

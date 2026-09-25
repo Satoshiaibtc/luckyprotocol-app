@@ -162,9 +162,9 @@ const BODY = new Uint8Array(1_200).map((_, i) => (i * 7 + 3) & 0xff);
 }
 
 // ---- payload --------------------------------------------------------------------------------------
-assert.equal(payloadToString(buildAvatarPayload("LUCKY")), "LUCKYPROTOCOL|AVATAR|LUCKY");
-assert.deepEqual(parsePayload("LUCKYPROTOCOL|AVATAR|LUCKY"), { op: "AVATAR", ticker: "LUCKY" });
-assert.equal(parsePayload("LUCKYPROTOCOL|AVATAR|LUCKY|1"), null, "exactly three fields");
+assert.equal(payloadToString(buildAvatarPayload("LUCKY")), "LUCKY-20|AVATAR|LUCKY");
+assert.deepEqual(parsePayload("LUCKY-20|AVATAR|LUCKY"), { op: "AVATAR", ticker: "LUCKY" });
+assert.equal(parsePayload("LUCKY-20|AVATAR|LUCKY|1"), null, "exactly three fields");
 assert.throws(() => buildAvatarPayload("lucky"), /A-Z 0-9/);
 
 // ---- commit: buildPayPsbt ---------------------------------------------------------------------------
@@ -239,7 +239,7 @@ let commitTx;
   assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS, "vout1 → protocol fee");
   assert.equal(outs[1].amount, 546n);
   assert.equal(outs[2].script[0], 0x6a);
-  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|AVATAR|LUCKY");
+  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKY-20|AVATAR|LUCKY");
   assert.equal(addrOf(outs[3].script), MOCK_WALLET.address, "vout3 change → deployer");
   assert.equal(outs[3].amount, BigInt(r.changeSats));
   const inSum = ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n);
@@ -308,7 +308,7 @@ let commitTx;
   const { ins, outs } = parsePsbt(r.psbtHex);
   assert.equal(ins[1].tapInternalKey, undefined, "no tapInternalKey on a P2WPKH deployer input");
   assert.equal(addrOf(outs[0].script), dAddr);
-  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|AVATAR|ORE");
+  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKY-20|AVATAR|ORE");
   const tx = btc.Transaction.fromPSBT(hex.decode(r.psbtHex), { allowUnknownInputs: true, allowUnknownOutputs: true });
   tx.signIdx(dPriv, 1);
   tx.finalizeIdx(1);

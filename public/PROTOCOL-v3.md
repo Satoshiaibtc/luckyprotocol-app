@@ -1,4 +1,4 @@
-# LuckyProtocol Protocol — v3 (cohort `genesis-v3`)
+# LuckyProtocol Protocol — v3 / **LUCKY-20** (cohort `genesis-v3`)
 
 Canonical wire spec for **LuckyProtocol**, the v3 successor to LUCKYPROTOCOL v2.
 Both the Rust indexer (branch `v3`) and the web app
@@ -23,7 +23,7 @@ index, consensus-enforced protocol fee outputs, fixed 21M supply.
 
 | Name | Value | Notes |
 |---|---|---|
-| `PROTOCOL_PREFIX` | `LUCKYPROTOCOL` | Same prefix as v2. Isolation from v2 history comes from the activation-height gate (every v2 tx predates it) and the v3 MINE grammar (v2's tier-format payloads no longer parse). |
+| `PROTOCOL_PREFIX` | `LUCKY-20` | The standard's name, field 0 of every payload (cf. brc-20's `p`). Distinct from v2's `LUCKYPROTOCOL`, so v2 history can never parse as LUCKY-20; the activation-height gate applies on top. |
 | `ACTIVATION_HEIGHT` | **968_750** | FINAL (set 2026-09-25 at tip 968,539). Txs in earlier blocks are ignored. |
 | `SNAPSHOT_VERSION` | 13 | Fresh state; v2 snapshots are refused. (12 = v3 before §7 trading; never deployed.) |
 | `REQUIRED_TOKEN_SUPPLY` | 21_000_000 | Implicit on every DEPLOY, not user-settable. |
@@ -38,11 +38,11 @@ index, consensus-enforced protocol fee outputs, fixed 21M supply.
 ## 2. Payload encoding
 
 One OP_RETURN output per protocol tx. ASCII, `|`-separated, ≤ 80 bytes.
-Field 0 is always `LUCKYPROTOCOL`. Any parse failure = not a protocol tx (the
+Field 0 is always `LUCKY-20`. Any parse failure = not a protocol tx (the
 tx is then treated as a plain BTC spend → strict-burn applies to any
 token inputs).
 
-### 2.1 DEPLOY — `LUCKYPROTOCOL|DEPLOY|<TICKER>`
+### 2.1 DEPLOY — `LUCKY-20|DEPLOY|<TICKER>`
 
 Registers `<TICKER>` with supply 21,000,000. Ignored (recorded as
 `applied:false`) if the ticker already exists.
@@ -53,7 +53,7 @@ Consensus fee rule: the tx MUST have at least one output paying **exactly
 Reference layout: `vout0` 546 → deployer (proof), `vout1` 5,460 → fee,
 `vout2` OP_RETURN, `vout3+` change.
 
-### 2.2 MINE — `LUCKYPROTOCOL|MINE|<TICKER>`
+### 2.2 MINE — `LUCKY-20|MINE|<TICKER>`
 
 `win_out_idx = 0` and `change_out_idx = 0` are **implicit** (not
 encoded). The yield is credited to `vout0`; any residual token input pool
@@ -69,7 +69,7 @@ yield 0, no state change (token inputs still route/burn per §4).
 Reference layout: `vout0` 546 → miner (yield slot), `vout1` 546 → fee,
 `vout2` OP_RETURN, `vout3+` change.
 
-### 2.3 SEND — `LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>`
+### 2.3 SEND — `LUCKY-20|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>`
 
 Unchanged from v2. `AMT` is a canonical unsigned integer (whole tokens,
 1 ≤ AMT ≤ 21,000,000); `TO_OUT` and `CHANGE_OUT` are decimal `[0..255]`
@@ -333,7 +333,7 @@ custody. Prices are whatever sellers ask and buyers pay, settled by the
 Bitcoin network. The indexer can hide or lose orders (availability), but
 it cannot move anyone's funds (safety).
 
-## 8. Token avatars — `LUCKYPROTOCOL|AVATAR|<TICKER>` (on-chain image)
+## 8. Token avatars — `LUCKY-20|AVATAR|<TICKER>` (on-chain image)
 
 A token's avatar is an **Ordinals-style inscription** carried by an AVATAR
 tx, so it lives on Bitcoin, is verifiable by any indexer, and shows up in
@@ -342,7 +342,7 @@ a server.
 
 ### 8.1 Payload and layout
 
-Payload: `LUCKYPROTOCOL|AVATAR|<TICKER>` (exactly three fields; ticker
+Payload: `LUCKY-20|AVATAR|<TICKER>` (exactly three fields; ticker
 grammar as §1).
 
 Reference layout (same shape as MINE):

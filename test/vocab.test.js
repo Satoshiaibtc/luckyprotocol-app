@@ -23,7 +23,7 @@ const SKIP = new Set([
 const DENY =
   /\b(bet|bets|betting|wager|wagers|win|wins|winner|winning|won|lose|loses|losing|loss|lost|jackpot|casino|slots?|dice|roulette|wheel|lottery|raffle|draws?|confetti|odds|payout|spin|spins|roll|rolls|prize|prizes|reward|rewards|chance|chances|gamble|gambling|lucky|luck)\b/i;
 
-const BRAND = /LUCKY\/\/PROTOCOL|LuckyProtocol|LUCKYPROTOCOL|\bLUCKY\b/g;
+const BRAND = /LUCKY\/\/PROTOCOL|LuckyProtocol|LUCKY-20|\bLUCKY\b/g;
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {

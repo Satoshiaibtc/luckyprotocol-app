@@ -332,7 +332,7 @@ export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 
  *   vout0  price_sats → seller        (from the listing — untouched)
  *   vout1  546        → buyer         (token slot; TO_OUT = 1)
  *   vout2  546        → PROJECT_FEE_ADDRESS
- *   vout3  OP_RETURN  LUCKYPROTOCOL|SEND|<T>|<AMT>|1|4
+ *   vout3  OP_RETURN  LUCKY-20|SEND|<T>|<AMT>|1|4
  *   vout4  change     → buyer         (CHANGE_OUT = 4; MANDATORY ≥ 546 —
  *                                      the payload commits it, so the build
  *                                      THROWS rather than fold it into the fee)
