@@ -298,7 +298,7 @@ assert.throws(
     assert.equal(outs.length, 4, `DEPLOY ${label}: 4 outputs`);
     for (const inp of ins) {
       assert.ok(inp.witnessUtxo.amount > 546n, `DEPLOY ${label}: dust input selected`);
-      assert.notEqual(hex.encode(inp.txid), T(3), `DEPLOY ${label}: token outpoint selected (would burn tokens)`);
+      assert.notEqual(hex.encode(inp.txid), T(3), `DEPLOY ${label}: token outpoint selected (its tokens would be default-routed to vout0)`);
       if (expectTap) assert.equal(hex.encode(inp.tapInternalKey), XONLY);
       else assert.equal(inp.tapInternalKey, undefined);
     }

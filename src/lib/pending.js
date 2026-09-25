@@ -1,12 +1,13 @@
 // Client-side registry of outpoints that WILL carry tokens once a tx we just
-// broadcast confirms (MINE vout0, SEND-to-self vout0 + vout3, fill vout1).
+// broadcast confirms (MINE vout0, SEND-to-self vout0 + vout3, fill vout1 +
+// vout4).
 //
 // The §4 builder obligation excludes ≤546-sat outputs and everything the
 // indexer's /utxos/:addr reports — but the indexer only reports token
-// outpoints after the tx confirms, and a SEND change output (vout3) can be
-// large. If the wallet's UTXO source (UniSat's getBitcoinUtxos) hands us an
-// unconfirmed vout3 as a fee input before the indexer knows about it, the
-// next tx would burn those tokens. This set closes that window.
+// outpoints after the tx confirms. If a wallet's UTXO source handed us an
+// unconfirmed carrier as a fee input before the indexer knows about it, the
+// next tx would be a plain spend of that carrier and default routing would
+// move its tokens to that tx's first output. This set closes that window.
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 const PENDING = new Map(); // "txid:vout" → addedAt

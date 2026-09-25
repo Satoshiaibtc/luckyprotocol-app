@@ -176,7 +176,8 @@ export function extractRawTxHex(signedPsbtHex) {
  * 0x6a) of a raw tx and refuse more than one. A wallet or aggregator that
  * appends its own OP_RETURN (memo, runestone) to one of our protocol txs
  * would otherwise turn it into "not a protocol tx" for an indexer that
- * rejects multi-OP_RETURN transactions — and strict-burn the input pool.
+ * rejects multi-OP_RETURN transactions — and default routing would then
+ * move the whole input pool to the tx's first output.
  * Zero OP_RETURNs is fine (plain payments, the avatar commit / sweep).
  * → the count.
  */
@@ -201,7 +202,7 @@ export function assertSingleOpReturn(rawHex) {
 // OP_RETURN output is ignored by the rule — but this app never signs or
 // relays a tx with more than one (see expectPsbtPayload / assertSingleOpReturn),
 // because an indexer applying the stricter "more than one ⇒ not a protocol
-// tx" reading would strict-burn the input pool.
+// tx" reading would default-route the input pool to the first output.
 
 const OP_RETURN = 0x6a;
 const OP_PUSHDATA1 = 0x4c;
@@ -569,8 +570,9 @@ function buildUnsigned({
  * Build an unsigned plain payment: one output of `amountSats` to `toAddress`
  * plus change to `address` (sub-dust change folds into the fee). No
  * OP_RETURN — this is NOT a protocol tx, which is exactly why the §4 filter
- * matters: a token-bearing input here would strict-burn its tokens. Used
- * for the §8.5 avatar commit (paying the commit P2TR address).
+ * matters: a token-bearing input here would hand its tokens to vout0, the
+ * commit address, where they would be stuck. Used for the §8.5 avatar
+ * commit (paying the commit P2TR address).
  */
 export function buildPayPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, toAddress, amountSats, minInputSats = 0 }) {
   decodeAddress(toAddress);
@@ -603,8 +605,9 @@ export function estimatePayFeeSats({ address, toAddress, feeRateSatVb, inputCoun
  * Build an unsigned DEPLOY PSBT (§2.1). The 5,460-sat protocol fee output
  * is a consensus rule; vout0 is the deployer's proof output. DEPLOY has no
  * token routing, so — like MINE — sub-dust change may fold into the fee.
- * The §4 filter matters here more than anywhere: a DEPLOY funded with a
- * token UTXO burns those tokens.
+ * The §4 filter matters here too: DEPLOY routes nothing, so a token UTXO
+ * spent as a fee input would have its tokens default-routed to vout0 (the
+ * deployer's proof output) — moved, not gone, but never intended.
  */
 export function buildDeployPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats = 0 }) {
   const payload = buildDeployPayload(ticker);

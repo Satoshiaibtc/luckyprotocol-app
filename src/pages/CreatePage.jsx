@@ -94,8 +94,9 @@ export default function CreatePage({ params, navigate }) {
         throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
       }
       const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address), indexer.tokenUtxos(address)]);
-      // A DEPLOY funded with a token UTXO burns those tokens (§4.2) — the
-      // §4 filter is applied here exactly as for MINE.
+      // A DEPLOY routes nothing (§4.2): a token UTXO spent as a fee input
+      // would have its tokens default-routed to vout0 — the §4 filter is
+      // applied here exactly as for MINE.
       const built = buildDeployPsbt({
         address,
         pubkeyHex,

@@ -252,8 +252,8 @@ export default function SellPanel({ ticker, token, onSettled }) {
                   </span>
                   <span className="utxo-tag">
                     {r.multi ? (
-                      <span className="status-tag s-cancelled" title={`Carries ${Object.keys(r.balances).join(" + ")} — a UTXO with more than one ticker cannot be listed (§7.1). Split it with a SEND first.`}>
-                        multi-ticker
+                      <span className="status-tag s-cancelled" title={`Carries ${Object.keys(r.balances).join(" + ")} — a UTXO with more than one ticker cannot be listed (§7.1). A SEND of ${ticker} to yourself moves it to a fresh 546-sat carrier; the other tickers are routed together to the residual slot.`}>
+                        several tickers
                       </span>
                     ) : r.listing ? (
                       <span className="status-tag s-open">listed @ {fmtUnit(r.listing.unit_price)}</span>

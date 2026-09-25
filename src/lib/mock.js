@@ -9,9 +9,12 @@
 //
 // It is also a tiny indexer: a broadcast raw tx is decoded, its inputs are
 // marked spent, and on confirmation its OP_RETURN payload is applied with
-// the §4 routing rules (MINE credits vout0, SEND routes AMT/residual,
-// DEPLOY registers a ticker, anything else strict-burns), open orders whose
-// outpoint was spent are settled per §7.5, and fills append a TradeView.
+// the §4 routing rules (MINE credits vout0, SEND routes its own ticker's
+// AMT / residual and every other ticker to CHANGE_OUT, DEPLOY registers a
+// ticker; whatever is not routed by a rule — DEPLOY / AVATAR / a plain
+// spend — is DEFAULT-ROUTED to the tx's first non-OP_RETURN output), open
+// orders whose outpoint was spent are settled per §7.5, and fills append a
+// TradeView.
 // That is what lets the whole listing → fill → trade loop run end-to-end
 // without a node.
 //
@@ -318,7 +321,7 @@ function seededBtcUtxos(addr) {
     mk(4, 5_000, false),      // pending mempool output
     mk(5, DUST_SATS, true),   // LUCKY carrier
     mk(6, DUST_SATS, true),   // ORE carrier
-    mk(7, DUST_SATS, true),   // multi-ticker carrier (not listable)
+    mk(7, DUST_SATS, true),   // carrier holding two tickers (not listable)
     mk(8, 1_000_000, true),
   ];
 }
@@ -471,6 +474,13 @@ function applyTx(txid, e) {
     if (!c) return; // OP_RETURN / unknown script — tokens can never land there (§4.4)
     c.balances[ticker] = (c.balances[ticker] || 0) + amt;
   };
+  // Default routing: whatever no rule routed goes to the first non-OP_RETURN output.
+  const firstOut = d.outputs.find((o) => o.address);
+  const routeRest = (vout) => {
+    const target = Number.isInteger(vout) ? vout : firstOut ? firstOut.vout : null;
+    if (target === null) return;
+    for (const [t, a] of Object.entries(pool)) credit(target, t, a);
+  };
 
   const p = d.payload;
   let sendApplied = false;
@@ -507,7 +517,10 @@ function applyTx(txid, e) {
       credit(p.toOutIdx, p.ticker, p.amount);
       pool[p.ticker] = have - p.amount;
     }
-    if (chg && chg.address) for (const [t, a] of Object.entries(pool)) credit(p.changeOutIdx, t, a);
+    // Per-ticker routing: the residual of this ticker AND every other ticker
+    // in the pool go to CHANGE_OUT; a missing CHANGE_OUT falls back to the
+    // default route (first non-OP_RETURN output).
+    routeRest(chg && chg.address ? p.changeOutIdx : null);
   } else if (p && p.op === "DEPLOY") {
     if (!w.tokens.has(p.ticker) && d.outputs[0] && d.outputs[0].address) {
       w.tokens.set(p.ticker, {
@@ -525,7 +538,7 @@ function applyTx(txid, e) {
         avatar_content_type: null,
       });
     }
-    // pool burns
+    routeRest(null); // DEPLOY routes nothing → default route
   } else if (p && p.op === "AVATAR") {
     // §8.3: ticker deployed, a deployer-owned input, the exact 546-sat fee
     // output, a within-limits envelope in input0's witness, vout0 not OP_RETURN.
@@ -549,9 +562,10 @@ function applyTx(txid, e) {
       content_type: env ? env.contentType : null,
       bytes_len: env ? env.bytes.length : 0,
     });
-    // pool burns (AVATAR routes nothing)
+    routeRest(null); // AVATAR routes nothing → default route
+  } else {
+    routeRest(null); // not a protocol tx → default route (tokens follow the first output)
   }
-  // else: not a protocol tx → strict-burn (nothing credited)
 
   // §7.5 order settlement for every spent outpoint.
   for (const i of d.inputs) {

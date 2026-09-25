@@ -59,7 +59,7 @@ function litCount(mine) {
 export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   const { wallet, fee, indexerOk, tipBlock, refreshAll, health } = useApp();
   // Before the activation height the indexer ignores every protocol tx, so a
-  // MINE would only burn fees — lock the button and say when it opens. An
+  // MINE would only cost fees — lock the button and say when it opens. An
   // unknown tip counts as pre-activation (fail closed, audit L-12).
   const tipNow = health.data?.tip_height ?? null;
   const tipUnknown = tipNow === null;

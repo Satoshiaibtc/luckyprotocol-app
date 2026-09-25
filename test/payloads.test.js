@@ -2,7 +2,8 @@
 // parser (protocol.rs). The SEND vectors below are the same four cases the
 // Rust parser tests carry (audit M-2): the two grammars MUST agree byte for
 // byte, because a payload one side accepts and the other rejects is a
-// permanent state fork (the rejecting side strict-burns the input pool).
+// permanent state fork (the rejecting side default-routes the input pool to
+// the tx's first output instead of settling the SEND).
 import assert from "node:assert/strict";
 import {
   ACTIVATION_HEIGHT,

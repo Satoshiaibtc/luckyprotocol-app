@@ -2,8 +2,9 @@
 //
 // Byte-identical to the indexer's parser (PROTOCOL-v3.md §1–§2).
 // The indexer strictly validates every field — a single-byte drift means
-// the tx is treated as a plain BTC spend (and strict-burn applies to any
-// token inputs), so the encoders here are deliberately narrow.
+// the tx is treated as a plain BTC spend, and DEFAULT ROUTING then moves
+// every token input to the tx's first non-OP_RETURN output (whoever that
+// pays), so the encoders here are deliberately narrow.
 //
 // Wire formats (ASCII, `|`-delimited, no trailing newline, ≤ 80 bytes):
 //
@@ -105,7 +106,11 @@ export function buildMinePayload(ticker) {
  * pool routes to vout[CHANGE_OUT], so a builder must always emit that
  * output — see buildSendPsbt. `TO_OUT` and `CHANGE_OUT` MUST differ: the
  * indexer's parser rejects equal indices, and a non-parsing payload turns
- * the tx into a plain spend that strict-burns every token input.
+ * the tx into a plain spend whose token inputs all route to the first
+ * non-OP_RETURN output (default routing) — for a SEND that is the
+ * recipient slot, i.e. the WHOLE pool would go to the recipient. Routing
+ * is per ticker: a SEND moves only its own ticker; any other ticker in the
+ * input pool goes to `vout[CHANGE_OUT]`.
  */
 export function buildSendPayload({ ticker, amount, toOutIdx, changeOutIdx }) {
   validateTicker(ticker);
@@ -120,7 +125,7 @@ export function buildSendPayload({ ticker, amount, toOutIdx, changeOutIdx }) {
   validateOutIdx("toOutIdx", toOutIdx);
   validateOutIdx("changeOutIdx", changeOutIdx);
   if (toOutIdx === changeOutIdx) {
-    throw new Error("SEND toOutIdx === changeOutIdx does not parse (§2.3) — the indexer would burn the input pool; use distinct indices");
+    throw new Error("SEND toOutIdx === changeOutIdx does not parse (§2.3) — the tx would be a plain spend and the whole input pool would move to its first output; use distinct indices");
   }
   return capPayload(
     asciiBytes(`${PROTOCOL_PREFIX}|SEND|${ticker}|${amt.toString()}|${toOutIdx}|${changeOutIdx}`),
