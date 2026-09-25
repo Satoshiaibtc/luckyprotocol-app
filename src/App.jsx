@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import * as indexer from "./lib/indexer.js";
 import { usePoll } from "./hooks/usePoll.js";
 import { useWallet } from "./hooks/useWallet.js";
@@ -7,6 +7,7 @@ import { useHashRoute } from "./hooks/useHashRoute.js";
 import { useIsMobile } from "./hooks/useMediaQuery.js";
 import { AppContext } from "./context.js";
 import TopBar from "./components/TopBar.jsx";
+import WalletModal from "./components/WalletModal.jsx";
 import TabBar from "./components/TabBar.jsx";
 import MineTicker from "./components/MineTicker.jsx";
 import Footer from "./components/Footer.jsx";
@@ -22,6 +23,10 @@ export default function App() {
   const { route, navigate } = useHashRoute();
   const w = useWallet();
   const mobile = useIsMobile();
+  // The one wallet dialog (WalletModal): opened from the top bar and every ConnectPrompt.
+  const [walletModalOpen, setWalletModalOpen] = useState(false);
+  const openWalletModal = useCallback(() => setWalletModalOpen(true), []);
+  const closeWalletModal = useCallback(() => setWalletModalOpen(false), []);
 
   // ---- app-wide indexer reads ----------------------------------------------------------
   const health = usePoll((s) => indexer.health(s), STATUS_POLL_MS, []);
@@ -52,6 +57,9 @@ export default function App() {
       disconnect: w.disconnect,
       useMock: w.useMock,
       refreshBalance: w.refreshBalance,
+      walletModalOpen,
+      openWalletModal,
+      closeWalletModal,
       health,
       tokens,
       fees,
@@ -63,7 +71,7 @@ export default function App() {
       navigate,
       refreshAll,
     }),
-    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, health, tokens, fees, fee, tipBlock, indexerOk, route, navigate, refreshAll],
+    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, walletModalOpen, openWalletModal, closeWalletModal, health, tokens, fees, fee, tipBlock, indexerOk, route, navigate, refreshAll],
   );
 
   let page;
@@ -92,6 +100,7 @@ export default function App() {
         {page}
         <Footer />
         {mobile && <TabBar />}
+        <WalletModal />
       </div>
     </AppContext.Provider>
   );

@@ -28,6 +28,8 @@ export const PROVIDER_META = {
     short: "UniSat",
     installUrl: "https://unisat.io",
     appUrl: "https://unisat.io/download",
+    description: "Browser extension and mobile app. Its own asset-aware UTXO list keeps Ordinals and Runes out of fee inputs.",
+    mobileHint: "On a phone, open this site inside the UniSat app (Discover tab), then connect.",
   },
   okx: {
     id: "okx",
@@ -35,6 +37,8 @@ export const PROVIDER_META = {
     short: "OKX",
     installUrl: "https://web3.okx.com/download",
     appUrl: "https://web3.okx.com/download",
+    description: "Browser extension and mobile app, connected through its Bitcoin mainnet provider. Fee inputs come from the indexer with a 10,000-sat floor.",
+    mobileHint: "On a phone, open this site inside the OKX Wallet app (DApp browser), then connect.",
   },
   mock: {
     id: "mock",
@@ -42,8 +46,26 @@ export const PROVIDER_META = {
     short: "SIM",
     installUrl: null,
     appUrl: null,
+    description: "VITE_MOCK=1 only: a deterministic in-page signer against the fake indexer. Nothing touches the network.",
+    mobileHint: null,
   },
 };
+
+/**
+ * True for a Bitcoin MAINNET Native SegWit (bc1q) or Taproot (bc1p)
+ * address — the only account types the protocol supports (§6). A provider
+ * that hands back anything else (a testnet `tb1…`, a legacy `1…`/`3…`, or an
+ * EVM `0x…` because the wrong OKX provider was reached) is refused before
+ * any network or key call. Case-insensitive on the bech32 body; the hrp
+ * must be lower-case `bc1`.
+ */
+export function isMainnetAddress(address) {
+  if (typeof address !== "string") return false;
+  const a = address.trim();
+  if (!/^bc1[qp][ac-hj-np-z02-9]{38,58}$/.test(a.toLowerCase())) return false;
+  // bech32 forbids mixed case
+  return a === a.toLowerCase() || a === a.toUpperCase();
+}
 
 /** The two real providers, in display order. */
 export const PROVIDER_IDS = ["unisat", "okx"];

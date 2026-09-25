@@ -7,7 +7,6 @@ import { useIsMobile } from "../hooks/useMediaQuery.js";
 import { bucketOfHash, yieldDigit } from "../lib/yield.js";
 import Led from "./hud/Led.jsx";
 import DigitChip from "./DigitChip.jsx";
-import { ProviderButtons } from "./TxProgress.jsx";
 
 const NAV = [
   { name: "board", href: "#/", label: "Board" },
@@ -18,10 +17,13 @@ const NAV = [
 /**
  * Desktop: wordmark · search · nav · [mock] SYS pill · tip chip · wallet.
  * Phone (≤ 720px): ONE 56px row — wordmark · compact SYS chip · wallet; the
- * search and nav move to the board filter and the bottom tab bar.
+ * search and nav move to the board filter and the bottom tab bar. The
+ * wallet control is the same on both: one "Connect Wallet" button (→ the
+ * wallet dialog) or, once connected, the provider · address chip (→ the
+ * same dialog with Switch wallet / Disconnect).
  */
 export default function TopBar() {
-  const { wallet, health, mock, connect, disconnect, useMock, route, navigate, tokens, tipBlock } = useApp();
+  const { wallet, health, mock, openWalletModal, route, navigate, tokens, tipBlock } = useApp();
   const mobile = useIsMobile();
   const [q, setQ] = useState("");
 
@@ -129,88 +131,42 @@ export default function TopBar() {
               <DigitChip digit={yieldDigit(tipHash)} size="sm" />
             </a>
           )}
-          <WalletControl wallet={wallet} mock={mock} mobile={mobile} onConnect={connect} onDisconnect={disconnect} onUseMock={useMock} />
+          <WalletControl wallet={wallet} mobile={mobile} onOpen={openWalletModal} />
         </div>
       </div>
     </header>
   );
 }
 
-function WalletControl({ wallet, mock, mobile, onConnect, onDisconnect, onUseMock }) {
-  const present = (wallet.providers || []).filter((p) => p.present);
+/**
+ * ONE control on every layout: "Connect Wallet" (opens the wallet dialog)
+ * until a session exists, then the "OKX · bc1p…" chip, which opens the same
+ * dialog with Switch wallet / Disconnect.
+ */
+function WalletControl({ wallet, mobile, onOpen }) {
   switch (wallet.status) {
-    case "detecting":
-      return <span className="pill">{mobile ? "wallet…" : "detecting wallets…"}</span>;
-    case "absent":
-      if (mobile) {
-        // No extension on phones: the portfolio page carries the wallet-app guidance
-        // (and the simulated-wallet button in mock mode).
-        return (
-          <a className="btn btn-primary btn-sm" href="#/me">
-            Connect
-          </a>
-        );
-      }
-      return (
-        <div className="wallet">
-          <ProviderButtons wallet={wallet} onConnect={onConnect} />
-          {mock && (
-            <button className="btn btn-sm" onClick={onUseMock} type="button">
-              Use simulated wallet
-            </button>
-          )}
-        </div>
-      );
     case "connecting":
       return (
-        <button className="btn btn-primary btn-sm" disabled type="button">
+        <button className="btn btn-primary btn-sm" disabled type="button" aria-busy="true">
           Connecting…
         </button>
       );
     case "connected": {
-      const title = `${wallet.providerName || "Wallet"} · ${wallet.address}`;
-      if (mobile) {
-        return (
-          <a className="wallet-addr" href="#/me" title={title} aria-label={`${wallet.providerName || "Wallet"} ${wallet.address} — open portfolio`}>
-            <Led state="ok" />
-            <span>{chipLabel(wallet.provider, shortAddr(wallet.address, 4, 3))}</span>
-          </a>
-        );
-      }
+      const title = `${wallet.providerName || "Wallet"} · ${wallet.address} — switch or disconnect`;
       return (
-        <div className="wallet">
-          <a className="wallet-addr" href="#/me" title={title}>
-            <span>{chipLabel(wallet.provider, shortAddr(wallet.address, 5, 4))}</span>
-            <span className="bal">{wallet.balance !== null ? `${fmtBtc(wallet.balance)} BTC` : "…"}</span>
-          </a>
-          <button className="btn btn-ghost btn-sm" onClick={onDisconnect} type="button" aria-label="Disconnect wallet">
-            Disconnect
-          </button>
-        </div>
+        <button className="wallet-addr" type="button" onClick={onOpen} title={title} aria-label={`${wallet.providerName || "Wallet"} ${wallet.address} — open wallet options`} aria-haspopup="dialog">
+          {mobile && <Led state="ok" />}
+          <span>{chipLabel(wallet.provider, shortAddr(wallet.address, mobile ? 4 : 5, mobile ? 3 : 4))}</span>
+          {!mobile && <span className="bal">{wallet.balance !== null ? `${fmtBtc(wallet.balance)} BTC` : "…"}</span>}
+        </button>
       );
     }
     default:
-      if (mobile) {
-        // One provider injected → connect it directly; two → the portfolio page offers both.
-        return present.length === 1 ? (
-          <button className="btn btn-primary btn-sm" onClick={() => onConnect(present[0].id)} type="button">
-            Connect
-          </button>
-        ) : (
-          <a className="btn btn-primary btn-sm" href="#/me">
-            Connect
-          </a>
-        );
-      }
+      // detecting | absent | disconnected: the dialog explains what is (not) installed.
       return (
-        <div className="wallet">
-          <ProviderButtons wallet={wallet} onConnect={onConnect} />
-          {mock && (
-            <button className="btn btn-sm" onClick={onUseMock} type="button">
-              Simulated wallet
-            </button>
-          )}
-        </div>
+        <button className="btn btn-primary btn-sm" type="button" onClick={onOpen} disabled={wallet.status === "detecting"} aria-haspopup="dialog">
+          Connect Wallet
+        </button>
       );
   }
 }

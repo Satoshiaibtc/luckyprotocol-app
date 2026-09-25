@@ -18,7 +18,7 @@ const POLL_MS = 15_000;
 const asQ = (poll) => ({ rows: poll.data || [], total: (poll.data || []).length, loading: poll.loading, error: poll.error, hasMore: false, loadMore: () => {} });
 
 export default function PortfolioPage() {
-  const { wallet, address, tokens, disconnect } = useApp();
+  const { wallet, address, tokens } = useApp();
   const connected = wallet.status === "connected";
   const mobile = useIsMobile();
 
@@ -63,12 +63,6 @@ export default function PortfolioPage() {
             <span className="muted">{wallet.balance !== null ? `${fmtBtc(wallet.balance)} BTC` : ""}</span>
           </div>
         </div>
-        {mobile && (
-          // The phone header has no Disconnect control — it lives here.
-          <button className="btn btn-ghost btn-sm" onClick={disconnect} type="button" aria-label="Disconnect wallet">
-            Disconnect
-          </button>
-        )}
       </header>
 
       <div className="portfolio-grid">

@@ -13,6 +13,7 @@ import {
   inscriptionOutpoints,
   firstAccount,
   isConflictError,
+  isMainnetAddress,
   normalizeBalance,
   normalizePubkey,
   normalizeTxid,
@@ -50,6 +51,23 @@ assert.equal(WALLET_STORAGE_KEY, "lp.wallet");
 assert.equal(chipLabel("okx", "bc1p…62s"), "OKX · bc1p…62s");
 assert.equal(chipLabel("unisat", "bc1p…62s"), "UniSat · bc1p…62s");
 assert.equal(chipLabel("nope", "bc1p…62s"), "bc1p…62s");
+for (const id of PROVIDER_IDS) {
+  assert.ok(PROVIDER_META[id].description.length > 20, `${id}: card description`);
+  assert.ok(PROVIDER_META[id].mobileHint.includes("app"), `${id}: phone guidance names the app`);
+}
+
+// ---- mainnet-only account guard (wallet dialog / connect) -------------------------------------------
+assert.equal(isMainnetAddress(ADDR), true, "bc1p taproot");
+assert.equal(isMainnetAddress("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), true, "bc1q native segwit");
+assert.equal(isMainnetAddress("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"), true, "upper-case bech32 is still mainnet");
+assert.equal(isMainnetAddress("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), false, "testnet tb1 refused");
+assert.equal(isMainnetAddress("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"), false, "regtest refused");
+assert.equal(isMainnetAddress("1BoatSLRHtKNngkdXEeobR76b53LETtpyT"), false, "legacy P2PKH refused");
+assert.equal(isMainnetAddress("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), false, "P2SH refused");
+assert.equal(isMainnetAddress("0x52908400098527886E0F7030069857D2E4169EE7"), false, "an EVM account (wrong OKX provider) refused");
+assert.equal(isMainnetAddress("bc1Qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), false, "mixed case refused");
+assert.equal(isMainnetAddress(""), false);
+assert.equal(isMainnetAddress(null), false);
 
 // ---- signPsbt argument mapping ----------------------------------------------------------------
 {

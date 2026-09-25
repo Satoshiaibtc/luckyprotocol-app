@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
-import { PROVIDER_META } from "../lib/walletShapes.js";
 
 /** Current page URL (hash included, so the app's browser lands on this page). */
-function siteUrl() {
+export function siteUrl() {
   return typeof window !== "undefined" ? window.location.href : "";
 }
 
@@ -35,40 +34,40 @@ async function copyText(text) {
   }
 }
 
-/**
- * Shown on phones when no provider is injected: mobile browsers cannot run
- * an extension, so the way in is a wallet app's built-in browser (UniSat
- * app → Discover; OKX Wallet app → DApp browser). `action` = what
- * connecting unlocks ("mine", "create a token", …).
- */
-export default function WalletMobileGuide({ action = "continue", extra = null }) {
+/** "Copy site URL" with a 2.2 s "Copied" / "Copy failed" echo. */
+export function CopySiteUrlButton({ className = "btn btn-primary btn-sm" }) {
   const [copied, setCopied] = useState(null); // null | "ok" | "fail"
   useEffect(() => {
     if (copied === null) return undefined;
     const id = setTimeout(() => setCopied(null), 2200);
     return () => clearTimeout(id);
   }, [copied]);
-
   const onCopy = async () => {
     setCopied((await copyText(siteUrl())) ? "ok" : "fail");
   };
-
   return (
-    <div className="cta wallet-guide">
+    <button className={className} type="button" onClick={onCopy} aria-live="polite">
+      {copied === "ok" ? "Copied" : copied === "fail" ? "Copy failed — long-press the address bar" : "Copy site URL"}
+    </button>
+  );
+}
+
+/**
+ * Shown (inside the wallet modal) on phones when no provider is injected:
+ * mobile browsers cannot run an extension, so the way in is a wallet app's
+ * built-in browser (UniSat app → Discover; OKX Wallet app → DApp browser).
+ * The per-wallet "Get the app" links live on the provider cards above it;
+ * this block carries the copy-URL affordance and the URL itself.
+ */
+export default function WalletMobileGuide({ extra = null }) {
+  return (
+    <div className="wallet-guide">
       <div>
-        <strong>No wallet extension on phones.</strong> To {action}, open this site inside the UniSat app or the OKX Wallet app (Discover / DApp browser),
-        then connect. LuckyProtocol never holds keys.
+        <strong>No wallet extension on phones.</strong> Copy this page&apos;s address, open it inside the UniSat app or the OKX Wallet app (Discover / DApp browser),
+        and tap Connect Wallet there. LuckyProtocol never holds keys.
       </div>
       <div className="row">
-        <button className="btn btn-primary btn-sm" type="button" onClick={onCopy} aria-live="polite">
-          {copied === "ok" ? "Copied" : copied === "fail" ? "Copy failed — long-press the address bar" : "Copy site URL"}
-        </button>
-        <a className="btn btn-sm" href={PROVIDER_META.unisat.appUrl} target="_blank" rel="noopener noreferrer">
-          Get the UniSat app
-        </a>
-        <a className="btn btn-sm" href={PROVIDER_META.okx.appUrl} target="_blank" rel="noopener noreferrer">
-          Get the OKX Wallet app
-        </a>
+        <CopySiteUrlButton />
         {extra}
       </div>
       <div className="mono muted site-url" aria-label="Site URL">

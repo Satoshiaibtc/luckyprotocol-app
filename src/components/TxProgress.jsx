@@ -1,9 +1,7 @@
 import { fmtInt, txUrl, shortTxid } from "../lib/format.js";
 import { MIN_FEE_INPUT_SATS_UNSAFE } from "../lib/psbt.js";
 import { isMobileBrowser } from "../lib/wallet.js";
-import { PROVIDER_IDS, PROVIDER_META } from "../lib/walletShapes.js";
 import { useApp } from "../context.js";
-import WalletMobileGuide from "./WalletMobileGuide.jsx";
 
 /**
  * The inputs a PSBT is about to spend, shown at signing time (audit M-8).
@@ -127,74 +125,25 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
 }
 
 /**
- * "Install …" links for every provider that is not injected (desktop), or
- * one "Connect <name>" / two provider buttons when they are. Shared by the
- * top bar and the ConnectPrompt.
+ * "Connect a wallet to …" block: one Connect Wallet button that opens the
+ * wallet dialog (provider cards, install links, phone guidance, simulated
+ * wallet in mock mode all live there).
  */
-export function ProviderButtons({ wallet, onConnect, size = "btn-sm", className = "" }) {
-  const present = (wallet.providers || []).filter((p) => p.present);
-  const busy = wallet.status === "connecting" || wallet.status === "detecting";
-  if (present.length === 0) {
-    return PROVIDER_IDS.map((id) => (
-      <a key={id} className={`btn btn-primary ${size} ${className}`.trim()} href={PROVIDER_META[id].installUrl} target="_blank" rel="noopener noreferrer">
-        Install {PROVIDER_META[id].name}
-      </a>
-    ));
-  }
-  if (present.length === 1) {
-    const p = present[0];
-    return (
-      <button className={`btn btn-primary ${size} ${className}`.trim()} type="button" onClick={() => onConnect(p.id)} disabled={busy}>
-        {wallet.status === "connecting" ? "Connecting…" : `Connect ${p.name}`}
-      </button>
-    );
-  }
-  return present.map((p) => (
-    <button key={p.id} className={`btn btn-primary ${size} ${className}`.trim()} type="button" onClick={() => onConnect(p.id)} disabled={busy}>
-      {p.name}
-    </button>
-  ));
-}
-
-/** "Connect a wallet to …" block with the install / simulated-wallet affordances. */
 export function ConnectPrompt({ action = "continue" }) {
-  const { wallet, mock, connect, useMock } = useApp();
-  // No provider on a phone: the extension links are useless there — point at
-  // the wallet apps' built-in browsers instead (simulated wallet stays in mock mode).
-  if (wallet.status === "absent" && isMobileBrowser()) {
-    return (
-      <>
-        <WalletMobileGuide
-          action={action}
-          extra={
-            mock ? (
-              <button className="btn btn-sm" type="button" onClick={useMock}>
-                Use simulated wallet
-              </button>
-            ) : null
-          }
-        />
-        {wallet.error && <div className="err">{wallet.error}</div>}
-      </>
-    );
-  }
-  const present = (wallet.providers || []).filter((p) => p.present);
+  const { wallet, openWalletModal } = useApp();
+  const phone = wallet.status === "absent" && isMobileBrowser();
+  const detecting = wallet.status === "detecting";
   return (
     <div className="cta">
       <div>
-        {wallet.status === "absent"
-          ? `A Bitcoin wallet extension (UniSat or OKX Wallet) is required to ${action}. LuckyProtocol never holds keys.`
-          : present.length > 1
-            ? `Choose a wallet to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`
-            : `Connect ${present[0]?.name || "a wallet"} to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`}
+        {phone
+          ? `No wallet detected in this browser. To ${action}, open this site inside the UniSat app or the OKX Wallet app — Connect Wallet shows how. LuckyProtocol never holds keys.`
+          : `A Bitcoin wallet (UniSat or OKX Wallet) is required to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`}
       </div>
       <div className="row">
-        <ProviderButtons wallet={wallet} onConnect={connect} />
-        {mock && (
-          <button className="btn btn-sm" type="button" onClick={useMock}>
-            Use simulated wallet
-          </button>
-        )}
+        <button className="btn btn-primary" type="button" onClick={openWalletModal} disabled={detecting} aria-haspopup="dialog">
+          {wallet.status === "connecting" ? "Connecting…" : detecting ? "Detecting wallets…" : "Connect Wallet"}
+        </button>
       </div>
       {wallet.error && <div className="err">{wallet.error}</div>}
     </div>

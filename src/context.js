@@ -1,9 +1,11 @@
 import { createContext, useContext } from "react";
 
 /**
- * App-wide state supplied by App.jsx: wallet + connect/disconnect, indexer
- * health, fee estimates (`fees`) and the user's fee-rate choice (`fee`, see
- * useFeeRate), the token registry poll, routing, and the mock flag.
+ * App-wide state supplied by App.jsx: wallet + connect/disconnect, the
+ * wallet dialog (`walletModalOpen`, `openWalletModal`, `closeWalletModal`),
+ * indexer health, fee estimates (`fees`) and the user's fee-rate choice
+ * (`fee`, see useFeeRate), the token registry poll, routing, and the mock
+ * flag.
  */
 export const AppContext = createContext(null);
 

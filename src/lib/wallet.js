@@ -34,6 +34,7 @@ import {
   defaultProviderId,
   firstAccount,
   isConflictError,
+  isMainnetAddress,
   normalizeBalance,
   normalizePubkey,
   normalizeTxid,
@@ -67,9 +68,21 @@ export function isMobileBrowser() {
 
 // ---- injected objects ------------------------------------------------------------------
 
+/**
+ * OKX injects several providers under `window.okxwallet`: the EVM one
+ * (`window.okxwallet` itself / `.ethereum`), Solana, and the BITCOIN
+ * MAINNET one at `window.okxwallet.bitcoin` (`.bitcoinTestnet` /
+ * `.bitcoinSignet` exist too). Only `.bitcoin` is ever used — never the
+ * EVM provider, never a testnet one — and connect() re-checks that the
+ * returned account is a mainnet bc1q/bc1p address.
+ */
 const INJECTED = {
   unisat: () => (typeof window !== "undefined" && window.unisat ? window.unisat : null),
-  okx: () => (typeof window !== "undefined" && window.okxwallet && window.okxwallet.bitcoin ? window.okxwallet.bitcoin : null),
+  okx: () => {
+    if (typeof window === "undefined" || !window.okxwallet) return null;
+    const p = window.okxwallet.bitcoin;
+    return p && typeof p === "object" && p !== window.okxwallet ? p : null;
+  },
 };
 
 let mockProvider = null; // set by enableMockWallet()
@@ -267,12 +280,40 @@ export async function connect(id, { silent = false } = {}) {
     }
   }
   if (network !== "livenet") {
-    if (!silent && typeof p.switchNetwork === "function") {
+    const wrongNet = `${name} is on "${network}" — LuckyProtocol is Bitcoin mainnet only. Switch the wallet to mainnet (livenet) and connect again.`;
+    if (silent || typeof p.switchNetwork !== "function") throw new Error(wrongNet);
+    // Ask the provider to switch; a refusal (or a provider that says it
+    // switched but did not) is a clear error, never a silent testnet session.
+    try {
       await p.switchNetwork("livenet");
-      network = "livenet";
-    } else {
-      throw new Error(`${name} is on "${network}" — LuckyProtocol is mainnet only; switch to livenet`);
+    } catch (e) {
+      throw new Error(`${wrongNet} (${_msg(e)})`);
     }
+    let after = "livenet";
+    try {
+      after = String((await p.getNetwork()) || "livenet");
+    } catch {
+      after = "livenet";
+    }
+    if (after !== "livenet") throw new Error(wrongNet);
+    network = "livenet";
+    // The account may change with the network — re-read it.
+    if (typeof p.getAccounts === "function") {
+      try {
+        address = firstAccount(await p.getAccounts()) || address;
+      } catch {
+        /* keep the address from the first prompt */
+      }
+    }
+  }
+  // Defence in depth: whatever the provider says about its network, the
+  // account must be a mainnet bc1q / bc1p address (a `tb1…` testnet
+  // account, or an EVM `0x…` from the wrong OKX provider, stops here).
+  if (!isMainnetAddress(address)) {
+    throw new Error(
+      `${name} returned "${address}", which is not a Bitcoin mainnet Native SegWit (bc1q) or Taproot (bc1p) address — ` +
+      `switch the wallet to Bitcoin mainnet and one of those address types, then connect again`,
+    );
   }
 
   if (!pubkeyHex) pubkeyHex = normalizePubkey(await p.getPublicKey());

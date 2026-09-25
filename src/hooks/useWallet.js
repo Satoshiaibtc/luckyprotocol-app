@@ -75,7 +75,11 @@ export function useWallet({ onDisconnect } = {}) {
     };
   }, [applySession]);
 
-  /** `connect("okx")`; with no id the only injected provider (or the current one) is used. */
+  /**
+   * `connect("okx")`; with no id the only injected provider (or the current
+   * one) is used. Resolves `true` on success, `false` on failure (the error
+   * lands in `wallet.error`) — callers such as the wallet modal close on true.
+   */
   const connect = useCallback(
     async (providerId) => {
       const id = typeof providerId === "string" ? providerId : undefined;
@@ -83,6 +87,7 @@ export function useWallet({ onDisconnect } = {}) {
       try {
         const session = await wallet.connect(id);
         applySession(session);
+        return true;
       } catch (e) {
         setWallet((s) => ({
           ...s,
@@ -95,6 +100,7 @@ export function useWallet({ onDisconnect } = {}) {
           assetSafe: null,
           error: friendlyError(e),
         }));
+        return false;
       }
     },
     [applySession],
@@ -109,9 +115,10 @@ export function useWallet({ onDisconnect } = {}) {
   const useMock = useCallback(() => {
     try {
       wallet.enableMockWallet();
-      connect("mock");
+      return connect("mock");
     } catch (e) {
       setWallet((s) => ({ ...s, error: friendlyError(e) }));
+      return Promise.resolve(false);
     }
   }, [connect]);
 
