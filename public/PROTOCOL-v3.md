@@ -24,7 +24,7 @@ index, consensus-enforced protocol fee outputs, fixed 21M supply.
 | Name | Value | Notes |
 |---|---|---|
 | `PROTOCOL_PREFIX` | `LUCKYPROTOCOL` | Same prefix as v2. Isolation from v2 history comes from the activation-height gate (every v2 tx predates it) and the v3 MINE grammar (v2's tier-format payloads no longer parse). |
-| `ACTIVATION_HEIGHT` | **969_500** | **PLACEHOLDER** — finalize at launch; MUST be > tip at deploy (tip was 968,518 on 2026-09-25). Txs in earlier blocks are ignored. |
+| `ACTIVATION_HEIGHT` | **968_750** | FINAL (set 2026-09-25 at tip 968,539). Txs in earlier blocks are ignored. |
 | `SNAPSHOT_VERSION` | 13 | Fresh state; v2 snapshots are refused. (12 = v3 before §7 trading; never deployed.) |
 | `REQUIRED_TOKEN_SUPPLY` | 21_000_000 | Implicit on every DEPLOY, not user-settable. |
 | `DUST_SATS` | 546 | Token-carrier output value. |
@@ -145,6 +145,7 @@ All JSON. CORS open. Base: the operator's indexer origin.
 | `GET /transfers/:addr` | `{ address, transfers: [TransferView] }` |
 | `GET /tx-status/:txid` | `{ txid, confirmed, block_height, block_hash, block_time }` (`confirmed:false` when unknown) |
 | `GET /block-info/:height` | `{ height, hash, time }` |
+| `GET /blocks/recent?limit` | `{ tip_height, blocks: [{ height, hash }] }` — last N (≤ 32, default 16) block hashes newest first; feeds the yield-digit history board |
 | `GET /fees` | `{ fastestFee, halfHourFee, hourFee, economyFee, minimumFee }` sat/vB |
 | `POST /broadcast` | body = raw tx hex (text/plain) → txid text; 400 + reason on node rejection |
 | `POST /orders` | JSON `{ psbt, ticker, amount, price_sats }` → `OrderView` (201) — see §7.4 |

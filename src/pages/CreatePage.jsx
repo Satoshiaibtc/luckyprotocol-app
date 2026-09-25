@@ -7,7 +7,7 @@ import { friendlyError } from "../hooks/useWallet.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { buildDeployPsbt, estimateDeployFeeSats } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
-import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
+import { ACTIVATION_HEIGHT, DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
 import { BUCKETS, EXPECTED_YIELD } from "../lib/yield.js";
 import { fmtDec, fmtInt, fmtSats } from "../lib/format.js";
 import TokenCard from "../components/TokenCard.jsx";
@@ -21,6 +21,9 @@ const AVAIL_LED = { idle: "idle", checking: "busy", free: "ok", taken: "err", er
 export default function CreatePage({ params, navigate }) {
   const { wallet, address, pubkeyHex, fees, indexerOk, health, refreshAll } = useApp();
   const connected = wallet.status === "connected";
+  // A DEPLOY below the activation height is ignored by the indexer (fees lost).
+  const tipNow = health.data?.tip_height ?? null;
+  const preActivation = tipNow !== null && tipNow < ACTIVATION_HEIGHT;
   const [ticker, setTicker] = useState(() => String(params.ticker || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8));
   const valid = TICKER_RE.test(ticker);
 
@@ -190,10 +193,16 @@ export default function CreatePage({ params, navigate }) {
             </div>
           </dl>
 
+          {preActivation && (
+            <div className="notice">
+              The protocol activates at block #{fmtInt(ACTIVATION_HEIGHT)} — {fmtInt(ACTIVATION_HEIGHT - tipNow)} blocks from now. Token creation
+              opens then; a transaction sent earlier is ignored and only costs fees.
+            </div>
+          )}
           {!connected ? (
             <ConnectPrompt action="create a token" />
           ) : (
-            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.state !== "free" || busy || !indexerOk || flow.phase === "confirmed"}>
+            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.state !== "free" || busy || !indexerOk || preActivation || flow.phase === "confirmed"}>
               {flow.phase === "confirmed" ? `Created ${flow.ticker}` : busy ? "Working…" : `Create ${valid ? ticker : "token"}`}
             </button>
           )}

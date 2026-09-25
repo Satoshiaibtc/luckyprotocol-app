@@ -2,7 +2,7 @@ import { useCallback, useMemo } from "react";
 import { useApp } from "../context.js";
 import { useMine } from "../hooks/useMine.js";
 import { estimateMineFeeSats } from "../lib/psbt.js";
-import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
+import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS, ACTIVATION_HEIGHT } from "../lib/payloads.js";
 import { fmtInt, fmtTime, txUrl, shortTxid } from "../lib/format.js";
 import { ConnectPrompt } from "./TxProgress.jsx";
 import TipReadout from "./TipReadout.jsx";
@@ -54,7 +54,11 @@ function litCount(mine) {
  * pending→confirmed state line with indexer reconcile.
  */
 export default function MinePanel({ ticker, tokenInfo, onSettled }) {
-  const { wallet, fees, indexerOk, tipBlock, refreshAll } = useApp();
+  const { wallet, fees, indexerOk, tipBlock, refreshAll, health } = useApp();
+  // Before the activation height the indexer ignores every protocol tx, so a
+  // MINE would only burn fees — lock the button and say when it opens.
+  const tipNow = health.data?.tip_height ?? null;
+  const preActivation = tipNow !== null && tipNow < ACTIVATION_HEIGHT;
   const settled = useCallback(() => {
     refreshAll();
     onSettled?.();
@@ -81,7 +85,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   }, [feeRate, tokenInfo, wallet.address, ticker]);
 
   const connected = wallet.status === "connected";
-  const canMine = connected && indexerOk && !busy && !!tokenInfo && !exhausted;
+  const canMine = connected && indexerOk && !busy && !!tokenInfo && !exhausted && !preActivation;
   const lit = litCount(mine);
 
   return (
@@ -108,6 +112,12 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
       {!connected && <ConnectPrompt action="mine" />}
       {connected && wallet.error && <div className="notice">{wallet.error}</div>}
       {exhausted && <div className="notice">{ticker} supply is fully minted. New mines credit 0.</div>}
+      {preActivation && (
+        <div className="notice">
+          The protocol activates at block #{fmtInt(ACTIVATION_HEIGHT)} — {fmtInt(ACTIVATION_HEIGHT - tipNow)} blocks from now. Mining opens then; a
+          transaction sent earlier is ignored and only costs fees.
+        </div>
+      )}
 
       <button className={`mine-btn${busy ? " busy" : ""}`} type="button" onClick={startMine} disabled={!canMine} aria-busy={busy}>
         <svg className="crawl" aria-hidden="true">

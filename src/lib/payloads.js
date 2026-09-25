@@ -14,7 +14,7 @@
 // ---- §1 constants ----------------------------------------------------------
 
 export const PROTOCOL_PREFIX = "LUCKYPROTOCOL";
-export const ACTIVATION_HEIGHT = 969_500;          // PLACEHOLDER per spec; finalized at launch
+export const ACTIVATION_HEIGHT = 968_750;          // FINAL (spec §1); protocol txs below this height are ignored
 export const SNAPSHOT_VERSION = 12;
 export const REQUIRED_TOKEN_SUPPLY = 21_000_000;   // implicit on every DEPLOY
 export const DUST_SATS = 546;                      // token-carrier output value
