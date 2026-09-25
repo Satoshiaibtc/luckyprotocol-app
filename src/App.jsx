@@ -3,8 +3,10 @@ import * as indexer from "./lib/indexer.js";
 import { usePoll } from "./hooks/usePoll.js";
 import { useWallet } from "./hooks/useWallet.js";
 import { useHashRoute } from "./hooks/useHashRoute.js";
+import { useIsMobile } from "./hooks/useMediaQuery.js";
 import { AppContext } from "./context.js";
 import TopBar from "./components/TopBar.jsx";
+import TabBar from "./components/TabBar.jsx";
 import MineTicker from "./components/MineTicker.jsx";
 import Footer from "./components/Footer.jsx";
 import Board from "./pages/Board.jsx";
@@ -18,6 +20,7 @@ const STATUS_POLL_MS = 15_000;
 export default function App() {
   const { route, navigate } = useHashRoute();
   const w = useWallet();
+  const mobile = useIsMobile();
 
   // ---- app-wide indexer reads ----------------------------------------------------------
   const health = usePoll((s) => indexer.health(s), STATUS_POLL_MS, []);
@@ -79,11 +82,12 @@ export default function App() {
 
   return (
     <AppContext.Provider value={ctx}>
-      <div className="app">
+      <div className={`app${mobile ? " app-mobile" : ""}`}>
         <TopBar />
         <MineTicker />
         {page}
         <Footer />
+        {mobile && <TabBar />}
       </div>
     </AppContext.Provider>
   );

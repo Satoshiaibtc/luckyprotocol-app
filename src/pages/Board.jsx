@@ -5,7 +5,8 @@ import BlockTape from "../components/BlockTape.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
 import { fmtInt } from "../lib/format.js";
-import { DEPLOY_PROTOCOL_FEE_SATS, REQUIRED_TOKEN_SUPPLY } from "../lib/payloads.js";
+import { DEPLOY_PROTOCOL_FEE_SATS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
+import { tokenHref } from "../hooks/useHashRoute.js";
 
 
 const SORTS = [
@@ -30,7 +31,7 @@ export function sortTokens(items, sort) {
 }
 
 export default function Board({ notice }) {
-  const { tokens, health } = useApp();
+  const { tokens, health, navigate } = useApp();
   const [sort, setSort] = useState("active");
   const [q, setQ] = useState("");
 
@@ -40,6 +41,13 @@ export default function Board({ notice }) {
     const filtered = needle ? items.filter((t) => t.ticker.includes(needle)) : items;
     return sortTokens(filtered, sort);
   }, [items, q, sort]);
+
+  // Enter on a valid ticker opens its page (the phone header has no search box).
+  const submitFilter = (e) => {
+    e.preventDefault();
+    const t = q.trim().toUpperCase();
+    if (TICKER_RE.test(t)) navigate(tokenHref(t));
+  };
 
   const led = ledFromPoll(health);
 
@@ -77,7 +85,26 @@ export default function Board({ notice }) {
             </button>
           ))}
         </div>
-        <input className="input mono board-search" type="search" placeholder="Filter tickers" aria-label="Filter tickers" value={q} onChange={(e) => setQ(e.target.value.toUpperCase())} maxLength={8} />
+        <form className="board-search" role="search" onSubmit={submitFilter}>
+          <input
+            className="input mono"
+            type="search"
+            list="board-ticker-list"
+            placeholder="Filter tickers"
+            aria-label="Filter tickers — Enter opens a ticker"
+            enterKeyHint="go"
+            value={q}
+            onChange={(e) => setQ(e.target.value.toUpperCase())}
+            maxLength={8}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <datalist id="board-ticker-list">
+            {items.map((t) => (
+              <option value={t.ticker} key={t.ticker} />
+            ))}
+          </datalist>
+        </form>
       </div>
 
       {tokens.error && items.length === 0 ? (
