@@ -1,17 +1,27 @@
 import { useMemo, useState } from "react";
 import { useApp } from "../context.js";
 import TokenCard from "../components/TokenCard.jsx";
+import BlockTape from "../components/BlockTape.jsx";
+import YieldSpectrum from "../components/YieldSpectrum.jsx";
+import TierTable from "../components/TierTable.jsx";
+import EVReadout from "../components/EVReadout.jsx";
+import Panel from "../components/hud/Panel.jsx";
+import { ledFromPoll } from "../components/hud/Led.jsx";
+import ObservedMix from "../components/ObservedMix.jsx";
+import * as indexer from "../lib/indexer.js";
+import { usePoll } from "../hooks/usePoll.js";
 import { fmtInt } from "../lib/format.js";
+import { yieldDigit } from "../lib/yield.js";
+import { DEPLOY_PROTOCOL_FEE_SATS, REQUIRED_TOKEN_SUPPLY } from "../lib/payloads.js";
+
+const MIX_LIMIT = 200;
 
 const SORTS = [
-  { id: "trending", label: "Trending" },
+  { id: "active", label: "Active" },
   { id: "new", label: "New" },
   { id: "minted", label: "Most minted" },
-  { id: "price", label: "Top price" },
+  { id: "open", label: "Open supply" },
 ];
-
-const trendScore = (t) => (t.mine_count || 0) + 3 * (t.trade_count || 0);
-const lastPrice = (t) => (Number.isFinite(t.last_trade?.unit_price) ? t.last_trade.unit_price : null);
 
 export function sortTokens(items, sort) {
   const rows = [...items];
@@ -20,24 +30,19 @@ export function sortTokens(items, sort) {
       return rows.sort((a, b) => b.deploy_block - a.deploy_block || a.ticker.localeCompare(b.ticker));
     case "minted":
       return rows.sort((a, b) => b.minted - a.minted || a.ticker.localeCompare(b.ticker));
-    case "price":
-      return rows.sort((a, b) => {
-        const pa = lastPrice(a);
-        const pb = lastPrice(b);
-        if (pa === null && pb === null) return a.ticker.localeCompare(b.ticker);
-        if (pa === null) return 1;
-        if (pb === null) return -1;
-        return pb - pa;
-      });
+    case "open":
+      return rows.sort((a, b) => b.supply - b.minted - (a.supply - a.minted) || a.ticker.localeCompare(b.ticker));
     default:
-      return rows.sort((a, b) => trendScore(b) - trendScore(a) || b.deploy_block - a.deploy_block);
+      return rows.sort((a, b) => (b.mine_count || 0) - (a.mine_count || 0) || b.deploy_block - a.deploy_block);
   }
 }
 
 export default function Board({ notice }) {
-  const { tokens, health } = useApp();
-  const [sort, setSort] = useState("trending");
+  const { tokens, health, tipBlock } = useApp();
+  const [sort, setSort] = useState("active");
   const [q, setQ] = useState("");
+
+  const mixQ = usePoll((s) => indexer.minesFeed({ limit: MIX_LIMIT }, s), 30_000, []);
 
   const items = useMemo(() => tokens.data?.items || [], [tokens.data]);
   const shown = useMemo(() => {
@@ -46,33 +51,43 @@ export default function Board({ notice }) {
     return sortTokens(filtered, sort);
   }, [items, q, sort]);
 
+  const led = ledFromPoll(health);
+
   return (
     <main className="page board">
       {notice && <div className="notice">{notice}</div>}
 
       <section className="hero">
         <div>
-          <h1>Mine, hold, trade — on Bitcoin.</h1>
-          <p className="muted">
-            Every token has a fixed 21,000,000 supply. Anyone can mine it; the yield is decided by the confirming block&apos;s hash.
-            Holders trade peer-to-peer with signed listings that settle on-chain.
+          <h1>Mining telemetry on Bitcoin.</h1>
+          <p>
+            Fixed {fmtInt(REQUIRED_TOKEN_SUPPLY)} supply per token. Anyone can mine; the confirming block&apos;s last hex digit sets the yield.
           </p>
         </div>
-        <div className="hero-stats">
-          <div>
-            <dt>Tokens</dt>
-            <dd>{fmtInt(health.data?.token_count ?? items.length)}</dd>
-          </div>
-          <div>
-            <dt>Mines</dt>
-            <dd>{fmtInt(health.data?.mine_count)}</dd>
-          </div>
-          <div>
-            <dt>Block</dt>
-            <dd>{health.data?.tip_height ? `#${fmtInt(health.data.tip_height)}` : "—"}</dd>
-          </div>
+        <div className="telemetry">
+          <Panel as="div" title="Tokens" led={led}>
+            <div className="hero-num">{fmtInt(health.data?.token_count ?? items.length)}</div>
+          </Panel>
+          <Panel as="div" title="Mines settled" led={led}>
+            <div className="hero-num">{fmtInt(health.data?.mine_count)}</div>
+          </Panel>
+          <Panel as="div" title="Tip block" led={led}>
+            <div className="hero-num">{health.data?.tip_height ? `#${fmtInt(health.data.tip_height)}` : "—"}</div>
+          </Panel>
         </div>
       </section>
+
+      <BlockTape />
+
+      <Panel title="Yield model" led="ok" aria-label="Yield model">
+        <YieldSpectrum compact tipDigit={yieldDigit(tipBlock.data?.hash)} />
+        <TierTable compact />
+        <EVReadout size="md" />
+      </Panel>
+
+      <Panel title={`Observed mix · network · last ${MIX_LIMIT} mines`} led={ledFromPoll(mixQ)} aria-label="Observed mix">
+        <ObservedMix rows={mixQ.data?.items} loading={mixQ.loading} error={mixQ.error} meanLabel="Observed mean" />
+      </Panel>
 
       <div className="board-controls">
         <div className="chips" role="tablist" aria-label="Sort">
@@ -97,7 +112,7 @@ export default function Board({ notice }) {
           ) : (
             <>
               <h2>No tokens yet</h2>
-              <p className="muted">Be the first: deploying a ticker costs 5,460 sats plus the network fee.</p>
+              <p className="muted">Be the first: deploying a ticker costs {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats plus the network fee.</p>
               <a className="btn btn-primary" href="#/create">
                 Create the first one
               </a>

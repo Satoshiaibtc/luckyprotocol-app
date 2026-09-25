@@ -1,22 +1,26 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useApp } from "../context.js";
 import { useMine } from "../hooks/useMine.js";
 import { estimateMineFeeSats } from "../lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
-import { YIELD_BASE, YIELD_MID, YIELD_HIGH, EXPECTED_YIELD, mineYield } from "../lib/yield.js";
-import { fmtInt, txUrl, shortTxid, blockUrl, fmtAgo } from "../lib/format.js";
+import { fmtInt, fmtTime, txUrl, shortTxid } from "../lib/format.js";
 import { ConnectPrompt } from "./TxProgress.jsx";
+import TipReadout from "./TipReadout.jsx";
+import EVReadout from "./EVReadout.jsx";
+import HashReveal from "./HashReveal.jsx";
+import Led from "./hud/Led.jsx";
+import RingGauge from "./hud/RingGauge.jsx";
 
 function buttonLabel(phase) {
   switch (phase) {
     case "building":
-      return "Building…";
+      return "Assembling…";
     case "signing":
       return "Awaiting signature";
     case "broadcasting":
       return "Broadcasting…";
     case "pending":
-      return "Pending confirmation";
+      return "Awaiting block";
     case "confirmed":
       return "Mine again";
     default:
@@ -24,19 +28,43 @@ function buttonLabel(phase) {
   }
 }
 
+const PHASES = ["Build", "Sign", "Broadcast", "Confirm"];
+
+function litCount(mine) {
+  switch (mine.phase) {
+    case "building":
+      return 1;
+    case "signing":
+      return 2;
+    case "broadcasting":
+      return 3;
+    case "pending":
+    case "confirmed":
+      return 4;
+    case "error":
+      return mine.txid ? 4 : mine.inputCount != null ? 2 : 1;
+    default:
+      return 0;
+  }
+}
+
 /**
- * The mining console (ported from the v3 console): yield table, fee
- * preview, the MINE button and the idle→building→signing→broadcasting→
+ * The mining console: latest block, expected yield, fee preview, the MINE
+ * button, the phase track and the idle→building→signing→broadcasting→
  * pending→confirmed state line with indexer reconcile.
  */
-export default function MinePanel({ ticker, tokenInfo }) {
+export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   const { wallet, fees, indexerOk, tipBlock, refreshAll } = useApp();
+  const settled = useCallback(() => {
+    refreshAll();
+    onSettled?.();
+  }, [refreshAll, onSettled]);
   const { mine, startMine, resetMine, busy } = useMine({
     wallet,
     ticker,
     tokenInfo,
     feesData: fees.data,
-    onSettled: refreshAll,
+    onSettled: settled,
   });
 
   const minted = tokenInfo?.minted ?? 0;
@@ -54,56 +82,26 @@ export default function MinePanel({ ticker, tokenInfo }) {
 
   const connected = wallet.status === "connected";
   const canMine = connected && indexerOk && !busy && !!tokenInfo && !exhausted;
-  const tipHash = tipBlock.data?.hash || null;
-  const tipYield = tipHash ? mineYield(tipHash) : null;
+  const lit = litCount(mine);
 
   return (
     <div className="action-body">
-      <div className="yield-table" role="table" aria-label="Yield by last hash digit">
-        <div className="yr" role="row">
-          <span className="d mono">f</span>
-          <span className="y y-high">{YIELD_HIGH} {ticker}</span>
-          <span className="p muted">1 in 16</span>
-        </div>
-        <div className="yr" role="row">
-          <span className="d mono">a–e</span>
-          <span className="y y-mid">{YIELD_MID} {ticker}</span>
-          <span className="p muted">5 in 16</span>
-        </div>
-        <div className="yr" role="row">
-          <span className="d mono">0–9</span>
-          <span className="y y-base">{YIELD_BASE} {ticker}</span>
-          <span className="p muted">10 in 16</span>
-        </div>
-      </div>
-      <p className="rule">
-        Every valid mine yields. The amount is the last hex digit of the block that confirms your transaction — public,
-        deterministic, and nothing is chosen by the miner. Expected yield ≈ {EXPECTED_YIELD} {ticker} per mine.
-      </p>
-
-      {tipHash && (
-        <div className="tip-line">
-          <span className="muted">Latest block</span>
-          <a className="mono" href={blockUrl(tipBlock.data.height)} target="_blank" rel="noopener noreferrer">
-            #{fmtInt(tipBlock.data.height)}
-          </a>
-          <span className="mono hash-tail">
-            …{tipHash.slice(-7, -1)}
-            <span className="digit">{tipHash.slice(-1)}</span>
-          </span>
-          <span className="muted">
-            → {tipYield} {ticker}{tipBlock.data.time ? ` · ${fmtAgo(tipBlock.data.time)}` : ""}
-          </span>
-        </div>
-      )}
+      <TipReadout tipBlock={tipBlock} ticker={ticker} />
+      <EVReadout size="md" ticker={ticker} />
 
       <div className="fee-row">
         <span>
-          Network fee <span className="v">{feeEstimate ? `≈ ${fmtInt(feeEstimate.feeSats)} sats` : "—"}</span>
-          {feeRate ? <span className="muted"> @ {feeRate} sat/vB</span> : null}
+          <span className="k">Network fee</span>
+          <span className="v">{feeEstimate ? `≈ ${fmtInt(feeEstimate.feeSats)} sats` : "—"}</span>
+          {feeRate ? ` @ ${feeRate} sat/vB` : null}
         </span>
         <span>
-          Protocol fee <span className="v">{MINE_PROTOCOL_FEE_SATS} sats</span> · yield slot <span className="v">{DUST_SATS} sats</span>
+          <span className="k">Protocol fee</span>
+          <span className="v">{MINE_PROTOCOL_FEE_SATS} sats</span>
+        </span>
+        <span>
+          <span className="k">Yield output</span>
+          <span className="v">{DUST_SATS} sats</span>
         </span>
       </div>
 
@@ -112,8 +110,24 @@ export default function MinePanel({ ticker, tokenInfo }) {
       {exhausted && <div className="notice">{ticker} supply is fully minted. New mines credit 0.</div>}
 
       <button className={`mine-btn${busy ? " busy" : ""}`} type="button" onClick={startMine} disabled={!canMine} aria-busy={busy}>
+        <svg className="crawl" aria-hidden="true">
+          <rect width="100%" height="100%" />
+        </svg>
         {buttonLabel(mine.phase)}
       </button>
+
+      <div className="phase-track" aria-hidden="true">
+        {PHASES.map((p, i) => {
+          let cls = "";
+          if (i < lit) cls = mine.phase === "error" ? "fail" : mine.phase === "pending" && i === 3 ? "pulse" : "on";
+          return (
+            <div key={p} className={cls}>
+              <span className="seg" />
+              <span className="label">{p}</span>
+            </div>
+          );
+        })}
+      </div>
 
       <StatusLine mine={mine} ticker={ticker} wallet={wallet} onReset={resetMine} indexerOk={indexerOk} />
     </div>
@@ -121,11 +135,12 @@ export default function MinePanel({ ticker, tokenInfo }) {
 }
 
 function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
-  let cls = "status";
+  let led = "idle";
   let text;
   let detail = null;
-  let result = null;
   let actions = null;
+  let reveal = null;
+  let pending = null;
 
   const txLink = mine.txid && (
     <a href={txUrl(mine.txid)} target="_blank" rel="noopener noreferrer" className="mono" title={mine.txid}>
@@ -135,11 +150,11 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
 
   switch (mine.phase) {
     case "building":
-      cls += " s-busy";
+      led = "busy";
       text = "Building transaction — selecting fee inputs, laying out outputs.";
       break;
     case "signing":
-      cls += " s-busy";
+      led = "busy";
       text = "Awaiting signature — confirm in the UniSat popup.";
       detail = (
         <>
@@ -149,11 +164,11 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
       );
       break;
     case "broadcasting":
-      cls += " s-busy";
+      led = "busy";
       text = "Broadcasting…";
       break;
     case "pending":
-      cls += " s-busy";
+      led = "busy";
       text = "Broadcast. Pending confirmation — checking every 15 s.";
       detail = (
         <>
@@ -161,18 +176,32 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
           {mine.pollError ? ` · last check failed: ${mine.pollError}` : ""}
         </>
       );
-      break;
-    case "confirmed":
-      cls += " s-ok";
-      text = "Confirmed.";
-      result = (
+      pending = (
         <>
-          Block {fmtInt(mine.blockHeight)} · yield{" "}
-          <span className="y">
-            {mine.yieldLocal} {ticker}
-          </span>
+          <div className="stamps">
+            <span>
+              <span className="label">Broadcast</span>
+              {mine.broadcastAt ? fmtTime(mine.broadcastAt / 1000) : "—"}
+            </span>
+            {mine.lastChecked ? (
+              <span>
+                <span className="label">Last check</span>
+                {fmtTime(mine.lastChecked / 1000)}
+              </span>
+            ) : null}
+          </div>
+          <div className="copy">
+            Awaiting a block. The next block&apos;s last hex digit decides the yield — there is nothing to choose: every valid mine yields.
+          </div>
+          <div className="placeholder" aria-hidden="true">
+            — — — —
+          </div>
         </>
       );
+      break;
+    case "confirmed":
+      led = "ok";
+      text = "Confirmed.";
       detail = (
         <>
           tx {txLink} · hash …<span className="mono">{mine.blockHash?.slice(-8)}</span> ·{" "}
@@ -190,14 +219,11 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
             : ""}
         </>
       );
-      actions = (
-        <button className="btn btn-sm" type="button" onClick={onReset}>
-          Clear
-        </button>
-      );
+      reveal = <HashReveal key={mine.txid} mine={mine} ticker={ticker} reconcileLine={detail} txLink={txLink} onReset={onReset} />;
+      detail = null;
       break;
     case "error":
-      cls += " s-err";
+      led = "err";
       text = mine.error || "Failed.";
       actions = (
         <button className="btn btn-sm" type="button" onClick={onReset}>
@@ -211,13 +237,31 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
       else text = "Ready. Fee inputs are selected from spendable BTC only — dust and token-bearing outputs are never spent.";
   }
 
+  if (mine.phase === "pending") {
+    return (
+      <div className="status" role="status" aria-live="polite">
+        <div className="pending">
+          <RingGauge size={72} sweeping label="NEXT" />
+          <div className="pending-body">
+            <div className="line">
+              <Led state={led} />
+              <span>{text}</span>
+            </div>
+            {detail && <div className="detail">{detail}</div>}
+            {pending}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={cls} role="status" aria-live="polite">
+    <div className="status" role="status" aria-live="polite">
       <div className="line">
-        <span className="dot" aria-hidden="true" />
+        <Led state={led} />
         <span>{text}</span>
       </div>
-      {result && <div className="result">{result}</div>}
+      {reveal}
       {detail && <div className="detail">{detail}</div>}
       {actions && <div className="actions">{actions}</div>}
     </div>

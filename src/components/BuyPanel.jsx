@@ -1,3 +1,4 @@
+// unrendered since 2026-09-25 (trading removed from UI)
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";

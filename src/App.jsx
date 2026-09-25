@@ -5,7 +5,7 @@ import { useWallet } from "./hooks/useWallet.js";
 import { useHashRoute } from "./hooks/useHashRoute.js";
 import { AppContext } from "./context.js";
 import TopBar from "./components/TopBar.jsx";
-import LiveStrip from "./components/LiveStrip.jsx";
+import MineTicker from "./components/MineTicker.jsx";
 import Footer from "./components/Footer.jsx";
 import Board from "./pages/Board.jsx";
 import TokenPage from "./pages/TokenPage.jsx";
@@ -81,7 +81,7 @@ export default function App() {
     <AppContext.Provider value={ctx}>
       <div className="app">
         <TopBar />
-        <LiveStrip />
+        <MineTicker />
         {page}
         <Footer />
       </div>

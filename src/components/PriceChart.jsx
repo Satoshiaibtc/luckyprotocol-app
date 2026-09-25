@@ -1,3 +1,4 @@
+// unrendered since 2026-09-25 (trading removed from UI)
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fmtInt, fmtTime, fmtUnit, fmtBtcShort } from "../lib/format.js";
 

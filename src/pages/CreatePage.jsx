@@ -8,12 +8,15 @@ import { tokenHref } from "../hooks/useHashRoute.js";
 import { buildDeployPsbt, estimateDeployFeeSats } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
 import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
-import { YIELD_BASE, YIELD_HIGH, YIELD_MID } from "../lib/yield.js";
-import { fmtInt, fmtSats } from "../lib/format.js";
+import { BUCKETS, EXPECTED_YIELD } from "../lib/yield.js";
+import { fmtDec, fmtInt, fmtSats } from "../lib/format.js";
 import TokenCard from "../components/TokenCard.jsx";
 import TxProgress, { ConnectPrompt } from "../components/TxProgress.jsx";
+import Panel from "../components/hud/Panel.jsx";
+import Led from "../components/hud/Led.jsx";
 
 const IDLE = { phase: "idle" };
+const AVAIL_LED = { idle: "idle", checking: "busy", free: "ok", taken: "err", error: "err" };
 
 export default function CreatePage({ params, navigate }) {
   const { wallet, address, pubkeyHex, fees, indexerOk, health, refreshAll } = useApp();
@@ -112,38 +115,33 @@ export default function CreatePage({ params, navigate }) {
     deploy_block: health.data?.tip_height ? health.data.tip_height + 1 : 0,
     holders: 0,
     mine_count: 0,
-    trade_count: 0,
-    volume_sats: 0,
-    open_orders: 0,
-    floor_unit_price: null,
-    last_trade: null,
   };
+
+  const yieldsLine = `${BUCKETS.map((b) => b.yield).join(" / ")} by the confirming block's last hex digit (${BUCKETS.map((b) => b.label).join(" / ")}) · expected ${fmtDec(EXPECTED_YIELD)}`;
 
   return (
     <main className="page create-page">
       <div className="create-layout">
-        <section className="panel">
-          <div className="panel-head">
-            <span className="label">Create a token</span>
-            <span className="label">DEPLOY · §2.1</span>
-          </div>
-
+        <Panel title="Deploy // new ticker" led={ledFor(avail.state)} right={<span className="label">DEPLOY · §2.1</span>} aria-label="Deploy a new ticker">
           <label className="field">
-            <span className="muted">Ticker</span>
-            <input
-              className="input mono ticker-input"
-              value={ticker}
-              onChange={(e) => setTicker(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
-              placeholder="LUCKY"
-              maxLength={8}
-              autoComplete="off"
-              spellCheck={false}
-              disabled={busy}
-              aria-describedby="ticker-help"
-            />
+            <span className="label">Ticker</span>
+            <span className="ticker-field">
+              <input
+                className="input mono ticker-input"
+                value={ticker}
+                onChange={(e) => setTicker(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
+                placeholder="TICKER"
+                maxLength={8}
+                autoComplete="off"
+                spellCheck={false}
+                disabled={busy}
+                aria-describedby="ticker-help"
+              />
+              <Led state={ledFor(avail.state)} />
+            </span>
             <span id="ticker-help" className={`field-help${avail.state === "taken" ? " err" : avail.state === "free" ? " ok" : ""}`}>
               {!ticker
-                ? "1–8 characters, A–Z and 0–9. First deploy wins the name forever."
+                ? "1–8 characters, A–Z and 0–9. The first deploy claims the name forever."
                 : !valid
                   ? "Tickers are 1–8 characters, A–Z and 0–9."
                   : avail.state === "checking"
@@ -165,29 +163,27 @@ export default function CreatePage({ params, navigate }) {
           <dl className="facts">
             <div>
               <dt>Supply</dt>
-              <dd className="mono">{fmtInt(REQUIRED_TOKEN_SUPPLY)} — fixed, not settable</dd>
+              <dd>{fmtInt(REQUIRED_TOKEN_SUPPLY)} — fixed</dd>
             </div>
             <div>
               <dt>Yield per mine</dt>
-              <dd className="mono">
-                {YIELD_HIGH} / {YIELD_MID} / {YIELD_BASE} by the confirming block&apos;s last hash digit (f / a–e / 0–9)
-              </dd>
+              <dd>{yieldsLine}</dd>
             </div>
             <div>
               <dt>Deployer allocation</dt>
-              <dd className="mono">none — you mine like everyone else</dd>
+              <dd>none — you mine like everyone else</dd>
             </div>
             <div>
               <dt>Protocol fee</dt>
-              <dd className="mono">{fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} (exact, consensus-checked)</dd>
+              <dd>{fmtSats(DEPLOY_PROTOCOL_FEE_SATS)}</dd>
             </div>
             <div>
               <dt>Proof output</dt>
-              <dd className="mono">{fmtSats(DUST_SATS)} back to you</dd>
+              <dd>{fmtSats(DUST_SATS)} back to you</dd>
             </div>
             <div>
               <dt>Network fee</dt>
-              <dd className="mono">
+              <dd>
                 {feeEstimate ? `≈ ${fmtSats(feeEstimate.feeSats)}` : "—"}
                 {feeRate ? <span className="muted"> @ {feeRate} sat/vB</span> : null}
               </dd>
@@ -211,7 +207,7 @@ export default function CreatePage({ params, navigate }) {
               confirmed: `${flow.ticker} is deployed. Opening its page…`,
             }}
           />
-        </section>
+        </Panel>
 
         <aside className="create-preview">
           <span className="label">Preview</span>
@@ -223,4 +219,8 @@ export default function CreatePage({ params, navigate }) {
       </div>
     </main>
   );
+}
+
+function ledFor(state) {
+  return AVAIL_LED[state] || "idle";
 }

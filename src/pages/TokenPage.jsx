@@ -5,25 +5,29 @@ import { usePoll } from "../hooks/usePoll.js";
 import { usePaged } from "../hooks/usePaged.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import Identicon from "../components/Identicon.jsx";
-import MintProgress from "../components/MintProgress.jsx";
-import PriceChart from "../components/PriceChart.jsx";
+import SupplyRing from "../components/SupplyRing.jsx";
 import MinePanel from "../components/MinePanel.jsx";
-import BuyPanel from "../components/BuyPanel.jsx";
-import SellPanel from "../components/SellPanel.jsx";
-import { TradesTable, MinesTable, HoldersTable, AddrLink, TxLink } from "../components/Tables.jsx";
-import { impliedMcapSats } from "../components/TokenCard.jsx";
-import { fmtAgo, fmtBtcShort, fmtCompact, fmtInt, fmtPct, fmtUnit, blockUrl } from "../lib/format.js";
+import YieldSpectrum from "../components/YieldSpectrum.jsx";
+import TierTable from "../components/TierTable.jsx";
+import EVReadout from "../components/EVReadout.jsx";
+import ObservedMix from "../components/ObservedMix.jsx";
+import Panel from "../components/hud/Panel.jsx";
+import { ledFromPoll } from "../components/hud/Led.jsx";
+import { MinesTable, HoldersTable, AddrLink, TxLink } from "../components/Tables.jsx";
+import { summarizeMix } from "../lib/mix.js";
+import { yieldDigit } from "../lib/yield.js";
+import { fmtAgo, fmtCompact, fmtDec, fmtInt, fmtPct, blockUrl } from "../lib/format.js";
 
 const POLL_MS = 15_000;
-const TABS = ["mine", "buy", "sell"];
+const TABS = ["mine"];
+const MIX_LIMIT = 200;
 const DATA_TABS = [
-  { id: "trades", label: "Trades" },
   { id: "mines", label: "Mines" },
   { id: "holders", label: "Holders" },
 ];
 
 export default function TokenPage({ ticker, params, navigate }) {
-  const { address, health } = useApp();
+  const { address, health, tipBlock } = useApp();
   const tokenQ = usePoll((s) => indexer.token(ticker, s), POLL_MS, [ticker]);
   const token = tokenQ.data;
   // A 404 resolves to `null` data with an updatedAt stamp; a still-loading
@@ -33,20 +37,15 @@ export default function TokenPage({ ticker, params, navigate }) {
 
   const deployBlock = usePoll(token?.deploy_block ? (s) => indexer.blockInfo(token.deploy_block, s) : null, 0, [token?.deploy_block]);
 
-  const tradesQ = usePoll((s) => indexer.trades({ ticker, limit: 200 }, s), POLL_MS, [ticker]);
+  const mixQ = usePoll((s) => indexer.minesFeed({ ticker, limit: MIX_LIMIT }, s), POLL_MS, [ticker]);
 
-  const [tab, setTab] = useState(TABS.includes(params.tab) ? params.tab : "mine");
+  // The mine console is the only action tab; stale `?tab=…` links resolve here.
   useEffect(() => {
-    if (TABS.includes(params.tab)) setTab(params.tab);
-  }, [params.tab]);
-  const pickTab = (t) => {
-    setTab(t);
-    navigate(tokenHref(ticker, t), { replace: true });
-  };
+    if (params.tab && !TABS.includes(params.tab)) navigate(tokenHref(ticker), { replace: true });
+  }, [params.tab, ticker, navigate]);
 
-  const [dataTab, setDataTab] = useState("trades");
+  const [dataTab, setDataTab] = useState("mines");
   const [refreshKey, setRefreshKey] = useState(0);
-  const tradesPaged = usePaged((offset, limit, s) => indexer.trades({ ticker, offset, limit }, s), { limit: 25, deps: [ticker, refreshKey], refreshMs: 30_000 });
   const minesPaged = usePaged((offset, limit, s) => indexer.minesFeed({ ticker, offset, limit }, s), { limit: 25, deps: [ticker, refreshKey], refreshMs: 30_000 });
   const holdersPaged = usePaged(
     async (offset, limit, s) => {
@@ -58,11 +57,11 @@ export default function TokenPage({ ticker, params, navigate }) {
 
   const onSettled = useCallback(() => {
     tokenQ.refresh();
-    tradesQ.refresh();
+    mixQ.refresh();
     setRefreshKey((k) => k + 1);
-  }, [tokenQ, tradesQ]);
+  }, [tokenQ, mixQ]);
 
-  const mcap = useMemo(() => (token ? impliedMcapSats(token) : null), [token]);
+  const mix = useMemo(() => summarizeMix(mixQ.data?.items || []), [mixQ.data]);
   const tip = health.data?.tip_height ?? null;
 
   if (notFound) {
@@ -93,12 +92,17 @@ export default function TokenPage({ ticker, params, navigate }) {
     );
   }
 
-  const last = token.last_trade?.unit_price ?? null;
+  const activeQ = dataTab === "mines" ? minesPaged : holdersPaged;
+  const activeLed = activeQ.error ? "err" : activeQ.loading && activeQ.rows.length === 0 ? "busy" : "ok";
 
   return (
     <main className="page token-page">
       <header className="token-head">
-        <Identicon ticker={token.ticker} size={72} />
+        <span className="ch chamfer identicon-wrap">
+          <span className="ch-in chamfer">
+            <Identicon ticker={token.ticker} size={72} />
+          </span>
+        </span>
         <div className="token-head-main">
           <h1 className="ticker">{token.ticker}</h1>
           <div className="meta">
@@ -116,14 +120,18 @@ export default function TokenPage({ ticker, params, navigate }) {
               {deployBlock.data?.time ? <span className="muted"> · {fmtAgo(deployBlock.data.time)}</span> : tip ? <span className="muted"> · {fmtInt(Math.max(0, tip - token.deploy_block))} blocks ago</span> : null}
             </span>
           </div>
-          <MintProgress ticker={token.ticker} minted={token.minted} supply={token.supply} />
+          <SupplyRing ticker={token.ticker} minted={token.minted} supply={token.supply} size={96} showText />
         </div>
       </header>
 
       <dl className="stats">
         <div>
           <dt>Minted</dt>
-          <dd>{fmtPct(token.minted, token.supply, 1)}</dd>
+          <dd>{fmtPct(token.minted, token.supply, 2)}</dd>
+        </div>
+        <div>
+          <dt>Remaining</dt>
+          <dd>{fmtCompact(Math.max(0, token.supply - token.minted))}</dd>
         </div>
         <div>
           <dt>Holders</dt>
@@ -134,33 +142,26 @@ export default function TokenPage({ ticker, params, navigate }) {
           <dd>{fmtCompact(token.mine_count)}</dd>
         </div>
         <div>
-          <dt>Last price</dt>
-          <dd>{last !== null ? <>{fmtUnit(last)} <small>sats</small></> : "—"}</dd>
-        </div>
-        <div>
-          <dt>Mcap</dt>
-          <dd>{mcap !== null ? fmtBtcShort(mcap) : "—"}</dd>
-        </div>
-        <div>
-          <dt>Open asks</dt>
-          <dd>{fmtInt(token.open_orders)}</dd>
-        </div>
-        <div>
-          <dt>Floor</dt>
-          <dd>{token.floor_unit_price !== null ? <>{fmtUnit(token.floor_unit_price)} <small>sats</small></> : "—"}</dd>
-        </div>
-        <div>
-          <dt>Volume</dt>
-          <dd>{fmtBtcShort(token.volume_sats)}</dd>
+          <dt>Observed mean</dt>
+          <dd>{mix.n >= 1 ? fmtDec(mix.mean, 1) : "—"}</dd>
         </div>
       </dl>
 
       <div className="token-layout">
         <div className="col">
-          <PriceChart trades={tradesQ.data?.items || []} ticker={token.ticker} loading={tradesQ.loading} error={tradesQ.error} />
+          <Panel title="Yield model" led="ok" aria-label="Yield model">
+            <YieldSpectrum tipDigit={yieldDigit(tipBlock.data?.hash)} />
+            <TierTable ticker={token.ticker} />
+            <EVReadout size="lg" ticker={token.ticker} />
+          </Panel>
 
-          <section className="panel">
-            <div className="panel-head">
+          <Panel title={`Observed mix · last ${MIX_LIMIT} mines`} led={ledFromPoll(mixQ)} aria-label="Observed mix">
+            <ObservedMix rows={mixQ.data?.items} loading={mixQ.loading} error={mixQ.error} meanLabel="Observed mean" ticker={token.ticker} />
+          </Panel>
+
+          <Panel
+            led={activeLed}
+            title={
               <div className="tabs" role="tablist" aria-label="Token activity">
                 {DATA_TABS.map((t) => (
                   <button key={t.id} className="tab" role="tab" aria-selected={dataTab === t.id} onClick={() => setDataTab(t.id)} type="button">
@@ -168,29 +169,18 @@ export default function TokenPage({ ticker, params, navigate }) {
                   </button>
                 ))}
               </div>
-              <span className="label">
-                {dataTab === "trades" ? `${fmtInt(tradesPaged.total)} total` : dataTab === "mines" ? `${fmtInt(minesPaged.total)} total` : `${fmtInt(holdersPaged.total)} total`}
-              </span>
-            </div>
-            {dataTab === "trades" && <TradesTable q={tradesPaged} self={address} empty={`No ${token.ticker} trades yet.`} />}
+            }
+            right={<span className="label">{fmtInt(activeQ.total)} total</span>}
+          >
             {dataTab === "mines" && <MinesTable q={minesPaged} self={address} empty={`No ${token.ticker} mines yet.`} />}
             {dataTab === "holders" && <HoldersTable q={holdersPaged} minted={token.minted} self={address} />}
-          </section>
+          </Panel>
         </div>
 
         <div className="col">
-          <section className="panel action-panel" aria-label="Actions">
-            <div className="action-tabs" role="tablist" aria-label="Action">
-              {TABS.map((t) => (
-                <button key={t} className="action-tab" role="tab" aria-selected={tab === t} onClick={() => pickTab(t)} type="button">
-                  {t === "mine" ? "Mine" : t === "buy" ? "Buy" : "Sell"}
-                </button>
-              ))}
-            </div>
-            {tab === "mine" && <MinePanel ticker={token.ticker} tokenInfo={token} />}
-            {tab === "buy" && <BuyPanel ticker={token.ticker} token={token} onSettled={onSettled} />}
-            {tab === "sell" && <SellPanel ticker={token.ticker} token={token} onSettled={onSettled} />}
-          </section>
+          <Panel title="Mine // console" led={ledFromPoll(tokenQ)} aria-label="Mine console">
+            <MinePanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
+          </Panel>
         </div>
       </div>
     </main>

@@ -1,5 +1,7 @@
 import { addrUrl, fmtAgo, fmtBtcShort, fmtInt, fmtUnit, shortAddr, shortTxid, txUrl } from "../lib/format.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
+import { bucketOfYield, yieldDigit } from "../lib/yield.js";
+import DigitChip from "./DigitChip.jsx";
 
 export function TxLink({ txid, head = 4, tail = 4 }) {
   return (
@@ -87,9 +89,29 @@ export function TradesTable({ q, self, showTicker = false, empty = "No trades ye
 
 function yieldClass(row) {
   if (row.status === "invalid") return "yield y-invalid";
-  if (row.yield_smallest >= 1000) return "yield y-high";
-  if (row.yield_smallest >= 500) return "yield y-mid";
-  return "yield y-base";
+  const b = bucketOfYield(row.yield_smallest);
+  return b ? `yield y-${b.id}` : "yield";
+}
+
+/** Yield cell: digit chip (when the block hash is known) + amount. */
+function YieldCell({ r }) {
+  const invalid = r.status === "invalid";
+  const amount = invalid ? null : r.cap_exhausted ? "0" : fmtInt(r.yield_smallest);
+  const title = invalid ? "invalid mine — no yield" : `${fmtInt(r.cap_exhausted ? 0 : r.yield_smallest)} ${r.ticker}`;
+  const d = r.block_hash ? yieldDigit(r.block_hash) : null;
+  if (!d && !invalid) {
+    return (
+      <span className={yieldClass(r)} title={title}>
+        {amount}
+      </span>
+    );
+  }
+  return (
+    <span className={yieldClass(r)} title={title}>
+      <DigitChip digit={d} size="sm" invalid={invalid} ticker={r.ticker} />
+      {amount !== null && <span>{amount}</span>}
+    </span>
+  );
 }
 
 export function MinesTable({ q, self, showTicker = false, empty = "No mines yet.", connectedGate }) {
@@ -114,9 +136,7 @@ export function MinesTable({ q, self, showTicker = false, empty = "No mines yet.
                 <AddrLink address={r.sender} self={self} head={5} tail={4} />
               </span>
             )}
-            <span className={yieldClass(r)} title={r.status === "invalid" ? "invalid mine — no yield" : `${r.yield_smallest} ${r.ticker}`}>
-              {r.status === "invalid" ? "invalid" : r.cap_exhausted ? "0" : fmtInt(r.yield_smallest)}
-            </span>
+            <YieldCell r={r} />
             <span className="right">
               <TxLink txid={r.txid} />
             </span>

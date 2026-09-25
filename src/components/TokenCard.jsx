@@ -1,37 +1,42 @@
 import Identicon from "./Identicon.jsx";
-import MintProgress from "./MintProgress.jsx";
-import { fmtCompact, fmtBtcShort, fmtInt, fmtUnit, shortAddr } from "../lib/format.js";
+import SupplyRing from "./SupplyRing.jsx";
+import { fmtCompact, fmtInt, shortAddr } from "../lib/format.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
-
-/** Implied market value = last unit price × minted, in sats. null when never traded. */
-export function impliedMcapSats(token) {
-  const unit = token?.last_trade?.unit_price;
-  if (!Number.isFinite(unit) || !token?.minted) return null;
-  return unit * token.minted;
-}
 
 export default function TokenCard({ token, preview = false }) {
   const t = token;
-  const last = t.last_trade?.unit_price ?? null;
-  const mcap = impliedMcapSats(t);
   const href = preview ? undefined : tokenHref(t.ticker);
+  const remaining = Math.max(0, (t.supply ?? 0) - (t.minted ?? 0));
 
   return (
     <article className={`card token-card${preview ? " preview" : ""}`}>
       <a className="token-card-head" href={href} aria-label={`${t.ticker} token page`}>
-        <Identicon ticker={t.ticker} size={48} />
+        <span className="ch chamfer identicon-wrap">
+          <span className="ch-in chamfer">
+            <Identicon ticker={t.ticker} size={48} />
+          </span>
+        </span>
         <div className="token-card-title">
           <h3 className="ticker">{t.ticker}</h3>
           <div className="meta">
             <span>
-              created by <span className="mono">{shortAddr(t.deployer, 4, 4)}</span>
+              deployed by <span className="mono">{shortAddr(t.deployer, 4, 4)}</span>
             </span>
             <span className="mono">block #{fmtInt(t.deploy_block)}</span>
           </div>
         </div>
       </a>
 
-      <MintProgress ticker={t.ticker} minted={t.minted} supply={t.supply} compact />
+      <div className="supply-row">
+        <SupplyRing ticker={t.ticker} minted={t.minted} supply={t.supply} size={56} />
+        <div className="k">
+          <span className="label">Remaining</span>
+          <span className="hero-num">{fmtInt(remaining)}</span>
+          <span className="sub">
+            minted {fmtInt(t.minted)} / {fmtInt(t.supply)}
+          </span>
+        </div>
+      </div>
 
       <dl className="stat-row">
         <div>
@@ -43,21 +48,14 @@ export default function TokenCard({ token, preview = false }) {
           <dd>{fmtCompact(t.mine_count)}</dd>
         </div>
         <div>
-          <dt>Last price</dt>
-          <dd>{last !== null ? <>{fmtUnit(last)} <small>sats</small></> : "—"}</dd>
-        </div>
-        <div>
-          <dt>Mcap</dt>
-          <dd>{mcap !== null ? fmtBtcShort(mcap) : "—"}</dd>
+          <dt>Since</dt>
+          <dd>#{fmtInt(t.deploy_block)}</dd>
         </div>
       </dl>
 
       <div className="token-card-actions">
         <a className="btn btn-primary" href={preview ? undefined : tokenHref(t.ticker, "mine")} aria-disabled={preview}>
           Mine
-        </a>
-        <a className="btn" href={preview ? undefined : tokenHref(t.ticker, "buy")} aria-disabled={preview}>
-          Trade
         </a>
       </div>
     </article>

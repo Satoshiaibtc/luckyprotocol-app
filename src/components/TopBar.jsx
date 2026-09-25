@@ -1,7 +1,10 @@
 import { useState } from "react";
 import { useApp } from "../context.js";
-import { fmtBtc, fmtInt, shortAddr, UNISAT_INSTALL_URL } from "../lib/format.js";
+import { blockUrl, fmtBtc, fmtInt, shortAddr, UNISAT_INSTALL_URL } from "../lib/format.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
+import { bucketOfHash, yieldDigit } from "../lib/yield.js";
+import Led from "./hud/Led.jsx";
+import DigitChip from "./DigitChip.jsx";
 
 const NAV = [
   { name: "board", href: "#/", label: "Board" },
@@ -10,22 +13,27 @@ const NAV = [
 ];
 
 export default function TopBar() {
-  const { wallet, health, mock, connect, disconnect, useMock, route, navigate, tokens } = useApp();
+  const { wallet, health, mock, connect, disconnect, useMock, route, navigate, tokens, tipBlock } = useApp();
   const [q, setQ] = useState("");
 
   const h = health.data;
   let pillClass = "pill";
-  let pillText = "connecting…";
+  let led = "busy";
+  let pillText = <>SYS · connecting…</>;
   if (health.error) {
     pillClass += " pill-danger";
-    pillText = "indexer offline";
+    led = "err";
+    pillText = <>SYS · offline</>;
   } else if (h) {
+    const height = <span className="num">#{fmtInt(h.tip_height)}</span>;
     if (h.stalled) {
       pillClass += " pill-warn";
-      pillText = `#${fmtInt(h.tip_height)} · stalled`;
+      led = "busy";
+      pillText = <>SYS · {height} · stalled</>;
     } else {
       pillClass += " pill-ok";
-      pillText = `#${fmtInt(h.tip_height)}`;
+      led = "ok";
+      pillText = <>SYS · {height} · synced</>;
     }
   }
 
@@ -38,13 +46,18 @@ export default function TopBar() {
   };
 
   const tickers = tokens.data?.items?.map((t) => t.ticker) || [];
+  const tipHash = tipBlock?.data?.hash || null;
+  const tipBucket = tipHash ? bucketOfHash(tipHash) : null;
 
   return (
     <header className="topbar">
       <div className="topbar-inner">
         <a className="wordmark" href="#/" aria-label="LuckyProtocol home">
-          <span className="mark" aria-hidden="true" />
-          LUCKY<span className="accent">PROTOCOL</span>
+          <span className="mark chamfer" aria-hidden="true" />
+          <span>
+            LUCKY<span className="slash">//</span>
+            <span className="accent">PROTOCOL</span>
+          </span>
         </a>
 
         <form className="search" role="search" onSubmit={submit}>
@@ -78,14 +91,25 @@ export default function TopBar() {
         <div className="topbar-right">
           {mock && (
             <span className="pill pill-warn" title="VITE_MOCK=1 — deterministic fake indexer">
-              <span className="dot" aria-hidden="true" />
+              <Led state="busy" />
               mock
             </span>
           )}
           <span className={pillClass} title={health.error ? String(health.error.message) : `indexer ${h?.network || ""} · block height`}>
-            <span className="dot" aria-hidden="true" />
+            <Led state={led} />
             {pillText}
           </span>
+          {tipHash && tipBucket && (
+            <a
+              className="tip-chip"
+              href={blockUrl(tipBlock.data.height)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Latest block #${fmtInt(tipBlock.data.height)} · last digit ${yieldDigit(tipHash)} → ${tipBucket.yield} per mine`}
+            >
+              <DigitChip digit={yieldDigit(tipHash)} size="sm" />
+            </a>
+          )}
           <WalletControl wallet={wallet} mock={mock} onConnect={connect} onDisconnect={disconnect} onUseMock={useMock} />
         </div>
       </div>
