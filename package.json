@@ -3,19 +3,20 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "LuckyProtocol v3 launchpad — Bitcoin OP_RETURN token protocol: create, mine and trade with UniSat; yield decided by the confirming block hash, trades settle on-chain via SINGLE|ANYONECANPAY listings.",
+  "description": "LuckyProtocol v3 mining console — Bitcoin OP_RETURN token protocol: create and mine tokens with UniSat; yield decided by the last hex digit of the confirming block hash.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint src/ test/",
     "lint:fix": "eslint src/ test/ --fix",
-    "test": "node test/yield.vectors.test.js",
+    "test": "node test/yield.vectors.test.js && node test/buckets.test.js && node test/mix.test.js",
     "test:psbt": "node test/psbt.build.test.js",
     "test:swap": "node test/swap.test.js",
     "check": "npm run lint && npm run test && npm run test:psbt && npm run test:swap && npm run build"
   },
   "dependencies": {
+    "@fontsource/chakra-petch": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@fontsource/manrope": "^5.2.8",
     "@noble/hashes": "^2.2.0",

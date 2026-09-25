@@ -52,3 +52,56 @@ export function yieldTierLabel(y) {
   if (y === YIELD_BASE) return "base";
   return "unknown";
 }
+
+// ---- Probability model (additive; the UI's only source of percentages) ---------
+
+/** Number of possible last hex digits. */
+export const DIGIT_SPACE = 16;
+
+/**
+ * The three yield buckets, high → base. `digits` is the exact set of last
+ * hex digits; `count` is its size. Probabilities are count / DIGIT_SPACE.
+ */
+export const BUCKETS = [
+  { id: "high", label: "f", digits: "f", count: 1, yield: YIELD_HIGH },
+  { id: "mid", label: "a–e", digits: "abcde", count: 5, yield: YIELD_MID },
+  { id: "base", label: "0–9", digits: "0123456789", count: 10, yield: YIELD_BASE },
+];
+
+/** Probability of landing in a bucket as a fraction: 1/16, 5/16, 10/16. */
+export const ODDS_HIGH = BUCKETS[0].count / DIGIT_SPACE;
+export const ODDS_MID = BUCKETS[1].count / DIGIT_SPACE;
+export const ODDS_BASE = BUCKETS[2].count / DIGIT_SPACE;
+
+export function bucketOf(digit) {
+  const d = typeof digit === "string" ? digit.toLowerCase() : "";
+  if (d.length !== 1) return null;
+  return BUCKETS.find((b) => b.digits.includes(d)) || null;
+}
+export function bucketOfYield(y) {
+  return BUCKETS.find((b) => b.yield === y) || null;
+}
+export function bucketOfHash(blockHash) {
+  return bucketOf(yieldDigit(blockHash));
+}
+
+/** All 16 digits in order, each with its bucket id. */
+export const DIGITS = "0123456789abcdef".split("").map((d) => ({ d, bucket: bucketOf(d).id }));
+
+/** Probability helpers — the ONLY place percentages are formed. */
+export const probability = (b) => b.count / DIGIT_SPACE; // 0.0625
+export const probabilityPct = (b) => trimPct((100 * b.count) / DIGIT_SPACE); // "6.25"
+export const contribution = (b) => (b.count * b.yield) / DIGIT_SPACE; // 62.5 / 156.25 / 62.5
+function trimPct(x) {
+  return String(Number(x.toFixed(2))); // 62.5 not 62.50
+}
+
+/** Std-dev of a single mine's yield: sqrt(Σ p·y² − EV²) ≈ 260.3 */
+export const YIELD_SD = Math.sqrt(
+  BUCKETS.reduce((s, b) => s + probability(b) * b.yield * b.yield, 0) - EXPECTED_YIELD * EXPECTED_YIELD,
+);
+
+/** Human sentence for role="img" graphics. */
+export function distributionSentence() {
+  return `${BUCKETS.map((b) => `${b.label} ${b.count} in ${DIGIT_SPACE} yields ${b.yield}`).join("; ")}; expected ${EXPECTED_YIELD} per mine.`;
+}
