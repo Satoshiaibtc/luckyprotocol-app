@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
@@ -11,7 +11,24 @@ import { ledFromPoll } from "./hud/Led.jsx";
 import RingGauge from "./hud/RingGauge.jsx";
 import DigitChip from "./DigitChip.jsx";
 
-const COUNT = 16;
+const MOBILE_COUNT = 16;
+// Desktop: as many tiles as the row can hold (one slot reserved for NEXT),
+// so the tape runs edge to edge instead of stopping short at 16.
+const TILE_W = 56;
+const GAP = 6;
+const MIN_COUNT = 8;
+const MAX_COUNT = 32; // /blocks/recent cap
+function fitCount(width) {
+  if (!width) return MOBILE_COUNT;
+  const perRow = Math.floor((width + GAP) / (TILE_W + GAP));
+  return Math.max(MIN_COUNT, Math.min(MAX_COUNT, perRow - 1));
+}
+// True when the row is wide enough that the tiles fill it without scrolling
+// (tiles stretch via flex); the 1px sub-pixel remainder must not grow a bar.
+function rowFits(width) {
+  return !!width && Math.floor((width + GAP) / (TILE_W + GAP)) - 1 >= MIN_COUNT;
+}
+const fmtModel = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
 
 /**
  * The last 16 blocks as a scrolling tape, oldest → newest, each tile
@@ -31,9 +48,27 @@ export default function BlockTape() {
   const healthDown = !!health.error && !health.data;
   // Health unavailable → fall back to the heights the mine feed knows about.
   const feed = usePoll(healthDown ? (s) => indexer.minesFeed({ limit: 40 }, s) : null, 30_000, [healthDown]);
+  const trackRef = useRef(null);
+  const [fit, setFit] = useState(MOBILE_COUNT);
+  const [fits, setFits] = useState(false);
+  useLayoutEffect(() => {
+    if (mobile) return undefined;
+    const el = trackRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      setFit(fitCount(el.clientWidth));
+      setFits(rowFits(el.clientWidth));
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [mobile]);
+  const COUNT = mobile ? MOBILE_COUNT : fit;
+
   const { tiles, tally, loaded } = useRecentBlocks({ ceiling, count: COUNT, fallbackRows: healthDown ? feed.data?.items || null : null });
 
-  const trackRef = useRef(null);
   const scrolledRef = useRef(false);
   useLayoutEffect(() => {
     if (mobile || !loaded || scrolledRef.current || !trackRef.current) return;
@@ -53,7 +88,7 @@ export default function BlockTape() {
           <span className="c">{tally[b.id]}</span> × {b.yield}
         </span>
       ))}
-      <span className="model"> · model {BUCKETS.map((b) => b.count).join(" / ")}</span>
+      <span className="model"> · model {BUCKETS.map((b) => fmtModel((b.count * COUNT) / 16)).join(" / ")}</span>
     </span>
   ) : null;
 
@@ -83,7 +118,7 @@ export default function BlockTape() {
           </div>
         </>
       ) : (
-        <ol className="tape" ref={trackRef} aria-label={`Last ${COUNT} blocks, oldest to newest`} aria-busy={!loaded}>
+        <ol className={`tape${fits ? " fits" : ""}`} ref={trackRef} aria-label={`Last ${COUNT} blocks, oldest to newest`} aria-busy={!loaded}>
           {rows.map((t) => (
             <li key={t.height}>
               <Tile t={t} />

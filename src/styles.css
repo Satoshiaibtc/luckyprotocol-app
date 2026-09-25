@@ -1677,14 +1677,22 @@ input[type="search"]::-webkit-search-decoration {
   min-width: 0;
 }
 .tape > li {
-  flex: none;
+  flex: 1 1 56px;
+  min-width: 56px;
   scroll-snap-align: end;
+}
+.tape > li.tile-next {
+  flex: none;
+}
+.tape.fits {
+  overflow-x: hidden;
 }
 .tile {
   --ch-line: var(--t-line);
   --ch-bg: var(--t-dim);
   display: block;
-  width: 56px;
+  width: 100%;
+  min-width: 56px;
   height: 88px;
   color: inherit;
 }
