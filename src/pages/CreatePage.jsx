@@ -229,13 +229,20 @@ export default function CreatePage({ params, navigate }) {
               confirmed: `${flow.ticker} is deployed. Opening its page…`,
             }}
           />
+          {flow.phase === "confirmed" && (
+            <p className="fineprint">
+              Optional: add an on-chain avatar for {flow.ticker} from its page — <a href={tokenHref(flow.ticker)}>open {flow.ticker}</a>. The image is inscribed
+              on Bitcoin (deployer only, two signatures).
+            </p>
+          )}
         </Panel>
 
         <aside className="create-preview">
           <span className="label">Preview</span>
           <TokenCard token={preview} preview />
           <p className="fineprint">
-            The identicon is derived from the ticker&apos;s hash — no image upload, nothing to host. Every card on the board is drawn the same way.
+            The identicon is derived from the ticker&apos;s hash — no image upload, nothing to host. After the deploy confirms you can replace it with
+            an image inscribed on Bitcoin from the token page.
           </p>
         </aside>
       </div>

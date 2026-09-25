@@ -1,4 +1,4 @@
-import Identicon from "./Identicon.jsx";
+import TokenAvatar from "./TokenAvatar.jsx";
 import SupplyRing from "./SupplyRing.jsx";
 import { fmtCompact, fmtInt, fmtPct, shortAddr } from "../lib/format.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
@@ -17,7 +17,7 @@ export default function TokenCard({ token, preview = false }) {
         <a className="token-card-head" href={href} aria-label={`${t.ticker} token page`}>
           <span className="ch chamfer identicon-wrap">
             <span className="ch-in chamfer">
-              <Identicon ticker={t.ticker} size={44} />
+              <TokenAvatar ticker={t.ticker} avatarTxid={t.avatar_txid} size={44} />
             </span>
           </span>
           <div className="token-card-title">
@@ -68,7 +68,7 @@ export default function TokenCard({ token, preview = false }) {
       <a className="token-card-head" href={href} aria-label={`${t.ticker} token page`}>
         <span className="ch chamfer identicon-wrap">
           <span className="ch-in chamfer">
-            <Identicon ticker={t.ticker} size={48} />
+            <TokenAvatar ticker={t.ticker} avatarTxid={t.avatar_txid} size={48} />
           </span>
         </span>
         <div className="token-card-title">

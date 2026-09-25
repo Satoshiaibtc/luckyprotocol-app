@@ -6,8 +6,10 @@ import { usePaged } from "../hooks/usePaged.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Identicon from "../components/Identicon.jsx";
+import TokenAvatar from "../components/TokenAvatar.jsx";
 import SupplyRing from "../components/SupplyRing.jsx";
 import MinePanel from "../components/MinePanel.jsx";
+import AvatarPanel from "../components/AvatarPanel.jsx";
 import YieldSpectrum from "../components/YieldSpectrum.jsx";
 import TierTable from "../components/TierTable.jsx";
 import EVReadout from "../components/EVReadout.jsx";
@@ -119,6 +121,12 @@ export default function TokenPage({ ticker, params, navigate }) {
       <MinePanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
     </Panel>
   );
+  // Deployer only (§8): the panel renders nothing for anyone else.
+  const avatarConsole = address && address === token.deployer ? (
+    <Panel title="Avatar // on-chain" led={token.avatar_txid ? "ok" : "idle"} right={<span className="label">AVATAR · §8</span>} aria-label="Token avatar">
+      <AvatarPanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
+    </Panel>
+  ) : null;
 
   if (mobile) {
     // Phone order: compact header → 2×2 stats → MINE console (primary action, within
@@ -128,7 +136,7 @@ export default function TokenPage({ ticker, params, navigate }) {
         <header className="token-head token-head-m">
           <span className="ch chamfer identicon-wrap">
             <span className="ch-in chamfer">
-              <Identicon ticker={token.ticker} size={56} />
+              <TokenAvatar ticker={token.ticker} avatarTxid={token.avatar_txid} size={56} />
             </span>
           </span>
           <div className="token-head-main">
@@ -165,6 +173,7 @@ export default function TokenPage({ ticker, params, navigate }) {
         </dl>
 
         {mineConsole}
+        {avatarConsole}
 
         <Fold title="Yield model" summary={TIER_SUMMARY} led="ok" aria-label="Yield model">
           {yieldModel}
@@ -192,7 +201,7 @@ export default function TokenPage({ ticker, params, navigate }) {
       <header className="token-head">
         <span className="ch chamfer identicon-wrap">
           <span className="ch-in chamfer">
-            <Identicon ticker={token.ticker} size={72} />
+            <TokenAvatar ticker={token.ticker} avatarTxid={token.avatar_txid} size={72} />
           </span>
         </span>
         <div className="token-head-main">
@@ -265,7 +274,10 @@ export default function TokenPage({ ticker, params, navigate }) {
           </Panel>
         </div>
 
-        <div className="col">{mineConsole}</div>
+        <div className="col">
+          {mineConsole}
+          {avatarConsole}
+        </div>
       </div>
     </main>
   );

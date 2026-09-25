@@ -4,7 +4,7 @@ import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
-import Identicon from "../components/Identicon.jsx";
+import TokenAvatar from "../components/TokenAvatar.jsx";
 import { ConnectPrompt } from "../components/TxProgress.jsx";
 import { MinesTable } from "../components/Tables.jsx";
 import ObservedMix from "../components/ObservedMix.jsx";
@@ -84,7 +84,7 @@ export default function PortfolioPage() {
                 return (
                   <li key={ticker}>
                     <a className="bal-row" href={tokenHref(ticker)}>
-                      <Identicon ticker={ticker} size={28} />
+                      <TokenAvatar ticker={ticker} avatarTxid={t?.avatar_txid} size={28} />
                       <span className="t">{ticker}</span>
                       <span className="a">{fmtInt(amount)}</span>
                       <span className="v muted">{t && t.minted ? `${fmtPct(amount, t.minted, 2)} of minted` : "—"}</span>
