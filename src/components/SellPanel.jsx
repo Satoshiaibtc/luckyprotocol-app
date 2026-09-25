@@ -183,7 +183,7 @@ export default function SellPanel({ ticker, token, onSettled }) {
         address,
         pubkeyHex,
         utxos: utxoRes.utxos,
-        tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
+        tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), address),
         tokenUtxos: [{ txid: utxo.txid, vout: utxo.vout, ...(carrierSats ? { sats: carrierSats } : {}) }],
         feeRateSatVb: requireRate(feeInfo.halfHourFee),
         ticker,
@@ -199,7 +199,7 @@ export default function SellPanel({ ticker, token, onSettled }) {
       const txid = await unisat.broadcastSignedPsbt(signed);
       // vout0 = the new carrier, vout3 = the residual slot (both 546-sat token
       // outputs); vout4, when present, is plain BTC change.
-      addPendingTokenOutpoints([{ txid, vout: 0 }, { txid, vout: 3 }]);
+      addPendingTokenOutpoints([{ txid, vout: 0 }, { txid, vout: 3 }], address);
       setChain((c) => ({ ...c, phase: "pending", txid }));
       refreshMine();
     } catch (e) {

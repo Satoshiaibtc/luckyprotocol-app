@@ -41,7 +41,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
         throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
       }
       const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr), indexer.tokenUtxos(addr)]);
-      const tokenOutpoints = withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })));
+      const tokenOutpoints = withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), addr);
       const built = buildMinePsbt({
         address: addr,
         pubkeyHex,
@@ -67,7 +67,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: addr });
       setMine((m) => ({ ...m, phase: "broadcasting" }));
       const txid = await wallet.broadcastSignedPsbt(signed);
-      addPendingTokenOutpoints([{ txid, vout: 0 }]);
+      addPendingTokenOutpoints([{ txid, vout: 0 }], addr);
       setMine((m) => ({ ...m, phase: "pending", txid, broadcastAt: Date.now() }));
     } catch (e) {
       setMine((m) => ({ ...m, phase: "error", error: friendlyError(e) }));

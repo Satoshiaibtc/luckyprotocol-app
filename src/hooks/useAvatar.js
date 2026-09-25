@@ -220,7 +220,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
     const stale = staleRef.current;
     return {
       utxoRes: { ...utxoRes, utxos: utxoRes.utxos.filter((u) => !stale.has(outpointKey(u))) },
-      tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
+      tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), address),
     };
   }, [address]);
 

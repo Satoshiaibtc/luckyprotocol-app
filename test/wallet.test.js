@@ -11,6 +11,7 @@ import {
   collectInscriptionOutpoints,
   defaultProviderId,
   inscriptionOutpoints,
+  intersectConfirmed,
   firstAccount,
   isConflictError,
   isMainnetAddress,
@@ -164,6 +165,34 @@ assert.equal(isMainnetAddress(null), false);
   assert.equal(n, 3);
   // a throwing pager rejects (the wallet layer then falls back to assetSafe:false)
   await assert.rejects(collectInscriptionOutpoints(() => { throw new Error("provider down"); }), /provider down/);
+}
+
+// ---- UniSat path: provider list ∩ indexer CONFIRMED rows ----------------------------------------------
+{
+  const A = "aa".repeat(32);
+  const B = "bb".repeat(32);
+  const C = "cc".repeat(32);
+  const D = "dd".repeat(32);
+  const provider = [
+    { txid: A, vout: 0, sats: 50_000 }, // confirmed, same value → kept
+    { txid: B, vout: 1, sats: 20_000 }, // indexer: unconfirmed (a just-broadcast SEND change) → excluded
+    { txid: C, vout: 0, sats: 9_000 },  // not listed by the indexer (scan behind / spent) → excluded
+    { txid: D, vout: 2, sats: 7_000 },  // listed confirmed but at another value → excluded
+  ];
+  const rows = [
+    { txid: A, vout: 0, sats: 50_000, confirmed: true },
+    { txid: B, vout: 1, sats: 20_000, confirmed: false },
+    { txid: D, vout: 2, sats: 7_500, confirmed: true },
+    { txid: "zz", vout: 0, sats: 1, confirmed: true }, // malformed indexer row ignored
+  ];
+  const r = intersectConfirmed(provider, rows);
+  assert.deepEqual(r.utxos, [{ txid: A, vout: 0, sats: 50_000 }], "only confirmed, value-matched outputs survive");
+  assert.deepEqual(r.unconfirmedOutpoints, [{ txid: B, vout: 1 }]);
+  assert.deepEqual(r.unlistedOutpoints, [{ txid: C, vout: 0 }]);
+  assert.deepEqual(r.mismatchedOutpoints, [{ txid: D, vout: 2 }]);
+  assert.deepEqual(intersectConfirmed(provider, []).utxos, [], "no indexer rows → nothing spendable (fails closed)");
+  assert.deepEqual(intersectConfirmed([], rows).utxos, []);
+  assert.deepEqual(intersectConfirmed(undefined, undefined), { utxos: [], unconfirmedOutpoints: [], unlistedOutpoints: [], mismatchedOutpoints: [] });
 }
 
 // ---- conflict detection ------------------------------------------------------------------------

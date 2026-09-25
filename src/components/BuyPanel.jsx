@@ -248,7 +248,7 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
         address: addr,
         pubkeyHex,
         utxos: utxoRes.utxos,
-        tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
+        tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), addr),
         feeRateSatVb: requireRate(feeInfo.halfHourFee),
         minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8: an inscribed sat here would go to the seller
       });
@@ -270,7 +270,7 @@ function BuySheet({ order, ticker, token, wallet, fees, flow, setFlow, status, o
       }
       // vout1 = token slot, vout4 = residual slot (any other ticker riding on
       // the seller's carrier is routed there); vout5, when present, is plain BTC.
-      addPendingTokenOutpoints([{ txid, vout: 1 }, { txid, vout: 4 }]);
+      addPendingTokenOutpoints([{ txid, vout: 1 }, { txid, vout: 4 }], addr);
       setFlow((f) => ({ ...f, phase: "pending", txid }));
     } catch (e) {
       setFlow((f) => ({ ...f, phase: "error", error: friendlyError(e) }));

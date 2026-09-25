@@ -26,6 +26,7 @@
 import * as indexer from "./indexer.js";
 import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
 import { assertSingleOpReturn, extractRawTxHex } from "./psbt.js";
+import { retryOn503 } from "./inscribe.js";
 import {
   PROVIDER_IDS,
   PROVIDER_META,
@@ -33,6 +34,7 @@ import {
   collectInscriptionOutpoints,
   defaultProviderId,
   firstAccount,
+  intersectConfirmed,
   isConflictError,
   isMainnetAddress,
   normalizeBalance,
@@ -360,7 +362,14 @@ export async function getBalance() {
  * Spendable BTC UTXOs as `{ source, assetSafe, utxos: [{ txid, vout, sats }], excludedOutpoints }`.
  *
  * `assetSafe:true` when the provider offers its own asset-aware list
- * (UniSat `getBitcoinUtxos()` excludes inscription / rune carriers).
+ * (UniSat `getBitcoinUtxos()` excludes inscription / rune carriers). That
+ * list is then INTERSECTED with the indexer's `/btc-utxos/:addr` rows and
+ * only outputs the indexer lists as confirmed (at the same value) survive
+ * (walletShapes.intersectConfirmed): a just-broadcast SEND's change output
+ * — unconfirmed, and unknown to /utxos until the tx confirms — can never be
+ * picked as a fee input. The indexer being unreachable fails the build
+ * (after the seeding-503 retry) rather than trusting the wallet's list alone.
+ *
  * OKX has no such method (the mock omits it on purpose), so the rows come
  * from the indexer's `/btc-utxos/:addr` CONFIRMED set. On that path
  * (audit M-8):
@@ -384,9 +393,26 @@ export async function getBitcoinUtxos(address) {
     } catch (e) {
       throw new Error(`${name} getBitcoinUtxos failed: ${e?.message || e}`);
     }
-    return { source: current.id, assetSafe: true, utxos: normalizeUtxoList(raw), excludedOutpoints: [] };
+    let rows;
+    try {
+      rows = await retryOn503(() => indexer.btcUtxos(address));
+    } catch (e) {
+      throw new Error(
+        `Could not confirm your UTXOs with the indexer (${_msg(e)}) — a fee input must be an output the indexer lists as confirmed, so nothing is built until it answers; try again in a moment`,
+      );
+    }
+    const { utxos, unconfirmedOutpoints, unlistedOutpoints, mismatchedOutpoints } = intersectConfirmed(normalizeUtxoList(raw), rows);
+    return {
+      source: current.id,
+      assetSafe: true,
+      utxos,
+      excludedOutpoints: [...unconfirmedOutpoints, ...unlistedOutpoints, ...mismatchedOutpoints],
+      unconfirmedOutpoints,
+      unlistedOutpoints,
+      mismatchedOutpoints,
+    };
   }
-  const rows = await indexer.btcUtxos(address);
+  const rows = await retryOn503(() => indexer.btcUtxos(address));
   let utxos = rows.filter((u) => u.confirmed).map(({ txid, vout, sats }) => ({ txid, vout, sats }));
   let assetSafe = false;
   let excludedOutpoints = [];

@@ -240,6 +240,40 @@ export async function collectInscriptionOutpoints(getPage, { size = 100, maxPage
   return found;
 }
 
+/**
+ * Intersect a provider's UTXO list with the indexer's /btc-utxos rows and
+ * keep only outputs the indexer lists as CONFIRMED with the same value.
+ * Everything else is excluded — unconfirmed rows (a just-broadcast SEND's
+ * change output is exactly this), outputs the indexer does not list at all
+ * (its scan is behind, or the output is already spent) and value
+ * mismatches (the sighash commits to the value; a disagreement means one
+ * side is stale). Fails closed on purpose: the only outputs that can be
+ * fee inputs are ones both sides agree are confirmed and unspent.
+ *
+ * → { utxos, unconfirmedOutpoints, unlistedOutpoints, mismatchedOutpoints }
+ */
+export function intersectConfirmed(providerUtxos, indexerRows) {
+  const byKey = new Map();
+  for (const r of indexerRows || []) {
+    if (!r || !TXID_RE.test(String(r.txid || "")) || !Number.isInteger(r.vout)) continue;
+    byKey.set(`${String(r.txid).toLowerCase()}:${r.vout}`, r);
+  }
+  const utxos = [];
+  const unconfirmedOutpoints = [];
+  const unlistedOutpoints = [];
+  const mismatchedOutpoints = [];
+  for (const u of providerUtxos || []) {
+    const key = `${u.txid}:${u.vout}`;
+    const row = byKey.get(key);
+    const outpoint = { txid: u.txid, vout: u.vout };
+    if (!row) unlistedOutpoints.push(outpoint);
+    else if (row.confirmed !== true) unconfirmedOutpoints.push(outpoint);
+    else if (Number(row.sats) !== Number(u.sats)) mismatchedOutpoints.push(outpoint);
+    else utxos.push({ txid: u.txid, vout: u.vout, sats: u.sats });
+  }
+  return { utxos, unconfirmedOutpoints, unlistedOutpoints, mismatchedOutpoints };
+}
+
 function _msg(e) {
   return String(e?.message || e || "unknown error");
 }

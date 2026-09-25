@@ -101,7 +101,7 @@ export default function CreatePage({ params, navigate }) {
         address,
         pubkeyHex,
         utxos: utxoRes.utxos,
-        tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
+        tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), address),
         feeRateSatVb: feeRate,
         ticker: t,
         minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8
