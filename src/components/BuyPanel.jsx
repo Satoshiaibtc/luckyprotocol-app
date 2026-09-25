@@ -124,7 +124,7 @@ export default function BuyPanel({ ticker, token, onSettled }) {
       <p className="fineprint">
         A fill completes the seller&apos;s signed listing into a SEND. You pay the ask + {DUST_SATS} sats (your token slot) +{" "}
         {SEND_PROTOCOL_FEE_SATS} sats protocol fee + network fee; your BTC change comes back as vout4 (≥ {DUST_SATS} sats, required).
-        If another buyer fills first, the network rejects yours and you lose nothing.
+        If another buyer fills first, the network rejects yours and your funds stay exactly where they were.
       </p>
 
       {sheetOpen && sel && (
