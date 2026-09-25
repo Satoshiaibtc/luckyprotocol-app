@@ -33,8 +33,10 @@
 //   GET  /orders/by-address/:addr   ordersByAddress
 //   GET  /trades?ticker&limit…      trades
 //   GET  /trades/:addr              tradesByAddress
+//   GET  /avatars/:addr             avatarsByAddress  (§8.4 audit list)
+//   GET  /tokens/:ticker/avatar     avatarUrl         (image bytes; an <img> src, never fetched here)
 
-import { mockGet, mockPostText, mockPostJson } from "./mock.js";
+import { mockGet, mockPostText, mockPostJson, mockAvatarDataUrl } from "./mock.js";
 
 export const DEFAULT_INDEXER_URL = "http://127.0.0.1:8765";
 const MOCK = import.meta.env.VITE_MOCK === "1";
@@ -343,6 +345,11 @@ function _sanitizeOrderRow(o) {
   };
 }
 
+// §8.2 content types — the only values an avatar row may carry.
+const _AVATAR_CT = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const _safeTxidOrNull = (v) => (_TXID_RE.test(String(v || "")) ? String(v).toLowerCase() : null);
+const _safeAvatarCt = (v) => (_AVATAR_CT.has(String(v || "").toLowerCase()) ? String(v).toLowerCase() : null);
+
 function _sanitizeTokenRow(t) {
   if (!t || typeof t !== "object") return null;
   if (!_TICKER_RE.test(String(t.ticker || ""))) return null;
@@ -354,6 +361,9 @@ function _sanitizeTokenRow(t) {
   if (!_safeStr(t.deployer, 128)) return null;
   const holders = _safeInt(t.holders, 1e9);
   const lastTrade = t.last_trade ? _sanitizeTradeRow(t.last_trade) : null;
+  // §8.4: avatar_txid + avatar_content_type; both null unless both are well-formed.
+  const avatarTxid = _safeTxidOrNull(t.avatar_txid);
+  const avatarCt = _safeAvatarCt(t.avatar_content_type);
   return {
     ticker: t.ticker,
     supply,
@@ -369,6 +379,29 @@ function _sanitizeTokenRow(t) {
     open_orders: _safeInt(t.open_orders, 1e9) ?? 0,
     floor_unit_price: _safeFloat(t.floor_unit_price),
     last_trade: lastTrade,
+    avatar_txid: avatarTxid && avatarCt ? avatarTxid : null,
+    avatar_content_type: avatarTxid && avatarCt ? avatarCt : null,
+  };
+}
+
+// AvatarView (§8.4).
+function _sanitizeAvatarRow(a) {
+  if (!a || typeof a !== "object") return null;
+  const txid = _safeTxidOrNull(a.txid);
+  if (!txid) return null;
+  if (!_TICKER_RE.test(String(a.ticker || ""))) return null;
+  const height = _safeInt(a.block_height, 1e9);
+  const sender = _safeStr(a.sender, 128);
+  if (height === null || !sender) return null;
+  return {
+    txid,
+    block_height: height,
+    block_hash: _safeHash(a.block_hash),
+    sender,
+    ticker: a.ticker,
+    applied: a.applied === true,
+    content_type: _safeAvatarCt(a.content_type),
+    bytes_len: _safeInt(a.bytes_len, 1e6) ?? 0,
   };
 }
 
@@ -672,4 +705,29 @@ export async function trades(opts = {}, signal) {
 export async function tradesByAddress(address, signal) {
   const env = await _httpGet(`/trades/${encodeURIComponent(address)}`, signal);
   return ((env && env.trades) || []).map(_sanitizeTradeRow).filter(Boolean);
+}
+
+// ---- Token avatars (§8) ----------------------------------------------------------------
+
+/** GET /avatars/:addr → AvatarView[] (AVATAR txs sent by this address, audit) */
+export async function avatarsByAddress(address, signal) {
+  const env = await _httpGet(`/avatars/${encodeURIComponent(address)}`, signal);
+  return ((env && env.avatars) || []).map(_sanitizeAvatarRow).filter(Boolean);
+}
+
+/**
+ * `<img src>` for a token's avatar: `GET /tokens/:ticker/avatar` on the
+ * indexer, cache-busted with `?v=<avatar_txid>` (the indexer serves
+ * `ETag: "<txid>"`, and a replaced avatar changes the txid). Never fetched
+ * by this module — the browser loads it as an image, so CSP img-src must
+ * list the indexer origin (public/_headers). In mock mode it is a `data:`
+ * URL built from the bytes the mock stores. Returns null when the ticker /
+ * txid are malformed or (mock) no avatar exists.
+ */
+export function avatarUrl(ticker, txid) {
+  if (!_TICKER_RE.test(String(ticker || ""))) return null;
+  const v = _safeTxidOrNull(txid);
+  if (!v) return null;
+  if (MOCK) return mockAvatarDataUrl(ticker);
+  return `${INDEXER_URL}/tokens/${encodeURIComponent(ticker)}/avatar?v=${v}`;
 }

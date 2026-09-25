@@ -22,12 +22,18 @@
 // production bundle that merely imports this module pays nothing.
 
 import { sha256 } from "@noble/hashes/sha2.js";
-import { hex, bech32, bech32m } from "@scure/base";
+import { hex, base64, bech32, bech32m } from "@scure/base";
 import * as btc from "@scure/btc-signer";
 import { pubECDSA, pubSchnorr } from "@scure/btc-signer/utils.js";
 import { mineYield } from "./yield.js";
-import { REQUIRED_TOKEN_SUPPLY, DUST_SATS } from "./payloads.js";
+import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, AVATAR_PROTOCOL_FEE_SATS } from "./payloads.js";
 import { buildListingPsbt, verifyListing, parseListing, decodeRawTx, LISTING_SIGHASH } from "./swap.js";
+import { parseEnvelopeFromWitness, checkEnvelopeLimits, bytesToDataUrl } from "./inscribe.js";
+
+// A 16×16 PNG (141 bytes, a cyan diamond) — the seeded avatar of LUCKY, so
+// the board shows one inscribed token before any AVATAR tx is simulated.
+const SEED_AVATAR_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAVElEQVR42mNg5eAlCTFgFeXWsuLWsiJWA0Q1Lj0MeFRj1cOAVbXS5XdKl99h1cOASzUuPQx4VGPVw4BfNaYesjSQ7CRyPE1OsJITceQkDXISH34EAJ7PeVHXpJSFAAAAAElFTkSuQmCC";
 
 const BASE_TIP = 969_800;
 const CONFIRM_AFTER_MS = 20_000;
@@ -150,19 +156,43 @@ function world() {
   const knownUtxos = new Map(); // outpoint → { txid, vout, sats, address, balances, confirmed, block_height }
   const traderPool = Array.from({ length: 12 }, (_, i) => (i % 4 === 3 ? fakeP2wpkh(`trader-${i}`) : fakeP2tr(`trader-${i}`)));
 
+  const avatars = new Map(); // ticker → { bytes, contentType }
+  const avatarViews = []; // AvatarView[] (§8.4), newest first
+
   for (const s of TOKEN_SEEDS) {
+    // LUCKY is deployed by the simulated wallet so the §8 avatar flow can be previewed.
+    const deployer = s.ticker === "LUCKY" ? MOCK_WALLET.address : s.deployerType === "wpkh" ? fakeP2wpkh(`deployer-${s.ticker}`) : fakeP2tr(`deployer-${s.ticker}`);
     tokens.set(s.ticker, {
       ticker: s.ticker,
       supply: REQUIRED_TOKEN_SUPPLY,
       minted: s.minted,
-      deployer: s.deployerType === "wpkh" ? fakeP2wpkh(`deployer-${s.ticker}`) : fakeP2tr(`deployer-${s.ticker}`),
+      deployer,
       deploy_txid: fakeTxid(`deploy-${s.ticker}`),
       deploy_block: s.deploy_block,
       holders: s.holders,
       mine_count: Math.round(s.minted / 281.25),
       trade_count: 0,
       volume_sats: 0,
+      avatar_txid: null,
+      avatar_content_type: null,
     });
+    if (s.ticker === "LUCKY") {
+      const bytes = base64.decode(SEED_AVATAR_PNG_B64);
+      const row = tokens.get(s.ticker);
+      row.avatar_txid = fakeTxid(`avatar-${s.ticker}`);
+      row.avatar_content_type = "image/png";
+      avatars.set(s.ticker, { bytes, contentType: "image/png" });
+      avatarViews.push({
+        txid: row.avatar_txid,
+        block_height: s.deploy_block + 2,
+        block_hash: blockHashAt(s.deploy_block + 2),
+        sender: deployer,
+        ticker: s.ticker,
+        applied: true,
+        content_type: "image/png",
+        bytes_len: bytes.length,
+      });
+    }
 
     // ---- trade history: 30–60 fills over ~3 days with a bounded price walk
     if (s.base > 0) {
@@ -254,8 +284,14 @@ function world() {
     };
   });
 
-  W = { tokens, trades, orders, knownUtxos, feed, sim: new Map(), simMines: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set() };
+  W = { tokens, trades, orders, knownUtxos, feed, avatars, avatarViews, sim: new Map(), simMines: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set() };
   return W;
+}
+
+/** `data:` URL of a token's avatar (seeded or simulated), or null. Backs indexer.avatarUrl in mock mode. */
+export function mockAvatarDataUrl(ticker) {
+  const a = world().avatars.get(String(ticker || "").toUpperCase());
+  return a ? bytesToDataUrl(a.bytes, a.contentType) : null;
 }
 
 // ---- per-address seeds ------------------------------------------------------------------------
@@ -376,8 +412,23 @@ export function simulateBroadcast(rawHex) {
     if (!o.address) continue;
     w.created.set(`${d.txid}:${o.vout}`, { txid: d.txid, vout: o.vout, sats: o.sats, address: o.address, balances: {}, confirmed: false, block_height: null });
   }
-  w.sim.set(d.txid, { at: Date.now(), height, decoded: d, applied: false });
+  // input0's witness stack — where an AVATAR reveal carries its envelope (§8.2).
+  let witness0 = null;
+  try {
+    witness0 = btc.RawTx.decode(hex.decode(rawHex)).witnesses?.[0] || null;
+  } catch {
+    witness0 = null;
+  }
+  w.sim.set(d.txid, { at: Date.now(), height, decoded: d, witness0, applied: false });
   return d.txid;
+}
+
+/** Address of a spent input: created / known rows, else the deployer's seeded rows. */
+function inputAddress(i, deployer) {
+  const u = lookupUtxo(key(i));
+  if (u && u.address) return u.address;
+  if (deployer && seededBtcUtxos(deployer).some((s) => key(s) === key(i))) return deployer;
+  return null;
 }
 
 /** Apply every confirmed-but-unapplied simulated tx (idempotent). */
@@ -465,9 +516,35 @@ function applyTx(txid, e) {
         mine_count: 0,
         trade_count: 0,
         volume_sats: 0,
+        avatar_txid: null,
+        avatar_content_type: null,
       });
     }
     // pool burns
+  } else if (p && p.op === "AVATAR") {
+    // §8.3: ticker deployed, a deployer-owned input, the exact 546-sat fee
+    // output, a within-limits envelope in input0's witness, vout0 not OP_RETURN.
+    const tok = w.tokens.get(p.ticker);
+    const env = parseEnvelopeFromWitness(e.witness0 || []);
+    const deployerInput = !!tok && d.inputs.some((i) => inputAddress(i, tok.deployer) === tok.deployer);
+    const feeOk = d.outputs.some((o) => o.address === PROJECT_FEE_ADDRESS && o.sats === AVATAR_PROTOCOL_FEE_SATS);
+    const applied = !!tok && deployerInput && feeOk && checkEnvelopeLimits(env) && !!d.outputs[0] && !!d.outputs[0].address;
+    if (applied) {
+      tok.avatar_txid = txid;
+      tok.avatar_content_type = env.contentType;
+      w.avatars.set(p.ticker, { bytes: env.bytes, contentType: env.contentType });
+    }
+    w.avatarViews.unshift({
+      txid,
+      block_height: height,
+      block_hash: hash,
+      sender: senderOf(d),
+      ticker: p.ticker,
+      applied,
+      content_type: env ? env.contentType : null,
+      bytes_len: env ? env.bytes.length : 0,
+    });
+    // pool burns (AVATAR routes nothing)
   }
   // else: not a protocol tx → strict-burn (nothing credited)
 
@@ -686,6 +763,10 @@ export async function mockGet(path) {
     let all = [...w.trades].sort((a, b) => b.block_height - a.block_height || b.block_time - a.block_time);
     if (ticker) all = all.filter((t) => t.ticker === ticker);
     return page(all, q, 50);
+  }
+  if ((m = p.match(/^\/avatars\/([^/]+)$/))) {
+    const addr = decodeURIComponent(m[1]);
+    return { address: addr, avatars: w.avatarViews.filter((a) => a.sender === addr) };
   }
   throw notFound(p);
 }

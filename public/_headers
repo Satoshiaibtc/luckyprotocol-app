@@ -11,9 +11,12 @@
 # origin you pass as VITE_INDEXER_URL at build time. https://mempool.space
 # is listed for the explorer link target only — the app never fetches
 # from it.
+#
+# img-src: 'self' data: blob: + the indexer origin — token avatars (spec §8)
+# are loaded as <img src="<indexer>/tokens/:ticker/avatar?v=<txid>">.
 
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://luckyprotocolai.com http://127.0.0.1:8765 http://localhost:8765 https://mempool.space; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://luckyprotocolai.com http://127.0.0.1:8765 http://localhost:8765; font-src 'self' data:; connect-src 'self' https://luckyprotocolai.com http://127.0.0.1:8765 http://localhost:8765 https://mempool.space; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
   X-Content-Type-Options: nosniff
   X-Frame-Options: DENY
