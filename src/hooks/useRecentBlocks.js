@@ -73,7 +73,10 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       for (let h = ceiling - count + 1; h <= ceiling; h++) if (h >= 0) wanted.push(h);
       // Prune heights that fell off the window so the cache stays bounded.
       for (const h of [...cache.keys()]) if (h < ceiling - count + 1 || h > ceiling) cache.delete(h);
-      for (const h of wanted) if (!cache.has(h)) newRef.current.add(h);
+      // Only blocks that arrive AFTER the first fill get the "new" entrance;
+      // animating all sixteen on every page load read as the tape flashing.
+      const firstFill = cache.size === 0;
+      if (!firstFill) for (const h of wanted) if (!cache.has(h)) newRef.current.add(h);
       const need = wanted.filter((h) => !cache.has(h) || h === ceiling);
       if (need.length === 0) return;
       const reorg = await fetchHeights(need);

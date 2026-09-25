@@ -168,13 +168,19 @@ float, `null` when no asks) and `last_trade` (`TradeView` or `null`).
   "yield_smallest": 100, "cap_exhausted": false }
 ```
 
-## 6. Web wallet contract (UniSat)
+## 6. Web wallet contract (UniSat, OKX Wallet)
 
-The web app holds no keys. It builds an unsigned PSBT and hands it to
-`window.unisat.signPsbt`, then `window.unisat.pushPsbt`. Inputs come from
-`unisat.getBitcoinUtxos()` when available (UniSat's own asset-safe UTXO
-list), else the indexer's `/btc-utxos/:addr` confirmed set — in both
-cases filtered by the builder obligation in §4. For P2TR (bc1p) inputs
+The web app holds no keys. It builds an unsigned PSBT and hands it to the
+connected wallet's `signPsbt`, then `pushPsbt`/`pushTx`. Supported
+providers: `window.unisat` (UniSat extension and the UniSat app's
+browser) and `window.okxwallet.bitcoin` (OKX Wallet extension and the OKX
+app's DApp browser; UniSat-compatible API — `connect()` returns
+`{ address, publicKey }`, `pushTx` takes a raw hex string). Inputs come
+from `unisat.getBitcoinUtxos()` when available (UniSat's own asset-safe
+UTXO list), else the indexer's `/btc-utxos/:addr` confirmed set — OKX
+Wallet exposes no asset-safe list, so the app warns OKX users to use an
+address that holds no Ordinals/Runes. In every case inputs are filtered
+by the builder obligation in §4. For P2TR (bc1p) inputs
 the PSBT must carry `tapInternalKey` (x-only form of `unisat.getPublicKey()`);
 for P2WPKH (bc1q) a `witnessUtxo` suffices. The fee output and dust
 outputs are exact amounts from §1; the change output is appended last
