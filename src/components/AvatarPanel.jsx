@@ -1,6 +1,6 @@
 import { useId, useMemo, useState } from "react";
 import { useApp } from "../context.js";
-import { useAvatar } from "../hooks/useAvatar.js";
+import { useAvatar, AVATAR_RECORD_PHASES } from "../hooks/useAvatar.js";
 import { estimatePayFeeSats } from "../lib/psbt.js";
 import { estimateRevealFee, revealInput0Vsize, envelopeScriptLen, MAX_AVATAR_BYTES, TARGET_AVATAR_BYTES } from "../lib/inscribe.js";
 import { missingFeeHint } from "../lib/feechoice.js";
@@ -16,6 +16,7 @@ const ACCEPT = "image/png,image/jpeg,image/webp,image/gif";
 
 function litCount(av) {
   switch (av.phase) {
+    case "commit-checking":
     case "commit-building":
     case "commit-signing":
     case "commit-broadcast":
@@ -23,6 +24,7 @@ function litCount(av) {
     case "reveal-building":
     case "reveal-signing":
     case "reveal-broadcast":
+    case "commit-spent":
       return 2;
     case "pending":
     case "confirmed":
@@ -38,6 +40,8 @@ function buttonLabel(phase) {
   switch (phase) {
     case "compressing":
       return "Compressing…";
+    case "commit-checking":
+      return "Checking commit…";
     case "commit-building":
     case "reveal-building":
       return "Assembling…";
@@ -56,16 +60,50 @@ function buttonLabel(phase) {
   }
 }
 
+/** What forgetting the record costs, given how far it got. */
+function discardWarning(rec) {
+  if (!rec) return null;
+  const sats = fmtInt(rec.commitAmount);
+  if (rec.revealTxid) return `Discarding forgets the key: if the reveal never confirms, the ${sats} sats at the commit address become unspendable.`;
+  if (rec.commitTxid) return `Discarding forgets the key: the ${sats} sats at the commit address become unspendable.`;
+  if (rec.commitAttemptedAt) return `Discarding forgets the key: if the earlier commit payment did go out, its ${sats} sats become unspendable.`;
+  return null;
+}
+
+/** Two-step Discard (click → confirm / keep) with the record-specific warning. */
+function DiscardControl({ label = "Discard", confirmLabel, warning, onDiscard }) {
+  const [confirm, setConfirm] = useState(false);
+  if (!confirm) {
+    return (
+      <button className="btn btn-ghost btn-sm" type="button" onClick={() => setConfirm(true)}>
+        {label}
+      </button>
+    );
+  }
+  return (
+    <>
+      <button className="btn btn-danger btn-sm" type="button" onClick={() => { setConfirm(false); onDiscard(); }}>
+        {confirmLabel || label}
+      </button>
+      <button className="btn btn-ghost btn-sm" type="button" onClick={() => setConfirm(false)}>
+        Keep
+      </button>
+      {warning && <span className="err">{warning}</span>}
+    </>
+  );
+}
+
 /**
  * Deployer-only console for the on-chain token avatar (spec §8): file
  * picker → 256 px preview + byte size → fee breakdown (commit + reveal +
  * protocol fee) → permanent-on-chain warning → two-step progress
- * (Commit → Reveal → Confirm) with the recovery record's Resume / Discard.
- * Renders nothing unless the connected address is the token's deployer.
+ * (Commit → Reveal → Confirm) with the recovery record's Resume / Pay
+ * commit again / Rebuild reveal / Discard. Renders nothing unless the
+ * connected address is the token's deployer.
  */
 export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
   const { wallet, fee, indexerOk } = useApp();
-  const { avatar: av, isDeployer, pickFile, start, resume, discard, reset, busy } = useAvatar({
+  const { avatar: av, isDeployer, pickFile, start, resume, payCommit, rebuildReveal, discard, reset, busy } = useAvatar({
     wallet,
     ticker,
     tokenInfo,
@@ -73,7 +111,6 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
     onSettled,
   });
   const inputId = useId();
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   const feeRate = fee.satVb;
   const address = wallet.address;
@@ -101,8 +138,11 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
 
   if (!isDeployer) return null;
 
+  const recordOwned = AVATAR_RECORD_PHASES.has(av.phase);
   const canStart = av.phase === "compressed" && !!preview && indexerOk && !!feeRate && !busy;
-  const canPick = !busy && av.phase !== "resumable";
+  const canPick = !busy && !recordOwned;
+  // The fee rate stays adjustable while a reveal is pending, so a rebuild can use a fresh one.
+  const feeLocked = busy && av.phase !== "pending";
   const lit = litCount(av);
   const providerName = wallet.providerName || "your wallet";
 
@@ -175,7 +215,7 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
         </div>
       )}
 
-      <FeeSelector fee={fee} disabled={busy} />
+      <FeeSelector fee={fee} disabled={feeLocked} />
 
       <div className="fee-row avatar-fees">
         <span>
@@ -216,33 +256,32 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
               ? " — the reveal was broadcast; resume to watch it confirm."
               : av.record.commitTxid
                 ? ` — the commit (${fmtInt(av.record.commitAmount)} sats to ${shortAddr(av.record.commitAddress, 6, 4)}) was paid; resume to sign and broadcast the reveal.`
-                : " — nothing was paid yet; resume to start the commit."}
+                : av.record.commitAttemptedAt
+                  ? ` — a commit payment (${fmtInt(av.record.commitAmount)} sats to ${shortAddr(av.record.commitAddress, 6, 4)}) was started but its txid was not recorded; resume to look for it at the commit address before anything is paid again.`
+                  : " — nothing was paid yet; resume to start the commit."}
             {" "}The throw-away key is kept in this browser until the reveal confirms.
           </span>
           <button className="btn btn-primary btn-sm" type="button" onClick={resume} disabled={!indexerOk}>
             Resume
           </button>
-          {confirmDiscard ? (
-            <>
-              <button className="btn btn-danger btn-sm" type="button" onClick={() => { setConfirmDiscard(false); discard(); }}>
-                {av.record.commitTxid && !av.record.revealTxid ? "Discard and abandon the commit" : "Discard"}
-              </button>
-              <button className="btn btn-ghost btn-sm" type="button" onClick={() => setConfirmDiscard(false)}>
-                Keep
-              </button>
-            </>
-          ) : (
-            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setConfirmDiscard(true)}>
-              Discard
-            </button>
-          )}
-          {confirmDiscard && av.record.commitTxid && !av.record.revealTxid && (
-            <span className="err">Discarding forgets the key: the {fmtInt(av.record.commitAmount)} sats at the commit address become unspendable.</span>
-          )}
+          <DiscardControl
+            confirmLabel={av.record.commitTxid && !av.record.revealTxid ? "Discard and abandon the commit" : "Discard"}
+            warning={discardWarning(av.record)}
+            onDiscard={discard}
+          />
         </div>
       )}
 
-      {av.phase !== "resumable" && (
+      {av.phase === "invalid-record" && (
+        <div className="notice notice-row" role="note">
+          <span>
+            The stored avatar record for {ticker} is invalid — it failed its checks and cannot be read back, so it cannot be resumed. Discard it to start over. If a commit was ever paid from it, those sats cannot be recovered.
+          </span>
+          <DiscardControl confirmLabel="Discard invalid record" onDiscard={discard} />
+        </div>
+      )}
+
+      {!recordOwned && (
         <button className={`mine-btn${busy ? " busy" : ""}`} type="button" onClick={av.phase === "confirmed" ? reset : start} disabled={av.phase === "confirmed" ? false : !canStart} aria-busy={busy}>
           <svg className="crawl" aria-hidden="true">
             <rect width="100%" height="100%" />
@@ -254,7 +293,7 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
       <div className="phase-track three" aria-hidden="true">
         {PHASES.map((p, i) => {
           let cls = "";
-          if (i < lit) cls = av.phase === "error" ? "fail" : av.phase === "pending" && i === 2 ? "pulse" : "on";
+          if (i < lit) cls = av.phase === "error" || av.phase === "commit-spent" ? "fail" : av.phase === "pending" && i === 2 ? "pulse" : "on";
           return (
             <div key={p} className={cls}>
               <span className="seg" />
@@ -264,7 +303,19 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
         })}
       </div>
 
-      <StatusLine av={av} ticker={ticker} providerName={providerName} onReset={reset} onResume={resume} indexerOk={indexerOk} fee={fee} feeRate={feeRate} />
+      <StatusLine
+        av={av}
+        ticker={ticker}
+        providerName={providerName}
+        onReset={reset}
+        onResume={resume}
+        onPayCommit={payCommit}
+        onRebuild={rebuildReveal}
+        onDiscard={discard}
+        indexerOk={indexerOk}
+        fee={fee}
+        feeRate={feeRate}
+      />
     </div>
   );
 }
@@ -281,18 +332,47 @@ function TxA({ txid, label }) {
   );
 }
 
-function StatusLine({ av, ticker, providerName, onReset, onResume, indexerOk, fee, feeRate }) {
+function rebuildHint(reason) {
+  if (reason === "unseen") return "The indexer has never seen this reveal and the commit output is still unspent — it may never have been relayed. Rebuild it with fresh inputs at the current fee rate.";
+  if (reason === "stale") return "Pending for over 30 minutes. If it was dropped from the mempool, rebuild it with fresh inputs at the current fee rate.";
+  return null;
+}
+
+function commitSpentText(av) {
+  const outpoint = av.commitTxid ? `${shortTxid(av.commitTxid, 6, 6)}:${av.record?.commitVout ?? 0}` : "the commit output";
+  const lead =
+    av.spendKind === "mempool"
+      ? `An unconfirmed transaction already spends the commit output ${outpoint} — most likely an earlier reveal from this browser whose txid was not recorded.`
+      : `The node does not know the commit output ${outpoint} — either an earlier reveal already spent it, or the commit never made it into the mempool.`;
+  const cs = av.commitStatus;
+  let status = "";
+  if (cs) {
+    if (cs.confirmed) status = ` The commit confirmed in block ${fmtInt(cs.blockHeight)}, so its output was spent by another transaction.`;
+    else if (!cs.seen) status = " The indexer has never seen the commit tx either — it was most likely dropped before confirming, so its sats never left your wallet.";
+    else status = " The commit is still unconfirmed in the indexer's view.";
+  }
+  return `${lead}${status} Watching the token for its avatar to change (every 15 s).`;
+}
+
+function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, onRebuild, onDiscard, indexerOk, fee, feeRate }) {
   let led = "idle";
   let text;
   let detail = null;
   let actions = null;
   const commitTxid = av.commitTxid || av.record?.commitTxid || null;
   const revealTxid = av.revealTxid || av.record?.revealTxid || null;
+  const canAct = indexerOk && !!feeRate;
   const links = (
     <>
       <TxA txid={commitTxid} label="commit" />
       {commitTxid && revealTxid ? " · " : ""}
       <TxA txid={revealTxid} label="reveal" />
+    </>
+  );
+  const checks = (
+    <>
+      {av.lastChecked ? ` · last check ${fmtTime(av.lastChecked / 1000)}` : ""}
+      {av.pollError ? ` · last check failed: ${av.pollError}` : ""}
     </>
   );
 
@@ -304,6 +384,36 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, indexerOk, fe
     case "compressed":
       led = "ok";
       text = !feeRate ? missingFeeHint(fee.choice, feeRate, "inscribe") : !indexerOk ? "Indexer offline — inscribing paused until it is reachable." : "Ready. Two signatures: the commit payment, then the reveal. Fee inputs are spendable BTC only — dust and token-bearing outputs are never spent.";
+      break;
+    case "commit-checking":
+      led = "busy";
+      text = av.note || "Checking the commit address for an earlier payment before asking for one…";
+      detail = av.record ? (
+        <>
+          {fmtInt(av.record.commitAmount)} sats expected at <span className="mono">{shortAddr(av.record.commitAddress, 8, 6)}</span>
+        </>
+      ) : null;
+      break;
+    case "commit-unpaid":
+      led = "idle";
+      text = `A commit payment was started in an earlier session, but the indexer lists nothing at the commit address. If ${providerName} shows that payment as sent, give the indexer a moment and check again; otherwise pay the commit again.`;
+      detail = av.record ? (
+        <>
+          {fmtInt(av.record.commitAmount)} sats to <span className="mono">{shortAddr(av.record.commitAddress, 8, 6)}</span>
+          {av.checkedAt ? ` · checked ${fmtTime(av.checkedAt / 1000)}` : ""}
+        </>
+      ) : null;
+      actions = (
+        <>
+          <button className="btn btn-primary btn-sm" type="button" onClick={onPayCommit} disabled={!canAct}>
+            Pay commit again
+          </button>
+          <button className="btn btn-sm" type="button" onClick={onResume} disabled={!indexerOk}>
+            Check again
+          </button>
+          <DiscardControl warning={discardWarning(av.record)} onDiscard={onDiscard} />
+        </>
+      );
       break;
     case "commit-building":
       led = "busy";
@@ -326,8 +436,13 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, indexerOk, fe
       break;
     case "reveal-building":
       led = "busy";
-      text = "Building the reveal — input 0 spends the commit output, input 1 is your UTXO (authorization + fee).";
-      detail = links;
+      text = av.note || "Building the reveal — input 0 spends the commit output, input 1 is your UTXO (authorization + fee).";
+      detail = (
+        <>
+          {links}
+          {av.adoptedCommit ? " · commit found at the commit address and adopted" : ""}
+        </>
+      );
       break;
     case "reveal-signing":
       led = "busy";
@@ -341,17 +456,47 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, indexerOk, fe
       break;
     case "reveal-broadcast":
       led = "busy";
-      text = "Broadcasting the reveal…";
+      text = av.note || "Broadcasting the reveal…";
       break;
-    case "pending":
+    case "pending": {
       led = "busy";
-      text = revealTxid ? "Reveal broadcast. Pending confirmation — checking every 15 s." : "The commit output is already spent — watching the token for its avatar to change (every 15 s).";
+      const hint = rebuildHint(av.rebuildReason);
+      text = `Reveal broadcast. Pending confirmation — checking every 15 s.${av.seen === false ? " The indexer has not seen this reveal yet." : ""}${av.note ? ` ${av.note}` : ""}${hint ? ` ${hint}` : ""}`;
       detail = (
         <>
           {links}
           {av.broadcastAt ? ` · broadcast ${fmtTime(av.broadcastAt / 1000)}` : ""}
-          {av.lastChecked ? ` · last check ${fmtTime(av.lastChecked / 1000)}` : ""}
-          {av.pollError ? ` · last check failed: ${av.pollError}` : ""}
+          {checks}
+        </>
+      );
+      actions = (
+        <>
+          {av.rebuildReason && (
+            <button className="btn btn-primary btn-sm" type="button" onClick={onRebuild} disabled={!canAct}>
+              Rebuild reveal
+            </button>
+          )}
+          <DiscardControl warning={discardWarning(av.record)} onDiscard={onDiscard} />
+        </>
+      );
+      break;
+    }
+    case "commit-spent":
+      led = "err";
+      text = commitSpentText(av);
+      detail = (
+        <>
+          {links}
+          {av.nodeMessage ? ` · node: ${av.nodeMessage}` : ""}
+          {checks}
+        </>
+      );
+      actions = (
+        <>
+          <button className="btn btn-primary btn-sm" type="button" onClick={onPayCommit} disabled={!canAct} title="Pays a new commit to the same address (an unspent payment already there is adopted instead), then reveals">
+            Pay commit again
+          </button>
+          <DiscardControl onDiscard={onDiscard} />
         </>
       );
       break;
@@ -376,11 +521,20 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, indexerOk, fe
       detail = commitTxid || revealTxid ? links : null;
       actions = (
         <>
-          {av.record && (
+          {av.record?.revealTxid ? (
+            <>
+              <button className="btn btn-primary btn-sm" type="button" onClick={onRebuild} disabled={!canAct}>
+                Rebuild reveal
+              </button>
+              <button className="btn btn-sm" type="button" onClick={onResume} disabled={!indexerOk}>
+                Keep waiting
+              </button>
+            </>
+          ) : av.record ? (
             <button className="btn btn-primary btn-sm" type="button" onClick={onResume} disabled={!indexerOk}>
               Resume
             </button>
-          )}
+          ) : null}
           <button className="btn btn-sm" type="button" onClick={onReset}>
             Reset
           </button>
@@ -390,6 +544,10 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, indexerOk, fe
     case "resumable":
       led = "idle";
       text = "Resume the unfinished inscription above, or discard it.";
+      break;
+    case "invalid-record":
+      led = "err";
+      text = "Stored avatar record is invalid — discard it above to continue.";
       break;
     default:
       if (!indexerOk) text = "Indexer offline — inscribing paused until it is reachable.";

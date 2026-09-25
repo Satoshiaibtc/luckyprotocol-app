@@ -5,9 +5,11 @@ import * as wallet from "../lib/wallet.js";
 import { buildPayPsbt, outpointKey } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
 import {
+  adoptExistingCommit,
   buildEnvelopeScript,
   buildRevealPsbt,
   bytesToDataUrl,
+  classifyNodeRejection,
   clearAvatarRecord,
   commitAmountFor,
   commitPayment,
@@ -15,7 +17,9 @@ import {
   ephemeralXonly,
   finalizeReveal,
   generateEphemeralKey,
-  readAvatarRecord,
+  loadAvatarRecord,
+  retryOn503,
+  revealRebuildReason,
   signRevealEphemeral,
   writeAvatarRecord,
 } from "../lib/inscribe.js";
@@ -23,10 +27,16 @@ import { friendlyError } from "./useWallet.js";
 
 const STATUS_POLL_MS = 15_000;
 const RECONCILE_MAX_ATTEMPTS = 8;
+const SEEDING_NOTE = "indexer is scanning the commit address…";
+const NO_FEE_RATE = "No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.";
+const STALE_INPUT_ERROR =
+  "The node refused the reveal because one of the wallet inputs it used was already spent (the UTXO list was stale) while the commit output is still unspent. Those inputs are set aside for this session — try again to build with other inputs.";
+const EARLIER_REVEAL_NOTE = "The node still holds the earlier reveal in its mempool, so the rebuilt one was not accepted — waiting on the earlier one.";
 
 export const IDLE_AVATAR = { phase: "idle" };
 export const AVATAR_BUSY = new Set([
   "compressing",
+  "commit-checking",
   "commit-building",
   "commit-signing",
   "commit-broadcast",
@@ -35,10 +45,22 @@ export const AVATAR_BUSY = new Set([
   "reveal-broadcast",
   "pending",
 ]);
+/** Phases a stored record owns: no picker, no main button — every action lives in the notice / status line. */
+export const AVATAR_RECORD_PHASES = new Set(["resumable", "invalid-record", "commit-unpaid", "commit-spent"]);
+
+const rawMessage = (e) => String(e?.message || e || "unknown error");
 
 function previewOf(rec) {
   const bytes = base64.decode(rec.bytesBase64);
   return { bytes, contentType: rec.contentType, sizeBytes: bytes.length, dataUrl: bytesToDataUrl(bytes, rec.contentType), width: null, height: null, quality: null };
+}
+
+/** Panel state for whatever 'lp.avatar.<TICKER>' holds: nothing → idle, unreadable → invalid-record, else resumable. */
+function stateFromStorage(ticker) {
+  const { status, record } = loadAvatarRecord(ticker);
+  if (status === "corrupt") return { phase: "invalid-record" };
+  if (status === "ok") return { phase: "resumable", record, preview: previewOf(record) };
+  return IDLE_AVATAR;
 }
 
 /**
@@ -47,18 +69,32 @@ function previewOf(rec) {
  *   idle → compressing → compressed (preview)
  *        → commit-building → commit-signing → commit-broadcast
  *        → reveal-building → reveal-signing → reveal-broadcast
- *        → pending → confirmed (+ reconcile with /tokens/:ticker)   ↘ error
- *   resumable (a 'lp.avatar.<TICKER>' record exists) → resume() re-enters above
+ *        → pending → confirmed (+ reconcile with /tokens/:ticker)          ↘ error
+ *   resumable (a 'lp.avatar.<TICKER>' record exists) → resume() re-enters above:
+ *        no commitTxid, commitAttemptedAt set → commit-checking → (adopt) reveal | commit-unpaid
+ *        commitTxid, no revealTxid            → reveal straight away; the node decides
+ *        revealTxid                           → pending (rebuildReveal after 30 min / never seen)
+ *   commit-spent   the node says the commit input is gone (terminal: watch the token, pay again, discard)
+ *   invalid-record the stored record failed its bounds (discard only)
  *
- * The recovery record is written the moment the ephemeral key exists and
- * cleared only when the reveal is confirmed AND the indexer reports
- * `avatar_txid == revealTxid`. `walletState` must be the token's deployer.
+ * Every phase has a way out: the busy phases resolve or fail into `error`
+ * (Resume / Rebuild / Reset), and every non-busy phase carries Resume,
+ * Pay commit again, Rebuild reveal or Discard.
+ *
+ * The recovery record is written the moment the ephemeral key exists,
+ * stamped `commitAttemptedAt` BEFORE the wallet signs the commit (so a
+ * broadcast that went out but reported failure is found again rather than
+ * paid twice), and cleared only when the reveal is confirmed AND the
+ * indexer reports `avatar_txid == revealTxid`. `walletState` must be the
+ * token's deployer.
  */
 export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, onSettled }) {
   const [av, setAv] = useState(IDLE_AVATAR);
   const settledRef = useRef(onSettled);
   settledRef.current = onSettled;
   const runningRef = useRef(false);
+  // Wallet inputs a node refused as already spent (stale UTXO list): skipped for the rest of the session.
+  const staleRef = useRef(new Set());
 
   const connected = walletState.status === "connected";
   const address = connected ? walletState.address : null;
@@ -67,17 +103,24 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
 
   // Wallet / ticker change: drop in-flight UI state, re-read the record.
   useEffect(() => {
+    staleRef.current = new Set();
     if (!isDeployer) {
       setAv(IDLE_AVATAR);
       return;
     }
-    const rec = readAvatarRecord(ticker);
-    setAv(rec ? { phase: "resumable", record: rec, preview: previewOf(rec) } : IDLE_AVATAR);
+    setAv(stateFromStorage(ticker));
   }, [address, ticker, isDeployer]);
 
+  const needFeeRate = useCallback(() => {
+    if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) throw new Error(NO_FEE_RATE);
+  }, [feeRateSatVb]);
+
+  // An error thrown while broadcasting is the node's / relay's own words,
+  // never a declined signature — keep it verbatim (friendlyError would read
+  // "rejecting replacement" as a wallet decline).
   const fail = useCallback((e, extra = {}) => {
     runningRef.current = false;
-    setAv((s) => ({ ...s, phase: "error", error: friendlyError(e), ...extra }));
+    setAv((s) => ({ ...s, phase: "error", error: /-broadcast$/.test(String(s.phase)) ? rawMessage(e) : friendlyError(e), note: null, ...extra }));
   }, []);
 
   /** Step 1: decode + resize + compress; no key, no tx. */
@@ -99,13 +142,28 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
 
   const fetchInputs = useCallback(async () => {
     const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address), indexer.tokenUtxos(address)]);
-    return { utxoRes, tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))) };
+    const stale = staleRef.current;
+    return {
+      utxoRes: { ...utxoRes, utxos: utxoRes.utxos.filter((u) => !stale.has(outpointKey(u))) },
+      tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
+    };
   }, [address]);
+
+  /** `/btc-utxos/:commitAddress`, riding out the 503 the indexer answers while it seeds a new address. */
+  const listCommitAddress = useCallback(
+    (rec) =>
+      retryOn503(() => indexer.btcUtxos(rec.commitAddress), {
+        attempts: 3,
+        delayMs: 2_000,
+        onRetry: () => setAv((s) => ({ ...s, note: SEEDING_NOTE })),
+      }),
+    [],
+  );
 
   /** Commit: a plain payment of `commitAmount` to the commit address. Returns the updated record. */
   const runCommit = useCallback(
     async (rec) => {
-      setAv((s) => ({ ...s, phase: "commit-building", record: rec, error: null }));
+      setAv((s) => ({ ...s, phase: "commit-building", record: rec, error: null, note: null }));
       const { utxoRes, tokenOutpoints } = await fetchInputs();
       const built = buildPayPsbt({
         address,
@@ -116,14 +174,22 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         toAddress: rec.commitAddress,
         amountSats: rec.commitAmount,
       });
-      setAv((s) => ({ ...s, phase: "commit-signing", commitFeeSats: built.feeSats, commitFeeRate: built.feeRateSatVb, utxoSource: utxoRes.source }));
+      // Duplicate-commit guard, part 1: note the attempt BEFORE the wallet can
+      // sign or broadcast anything, so a resume after a mid-flight failure
+      // looks at the commit address instead of paying again.
+      const attempted = { ...rec, commitAttemptedAt: Date.now() };
+      if (!writeAvatarRecord(attempted)) {
+        throw new Error("This browser blocks localStorage — the recovery record could not be updated, so the commit was not signed.");
+      }
+      setAv((s) => ({ ...s, phase: "commit-signing", record: attempted, commitFeeSats: built.feeSats, commitFeeRate: built.feeRateSatVb, utxoSource: utxoRes.source }));
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
       setAv((s) => ({ ...s, phase: "commit-broadcast" }));
       const txid = await wallet.broadcastSignedPsbt(signed);
       const next = {
-        ...rec,
+        ...attempted,
         commitTxid: txid,
         commitVout: 0,
+        commitSats: rec.commitAmount,
         commitChange: built.changeOmitted ? null : { vout: built.changeVout, sats: built.changeSats },
         commitInputs: built.inputs.map(({ txid: t, vout }) => ({ txid: t, vout })),
       };
@@ -134,10 +200,88 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
     [address, pubkeyHex, feeRateSatVb, fetchInputs],
   );
 
-  /** Reveal: wallet signs its inputs first, the app signs input0 last, then broadcast. */
+  /**
+   * Duplicate-commit guard, part 2: an output already sitting at the commit
+   * address (≥ commitAmount, confirmed or not) is adopted as the commit.
+   * Returns the updated record, or null when nothing is there.
+   */
+  const adoptCommit = useCallback(
+    async (rec, { excludeKeys = [] } = {}) => {
+      setAv((s) => ({ ...s, phase: "commit-checking", record: rec, error: null, note: null }));
+      const rows = await listCommitAddress(rec);
+      const found = adoptExistingCommit(rows, rec.commitAmount, { excludeKeys });
+      if (!found) return null;
+      const next = { ...rec, commitTxid: found.txid, commitVout: found.vout, commitSats: found.sats, commitChange: null, commitInputs: [] };
+      writeAvatarRecord(next);
+      setAv((s) => ({ ...s, record: next, commitTxid: found.txid, note: null, adoptedCommit: true }));
+      return next;
+    },
+    [listCommitAddress],
+  );
+
+  /**
+   * The node refused the reveal for an input reason. A UTXO listing alone
+   * cannot say whether the commit is spent (the indexer may not have seen a
+   * fresh commit yet), but the node's verdict plus the listing can:
+   *   commit still listed unspent → a WALLET input was stale: set those aside, error with a retry
+   *   rebuild + mempool conflict  → the earlier reveal is still in the mempool: keep waiting on it
+   *   otherwise                   → the commit output is gone: 'commit-spent' (terminal, explained)
+   */
+  const settleRejectedReveal = useCallback(
+    async (rec, kind, usedInputs, err) => {
+      let commitListed = null;
+      try {
+        const rows = await listCommitAddress(rec);
+        commitListed = rows.some((u) => u.txid === rec.commitTxid && u.vout === rec.commitVout);
+      } catch {
+        commitListed = null;
+      }
+      if (commitListed === true) {
+        for (const i of usedInputs) staleRef.current.add(outpointKey(i));
+        setAv((s) => ({ ...s, phase: "error", error: STALE_INPUT_ERROR, note: null }));
+        return;
+      }
+      if (kind === "mempool-conflict" && rec.revealTxid) {
+        setAv((s) => ({
+          ...s,
+          phase: "pending",
+          record: rec,
+          revealTxid: rec.revealTxid,
+          broadcastAt: rec.revealBroadcastAt,
+          rebuildAttemptAt: Date.now(),
+          rebuildReason: null,
+          note: EARLIER_REVEAL_NOTE,
+          pollError: null,
+        }));
+        return;
+      }
+      setAv((s) => ({
+        ...s,
+        phase: "commit-spent",
+        record: rec,
+        commitTxid: rec.commitTxid,
+        revealTxid: rec.revealTxid,
+        spendKind: kind === "mempool-conflict" ? "mempool" : "missing",
+        nodeMessage: rawMessage(err).slice(0, 200),
+        commitStatus: null,
+        watchFrom: tokenInfo?.avatar_txid ?? null,
+        note: null,
+        pollError: null,
+      }));
+    },
+    [listCommitAddress, tokenInfo?.avatar_txid],
+  );
+
+  /**
+   * Reveal: wallet signs its inputs first, the app signs input0 last, then
+   * broadcast. The commit is spent by txid:vout — no UTXO listing is needed;
+   * the node's answer to the broadcast is what decides whether the commit
+   * output still exists. `rebuild:true` re-reveals an already-broadcast
+   * record with fresh inputs at the current fee rate.
+   */
   const runReveal = useCallback(
-    async (rec) => {
-      setAv((s) => ({ ...s, phase: "reveal-building", record: rec, error: null }));
+    async (rec, { rebuild = false } = {}) => {
+      setAv((s) => ({ ...s, phase: "reveal-building", record: rec, commitTxid: rec.commitTxid, error: null, note: null }));
       const { utxoRes, tokenOutpoints } = await fetchInputs();
       // The wallet's UTXO list may still show what the commit spent (and may
       // not yet show the commit's change): drop the former, add the latter.
@@ -149,7 +293,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       const ephemeralPriv = hex.decode(rec.ephemeralPrivHex);
       const leafScript = hex.decode(rec.leafScriptHex);
       const built = buildRevealPsbt({
-        commit: { txid: rec.commitTxid, vout: rec.commitVout, sats: rec.commitAmount },
+        commit: { txid: rec.commitTxid, vout: rec.commitVout, sats: rec.commitSats ?? rec.commitAmount },
         ephemeralPriv,
         leafScript,
         deployerAddress: address,
@@ -165,22 +309,48 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       // 2. app: input0 via the script path with the throw-away key
       const appSigned = signRevealEphemeral(walletSigned, ephemeralPriv);
       // 3. extract + broadcast
-      const { rawHex } = finalizeReveal(appSigned);
+      const { rawHex, txid: builtTxid } = finalizeReveal(appSigned);
       setAv((s) => ({ ...s, phase: "reveal-broadcast" }));
-      const txid = await wallet.broadcastRawTx(rawHex);
-      const next = { ...rec, revealTxid: txid };
+      let txid;
+      try {
+        txid = await wallet.broadcastRawTx(rawHex);
+      } catch (e) {
+        const kind = classifyNodeRejection(e);
+        if (kind === "already-known") {
+          txid = builtTxid; // byte-identical to a tx the node already holds: that IS our reveal
+        } else if (kind === "missing-or-spent" || kind === "mempool-conflict") {
+          await settleRejectedReveal(rec, kind, built.inputs, e);
+          return null;
+        } else {
+          throw e;
+        }
+      }
+      const unchanged = rebuild && txid === rec.revealTxid;
+      const next = { ...rec, revealTxid: txid, revealBroadcastAt: unchanged && rec.revealBroadcastAt ? rec.revealBroadcastAt : Date.now() };
       writeAvatarRecord(next);
-      setAv((s) => ({ ...s, phase: "pending", record: next, revealTxid: txid, broadcastAt: Date.now(), pollError: null }));
+      setAv((s) => ({
+        ...s,
+        phase: "pending",
+        record: next,
+        revealTxid: txid,
+        broadcastAt: next.revealBroadcastAt,
+        rebuildAttemptAt: rebuild ? Date.now() : null,
+        rebuildReason: null,
+        seen: null,
+        commitUnspent: null,
+        note: unchanged ? "The rebuilt reveal is identical to the one the node already holds — its txid is unchanged." : rebuild ? "Reveal rebuilt and rebroadcast with fresh inputs." : null,
+        pollError: null,
+      }));
       return next;
     },
-    [address, pubkeyHex, feeRateSatVb, ticker, fetchInputs],
+    [address, pubkeyHex, feeRateSatVb, ticker, fetchInputs, settleRejectedReveal],
   );
 
   /** From a compressed preview: new ephemeral key → record → commit → reveal. */
   const start = useCallback(async () => {
     if (!isDeployer || !av.preview || runningRef.current) return;
     if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) {
-      fail(new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB."));
+      fail(new Error(NO_FEE_RATE));
       return;
     }
     runningRef.current = true;
@@ -198,9 +368,12 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         commitAmount: commitAmountFor({ leafScriptLen: leaf.length, feeRateSatVb }),
         commitTxid: null,
         commitVout: null,
+        commitSats: null,
         commitChange: null,
         commitInputs: [],
+        commitAttemptedAt: null,
         revealTxid: null,
+        revealBroadcastAt: null,
         feeRateSatVb,
         createdAt: Date.now(),
       };
@@ -209,78 +382,155 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       }
       const afterCommit = await runCommit(rec);
       await runReveal(afterCommit);
-      runningRef.current = false;
     } catch (e) {
       fail(e);
+    } finally {
+      runningRef.current = false;
     }
   }, [isDeployer, av.preview, feeRateSatVb, ticker, runCommit, runReveal, fail]);
 
   /** Re-enter the flow from the stored record. */
   const resume = useCallback(async () => {
-    const rec = av.record || readAvatarRecord(ticker);
+    const rec = av.record || loadAvatarRecord(ticker).record;
     if (!isDeployer || !rec || runningRef.current) return;
     runningRef.current = true;
     try {
       if (rec.revealTxid) {
-        setAv((s) => ({ ...s, phase: "pending", record: rec, revealTxid: rec.revealTxid, commitTxid: rec.commitTxid, pollError: null }));
-        runningRef.current = false;
+        setAv((s) => ({
+          ...s,
+          phase: "pending",
+          record: rec,
+          revealTxid: rec.revealTxid,
+          commitTxid: rec.commitTxid,
+          broadcastAt: rec.revealBroadcastAt,
+          rebuildAttemptAt: null,
+          rebuildReason: null,
+          seen: null,
+          commitUnspent: null,
+          note: null,
+          pollError: null,
+        }));
         return;
       }
       if (!rec.commitTxid) {
-        if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
+        if (rec.commitAttemptedAt) {
+          // A commit was signed (and maybe broadcast) before: find it first, never pay blindly.
+          const adopted = await adoptCommit(rec);
+          if (!adopted) {
+            setAv((s) => ({ ...s, phase: "commit-unpaid", record: rec, note: null, checkedAt: Date.now() }));
+            return;
+          }
+          needFeeRate();
+          await runReveal(adopted);
+          return;
+        }
+        needFeeRate();
         await runReveal(await runCommit(rec));
-        runningRef.current = false;
         return;
       }
-      // Commit paid, reveal not recorded: is the commit output still unspent?
-      setAv((s) => ({ ...s, phase: "reveal-building", record: rec, commitTxid: rec.commitTxid, error: null }));
-      const rows = await indexer.btcUtxos(rec.commitAddress);
-      const present = rows.some((u) => u.txid === rec.commitTxid && u.vout === rec.commitVout);
-      if (present) {
-        if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
-        await runReveal(rec);
-      } else {
-        // Already spent (a reveal went out before the record could note its
-        // txid): watch the token row for an avatar change instead.
-        setAv((s) => ({ ...s, phase: "pending", record: rec, revealTxid: null, commitTxid: rec.commitTxid, watchFrom: tokenInfo?.avatar_txid ?? null, pollError: null }));
-      }
-      runningRef.current = false;
+      // Commit known, reveal not: build and sign right away. A listing that
+      // lacks the commit outpoint is inconclusive (the indexer may simply not
+      // have seen the commit yet); runReveal lets the node decide.
+      needFeeRate();
+      await runReveal(rec);
     } catch (e) {
       fail(e);
+    } finally {
+      runningRef.current = false;
     }
-  }, [av.record, isDeployer, ticker, feeRateSatVb, tokenInfo?.avatar_txid, runCommit, runReveal, fail]);
+  }, [av.record, isDeployer, ticker, needFeeRate, adoptCommit, runCommit, runReveal, fail]);
+
+  /**
+   * Explicit "Pay commit again" (never automatic): one more look at the
+   * commit address — an unspent output there is adopted instead — then a
+   * fresh commit payment, then the reveal.
+   */
+  const payCommit = useCallback(async () => {
+    const rec = av.record;
+    if (!isDeployer || !rec || runningRef.current) return;
+    runningRef.current = true;
+    try {
+      needFeeRate();
+      const excludeKeys = rec.commitTxid ? [`${rec.commitTxid}:${rec.commitVout}`] : [];
+      const base = { ...rec, commitTxid: null, commitVout: null, commitSats: null, commitChange: null, commitInputs: [], revealTxid: null, revealBroadcastAt: null };
+      const withCommit = (await adoptCommit(base, { excludeKeys })) || (await runCommit(base));
+      await runReveal(withCommit);
+    } catch (e) {
+      fail(e);
+    } finally {
+      runningRef.current = false;
+    }
+  }, [av.record, isDeployer, needFeeRate, adoptCommit, runCommit, runReveal, fail]);
+
+  /**
+   * Re-reveal: rebuild from the stored key / leaf / image bytes with fresh
+   * deployer inputs at the current fee rate, re-sign (wallet first),
+   * rebroadcast and replace revealTxid. A missing / spent-input rejection
+   * ends in 'commit-spent'.
+   */
+  const rebuildReveal = useCallback(async () => {
+    const rec = av.record;
+    if (!isDeployer || !rec || !rec.commitTxid || runningRef.current) return;
+    runningRef.current = true;
+    try {
+      needFeeRate();
+      await runReveal(rec, { rebuild: true });
+    } catch (e) {
+      fail(e);
+    } finally {
+      runningRef.current = false;
+    }
+  }, [av.record, isDeployer, needFeeRate, runReveal, fail]);
 
   /** Forget the record. If the commit was paid, its sats stay at the commit address unspent. */
   const discard = useCallback(() => {
     clearAvatarRecord(ticker);
     runningRef.current = false;
+    staleRef.current = new Set();
     setAv(IDLE_AVATAR);
   }, [ticker]);
 
-  /** Back to idle without touching the record (it comes back as "resumable" if one exists). */
+  /** Back to the stored record's state without touching it (resumable / invalid-record / idle). */
   const reset = useCallback(() => {
     runningRef.current = false;
-    const rec = readAvatarRecord(ticker);
-    setAv(rec ? { phase: "resumable", record: rec, preview: previewOf(rec) } : IDLE_AVATAR);
+    setAv(stateFromStorage(ticker));
   }, [ticker]);
 
-  // Pending with a known reveal txid → poll /tx-status.
+  // Pending with a known reveal txid → poll /tx-status; when the indexer has
+  // never seen it, also ask whether the commit output is still unspent, and
+  // work out whether "Rebuild reveal" should be offered.
   useEffect(() => {
     if (av.phase !== "pending" || !av.revealTxid) return undefined;
     let alive = true;
     const txid = av.revealTxid;
+    const rec = av.record;
+    const eligibility = (m, now, seen, commitUnspent) => revealRebuildReason({ now, broadcastAt: m.rebuildAttemptAt || m.broadcastAt || null, seen, commitUnspent });
     const check = async () => {
       try {
         const s = await indexer.txStatus(txid);
         if (!alive) return;
         if (s.confirmed && s.block_hash) {
-          setAv((m) => ({ ...m, phase: "confirmed", blockHeight: s.block_height, blockHash: s.block_hash, reconcile: "pending", pollError: null }));
+          setAv((m) => ({ ...m, phase: "confirmed", blockHeight: s.block_height, blockHash: s.block_hash, reconcile: "pending", pollError: null, rebuildReason: null, note: null }));
           settledRef.current?.();
-        } else {
-          setAv((m) => ({ ...m, pollError: null, lastChecked: Date.now() }));
+          return;
         }
+        const seen = s.seen !== false;
+        let commitUnspent = null;
+        if (!seen && rec && rec.commitTxid) {
+          try {
+            const rows = await indexer.btcUtxos(rec.commitAddress);
+            commitUnspent = rows.some((u) => u.txid === rec.commitTxid && u.vout === rec.commitVout);
+          } catch {
+            commitUnspent = null;
+          }
+        }
+        if (!alive) return;
+        const now = Date.now();
+        setAv((m) => ({ ...m, pollError: null, lastChecked: now, seen, commitUnspent, rebuildReason: eligibility(m, now, seen, commitUnspent) }));
       } catch (e) {
-        if (alive) setAv((m) => ({ ...m, pollError: friendlyError(e) }));
+        if (!alive) return;
+        const now = Date.now();
+        setAv((m) => ({ ...m, pollError: friendlyError(e), rebuildReason: eligibility(m, now, m.seen, m.commitUnspent) }));
       }
     };
     check();
@@ -289,25 +539,33 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       alive = false;
       clearInterval(id);
     };
-  }, [av.phase, av.revealTxid]);
+  }, [av.phase, av.revealTxid, av.record]);
 
-  // Pending WITHOUT a reveal txid (commit spent before the record knew) →
-  // watch the token row until its avatar changes.
+  // Commit spent (per the node) → watch the token row for its avatar to
+  // change (an earlier, unrecorded reveal may be confirming) and keep the
+  // commit's own tx-status in view so the explanation can say whether the
+  // commit ever landed.
   useEffect(() => {
-    if (av.phase !== "pending" || av.revealTxid) return undefined;
+    if (av.phase !== "commit-spent") return undefined;
     let alive = true;
     const from = av.watchFrom ?? null;
+    const commitTxid = av.commitTxid;
     const check = async () => {
       try {
-        const row = await indexer.token(ticker);
+        const [row, cs] = await Promise.all([indexer.token(ticker), commitTxid ? indexer.txStatus(commitTxid) : Promise.resolve(null)]);
         if (!alive) return;
         if (row && row.avatar_txid && row.avatar_txid !== from) {
           clearAvatarRecord(ticker);
           setAv((m) => ({ ...m, phase: "confirmed", revealTxid: row.avatar_txid, reconcile: "done", indexed: row, pollError: null }));
           settledRef.current?.();
-        } else {
-          setAv((m) => ({ ...m, pollError: null, lastChecked: Date.now() }));
+          return;
         }
+        setAv((m) => ({
+          ...m,
+          pollError: null,
+          lastChecked: Date.now(),
+          commitStatus: cs ? { confirmed: cs.confirmed, seen: cs.seen !== false, blockHeight: cs.block_height } : null,
+        }));
       } catch (e) {
         if (alive) setAv((m) => ({ ...m, pollError: friendlyError(e) }));
       }
@@ -318,7 +576,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       alive = false;
       clearInterval(id);
     };
-  }, [av.phase, av.revealTxid, av.watchFrom, ticker]);
+  }, [av.phase, av.watchFrom, av.commitTxid, ticker]);
 
   // Confirmed → reconcile with /tokens/:ticker (avatar_txid must equal our reveal), then clear the record.
   useEffect(() => {
@@ -333,6 +591,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         if (!alive) return;
         if (row && row.avatar_txid === txid) {
           clearAvatarRecord(ticker);
+          staleRef.current = new Set();
           setAv((m) => ({ ...m, reconcile: "done", indexed: row }));
           settledRef.current?.();
           return;
@@ -352,5 +611,5 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
     };
   }, [av.phase, av.reconcile, av.revealTxid, ticker]);
 
-  return { avatar: av, isDeployer, pickFile, start, resume, discard, reset, busy: AVATAR_BUSY.has(av.phase) };
+  return { avatar: av, isDeployer, pickFile, start, resume, payCommit, rebuildReveal, discard, reset, busy: AVATAR_BUSY.has(av.phase) };
 }
