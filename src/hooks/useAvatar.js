@@ -20,6 +20,10 @@ import {
   finalizeReveal,
   generateEphemeralKey,
   loadAvatarRecord,
+  unlockAvatarRecord,
+  deriveRecordKey,
+  signatureToBytes,
+  AVATAR_KEY_DOMAIN,
   retryOn503,
   revealRebuildReason,
   signRevealEphemeral,
@@ -49,7 +53,10 @@ export const AVATAR_BUSY = new Set([
   "pending",
 ]);
 /** Phases a stored record owns: no picker, no main button — every action lives in the notice / status line. */
-export const AVATAR_RECORD_PHASES = new Set(["resumable", "invalid-record", "commit-unpaid", "commit-unverified", "commit-spent"]);
+export const AVATAR_RECORD_PHASES = new Set(["locked", "resumable", "invalid-record", "commit-unpaid", "commit-unverified", "commit-spent"]);
+
+const NO_SIGN_MESSAGE = "This wallet cannot sign messages, so the recovery record (which holds a private key) cannot be stored encrypted — the inscription was not started. Use UniSat or OKX Wallet.";
+const NON_DETERMINISTIC = "The wallet produced two different signatures for the same message, so a key derived from it could not be re-derived later; the recovery record cannot be protected and the inscription was not started.";
 
 const outpointOf = (o) => `${o.txid}:${o.vout}`;
 /** Prior commits minus the ones already proven spent / swept. */
@@ -66,9 +73,10 @@ function previewOf(rec) {
   return { bytes, contentType: rec.contentType, sizeBytes: bytes.length, dataUrl: bytesToDataUrl(bytes, rec.contentType), width: null, height: null, quality: null };
 }
 
-/** Panel state for whatever 'lp.avatar.<TICKER>' holds: nothing → idle, unreadable → invalid-record, else resumable. */
+/** Panel state for whatever 'lp.avatar.<TICKER>' holds: nothing → idle, encrypted → locked, unreadable → invalid-record, else resumable. */
 function stateFromStorage(ticker) {
   const { status, record } = loadAvatarRecord(ticker);
+  if (status === "encrypted") return { phase: "locked" };
   if (status === "corrupt") return { phase: "invalid-record" };
   if (status === "ok") return { phase: "resumable", record, preview: previewOf(record) };
   return IDLE_AVATAR;
@@ -112,6 +120,8 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
   const runningRef = useRef(false);
   // Wallet inputs a node refused as already spent (stale UTXO list): skipped for the rest of the session.
   const staleRef = useRef(new Set());
+  // The wallet-derived AES key that protects the stored record (L-13); per address, memory only.
+  const keyRef = useRef({ address: null, key: null });
 
   const connected = walletState.status === "connected";
   const address = connected ? walletState.address : null;
@@ -121,12 +131,60 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
   // Wallet / ticker change: drop in-flight UI state, re-read the record.
   useEffect(() => {
     staleRef.current = new Set();
+    if (keyRef.current.address !== address) keyRef.current = { address, key: null };
     if (!isDeployer) {
       setAv(IDLE_AVATAR);
       return;
     }
     setAv(stateFromStorage(ticker));
   }, [address, ticker, isDeployer]);
+
+  /**
+   * The record key for this address: cached for the session, else derived
+   * from the wallet's signature of AVATAR_KEY_DOMAIN. `verify:true` (record
+   * creation) signs twice and refuses a non-deterministic signer. The mock
+   * provider has no signMessage and is the only plaintext fallback (null).
+   */
+  const ensureRecordKey = useCallback(
+    async ({ verify = false } = {}) => {
+      if (wallet.isMockWallet()) return null;
+      if (!wallet.canSignMessage()) throw new Error(NO_SIGN_MESSAGE);
+      if (keyRef.current.address === address && keyRef.current.key) return keyRef.current.key;
+      setAv((s) => ({ ...s, note: "Sign the message in your wallet to derive the record key (no transaction, no fee)…" }));
+      const sig1 = await wallet.signMessage(AVATAR_KEY_DOMAIN);
+      if (verify) {
+        const sig2 = await wallet.signMessage(AVATAR_KEY_DOMAIN);
+        if (sig1 !== sig2) throw new Error(NON_DETERMINISTIC);
+      }
+      const key = await deriveRecordKey(signatureToBytes(sig1), address);
+      keyRef.current = { address, key };
+      setAv((s) => ({ ...s, note: null }));
+      return key;
+    },
+    [address],
+  );
+
+  /** 'locked' → one wallet signature decrypts the stored record. */
+  const unlock = useCallback(async () => {
+    if (!isDeployer || runningRef.current) return;
+    runningRef.current = true;
+    try {
+      const key = await ensureRecordKey();
+      if (!key) {
+        setAv({ phase: "locked", error: "This record was written by a real wallet and cannot be opened by the simulated wallet." });
+        return;
+      }
+      const r = await unlockAvatarRecord(ticker, key);
+      if (r.status === "ok") setAv({ phase: "resumable", record: r.record, preview: previewOf(r.record) });
+      else if (r.status === "wrong-key") setAv({ phase: "locked", error: "That signature does not open this record. It was created by a different wallet account — connect the account that started the inscription." });
+      else if (r.status === "absent") setAv(IDLE_AVATAR);
+      else setAv({ phase: "invalid-record" });
+    } catch (e) {
+      setAv((s) => ({ ...s, phase: "locked", error: friendlyError(e), note: null }));
+    } finally {
+      runningRef.current = false;
+    }
+  }, [isDeployer, ticker, ensureRecordKey]);
 
   const needFeeRate = useCallback(() => {
     if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) throw new Error(NO_FEE_RATE);
@@ -202,7 +260,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       // sign or broadcast anything, so a resume after a mid-flight failure
       // looks at the commit address instead of paying again.
       const attempted = { ...rec, commitAttemptedAt: Date.now() };
-      if (!writeAvatarRecord(attempted)) {
+      if (!(await writeAvatarRecord(attempted, keyRef.current.key))) {
         throw new Error("This browser blocks localStorage — the recovery record could not be updated, so the commit was not signed.");
       }
       setAv((s) => ({ ...s, phase: "commit-signing", record: attempted, commitFeeSats: built.feeSats, commitFeeRate: built.feeRateSatVb, utxoSource: utxoRes.source, assetSafe: utxoRes.assetSafe, signingInputs: built.inputs }));
@@ -219,7 +277,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         commitChange: built.changeOmitted ? null : { vout: built.changeVout, sats: built.changeSats },
         commitInputs: built.inputs.map(({ txid: t, vout }) => ({ txid: t, vout })),
       };
-      writeAvatarRecord(next);
+      await writeAvatarRecord(next, keyRef.current.key);
       setAv((s) => ({ ...s, record: next, commitTxid: txid, commitAt: Date.now() }));
       return next;
     },
@@ -238,7 +296,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       const found = adoptExistingCommit(rows, rec.commitAmount, { excludeKeys });
       if (!found) return null;
       const next = { ...rec, commitTxid: found.txid, commitVout: found.vout, commitSats: found.sats, commitChange: null, commitInputs: [] };
-      writeAvatarRecord(next);
+      await writeAvatarRecord(next, keyRef.current.key);
       setAv((s) => ({ ...s, record: next, commitTxid: found.txid, note: null, adoptedCommit: true }));
       return next;
     },
@@ -380,7 +438,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       }
       const unchanged = rebuild && txid === rec.revealTxid;
       const next = { ...rec, revealTxid: txid, revealBroadcastAt: unchanged && rec.revealBroadcastAt ? rec.revealBroadcastAt : Date.now() };
-      writeAvatarRecord(next);
+      await writeAvatarRecord(next, keyRef.current.key);
       setAv((s) => ({
         ...s,
         phase: "pending",
@@ -408,6 +466,9 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
     }
     runningRef.current = true;
     try {
+      // The record key first: nothing is generated or stored until the
+      // record can be written encrypted (L-13).
+      await ensureRecordKey({ verify: true });
       const priv = generateEphemeralKey();
       const leaf = buildEnvelopeScript(ephemeralXonly(priv), av.preview.contentType, av.preview.bytes);
       const pay = commitPayment(priv, leaf);
@@ -430,7 +491,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         feeRateSatVb,
         createdAt: Date.now(),
       };
-      if (!writeAvatarRecord(rec)) {
+      if (!(await writeAvatarRecord(rec, keyRef.current.key))) {
         throw new Error("This browser blocks localStorage — the recovery key could not be saved, so the inscription was not started.");
       }
       const afterCommit = await runCommit(rec);
@@ -440,7 +501,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
     } finally {
       runningRef.current = false;
     }
-  }, [isDeployer, av.preview, feeRateSatVb, ticker, runCommit, runReveal, fail]);
+  }, [isDeployer, av.preview, feeRateSatVb, ticker, runCommit, runReveal, fail, ensureRecordKey]);
 
   /** Re-enter the flow from the stored record. */
   const resume = useCallback(async () => {
@@ -518,7 +579,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
       const withCommit = adopted
         ? { ...adopted, priorCommits: withoutPrior(adopted.priorCommits, adopted.commitTxid, adopted.commitVout) }
         : await runCommit(base);
-      writeAvatarRecord(withCommit);
+      await writeAvatarRecord(withCommit, keyRef.current.key);
       await runReveal(withCommit);
     } catch (e) {
       fail(e);
@@ -598,7 +659,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
           else throw e;
         }
         const next = { ...rec, priorCommits: withoutPrior(rec.priorCommits, target.txid, target.vout) };
-        writeAvatarRecord(next);
+        await writeAvatarRecord(next, keyRef.current.key);
         setAv((s) => ({ ...s, record: next, sweepable: next.priorCommits, sweep: { outpoint, phase: gone ? "gone" : "done", error: null, txid: txid || null, feeSats: built.feeSats, outSats: built.outSats } }));
         // Nothing left to keep the record alive for (reveal applied earlier) → forget the key.
         if (next.priorCommits.length === 0 && s_isApplied(av)) clearAvatarRecord(ticker);
@@ -762,5 +823,5 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
     };
   }, [av.phase, av.reconcile, av.revealTxid, av.record, ticker]);
 
-  return { avatar: av, isDeployer, pickFile, start, resume, payCommit, retryReveal, checkCommit, sweepCommit, rebuildReveal, discard, reset, busy: AVATAR_BUSY.has(av.phase) || !!(av.sweep && (av.sweep.phase === "building" || av.sweep.phase === "broadcast")) };
+  return { avatar: av, isDeployer, pickFile, start, unlock, resume, payCommit, retryReveal, checkCommit, sweepCommit, rebuildReveal, discard, reset, busy: AVATAR_BUSY.has(av.phase) || !!(av.sweep && (av.sweep.phase === "building" || av.sweep.phase === "broadcast")) };
 }

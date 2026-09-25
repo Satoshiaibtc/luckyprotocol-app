@@ -6,7 +6,8 @@
 //
 //   1. compressAvatar(file)            → ≤ 10,240-byte WebP (PNG fallback), 256×256
 //   2. generateEphemeralKey()          → 32 random bytes, kept in localStorage
-//                                        ('lp.avatar.<TICKER>') until the reveal confirms
+//                                        ('lp.avatar.<TICKER>', AES-GCM-encrypted — see
+//                                        RECORD ENCRYPTION) until the reveal confirms
 //   3. buildEnvelopeScript(...)        → <xonly> OP_CHECKSIG OP_FALSE OP_IF … OP_ENDIF   (§8.2)
 //      commitPayment(priv, leaf)       → P2TR(internal = ephemeral, tree = [leaf])
 //      commitAmountFor(...)            → 546 + the reveal's input0 cost (see FEE SPLIT)
@@ -49,6 +50,24 @@
 //   overhead, its own input weight and the address outputs (about the cost
 //   of a MINE) — and absorbs any fee-rate difference between commit and
 //   reveal time. Both halves are itemized in the UI.
+//
+// RECORD ENCRYPTION (audit L-13): the recovery record holds the ephemeral
+// private key and the image bytes. It is stored encrypted with AES-GCM-256
+// under a key derived (HKDF-SHA256) from the wallet's signature of a FIXED
+// domain string (AVATAR_KEY_DOMAIN) — nothing secret is ever written in
+// clear, and nothing but the wallet that created the record can open it.
+//   * The signature is `signMessage(AVATAR_KEY_DOMAIN, "ecdsa")` (RFC 6979
+//     → deterministic for a given key). useAvatar signs TWICE when a record
+//     is first created and refuses to proceed if the two differ, because a
+//     non-deterministic signer could never re-derive the key.
+//   * The derived key lives in memory for the session (per address). A
+//     record from an earlier session shows as 'locked' until the user
+//     unlocks it with one signature (no transaction, no fee).
+//   * The only plaintext fallback is the mock provider (VITE_MOCK=1), which
+//     has no signMessage; a real provider without signMessage cannot start
+//     an inscription. Plaintext records written before this change still
+//     load (and stay plaintext until they complete).
+//   * Blob format: { v: 1, enc: "aes-gcm", ticker, iv: base64(12), ct: base64 }.
 //
 // Everything above `compressAvatar` is pure and runs in Node (test/inscribe.test.js).
 
@@ -631,6 +650,93 @@ export function serializeAvatarRecord(rec) {
   return JSON.stringify(rec);
 }
 
+// ---- record encryption (WebCrypto; pure, tested in Node) -------------------------------------------
+
+/** The fixed message the wallet signs to derive the record key. Never varies per ticker or session. */
+export const AVATAR_KEY_DOMAIN = "LuckyProtocol avatar recovery key v1 — signing this derives the key that protects your avatar record in this browser. It is not a transaction and costs nothing.";
+export const AVATAR_RECORD_ENC_VERSION = 1;
+const HKDF_SALT = ascii("lp.avatar.record.v1");
+
+function subtle() {
+  const c = globalThis.crypto;
+  if (!c || !c.subtle) throw new Error("WebCrypto is not available in this browser");
+  return c.subtle;
+}
+
+/**
+ * Signature text from a provider's `signMessage` → bytes. UniSat / OKX
+ * return base64; hex is accepted too.
+ */
+export function signatureToBytes(sig) {
+  const s = String(sig || "").trim();
+  if (!s) throw new Error("empty signature");
+  if (/^[0-9a-f]+$/i.test(s) && s.length % 2 === 0 && s.length >= 128) return hex.decode(s.toLowerCase());
+  return base64.decode(s);
+}
+
+/**
+ * AES-GCM-256 record key from the wallet's signature of AVATAR_KEY_DOMAIN:
+ * HKDF-SHA256(ikm = signature bytes, salt = "lp.avatar.record.v1", info = address).
+ * Non-extractable; lives in memory only.
+ */
+export async function deriveRecordKey(signatureBytes, address) {
+  if (!(signatureBytes instanceof Uint8Array) || signatureBytes.length < 32) throw new Error("record key: signature must be at least 32 bytes");
+  if (typeof address !== "string" || !address) throw new Error("record key: address is required");
+  const s = subtle();
+  const ikm = await s.importKey("raw", signatureBytes, "HKDF", false, ["deriveKey"]);
+  return s.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: HKDF_SALT, info: ascii(address) },
+    ikm,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/** True when a stored string is an encrypted record blob (as opposed to a legacy plaintext record). */
+export function isEncryptedRecord(raw) {
+  if (typeof raw !== "string") return false;
+  try {
+    const b = JSON.parse(raw);
+    return !!b && typeof b === "object" && b.v === AVATAR_RECORD_ENC_VERSION && b.enc === "aes-gcm" && typeof b.iv === "string" && typeof b.ct === "string";
+  } catch {
+    return false;
+  }
+}
+
+/** → the JSON blob string to store. */
+export async function encryptAvatarRecord(rec, key) {
+  const iv = new Uint8Array(12);
+  globalThis.crypto.getRandomValues(iv);
+  const plain = ascii(serializeAvatarRecord(rec));
+  const ct = new Uint8Array(await subtle().encrypt({ name: "AES-GCM", iv }, key, plain));
+  return JSON.stringify({ v: AVATAR_RECORD_ENC_VERSION, enc: "aes-gcm", ticker: String(rec.ticker).toUpperCase(), iv: base64.encode(iv), ct: base64.encode(ct) });
+}
+
+/**
+ * Decrypt a blob and parse the record. → `{ status: 'ok', record }`,
+ * `{ status: 'wrong-key' }` (AES-GCM authentication failed: another wallet
+ * account, or a tampered blob) or `{ status: 'corrupt' }` (decrypted but
+ * fails parseAvatarRecord's bounds).
+ */
+export async function decryptAvatarRecord(raw, key) {
+  let b;
+  try {
+    b = JSON.parse(raw);
+  } catch {
+    return { status: "corrupt", record: null };
+  }
+  if (!isEncryptedRecord(raw)) return { status: "corrupt", record: null };
+  let plain;
+  try {
+    plain = await subtle().decrypt({ name: "AES-GCM", iv: base64.decode(b.iv) }, key, base64.decode(b.ct));
+  } catch {
+    return { status: "wrong-key", record: null };
+  }
+  const record = parseAvatarRecord(new TextDecoder().decode(new Uint8Array(plain)));
+  return record ? { status: "ok", record } : { status: "corrupt", record: null };
+}
+
 function storage() {
   try {
     return typeof localStorage !== "undefined" ? localStorage : null;
@@ -643,33 +749,47 @@ export function readAvatarRecord(ticker) {
 }
 /**
  * Like readAvatarRecord but tells "nothing stored" apart from "stored but
- * unusable": → `{ status: 'absent' | 'ok' | 'corrupt', record }`. A corrupt
- * record must be surfaced (it may still be the only copy of a funded key's
- * bytes — the user decides to discard it), never silently ignored.
+ * unusable": → `{ status: 'absent' | 'ok' | 'encrypted' | 'corrupt', record, raw }`.
+ * 'encrypted' means a blob is present and needs the wallet-derived key
+ * (unlockAvatarRecord). A corrupt record must be surfaced (it may still be
+ * the only copy of a funded key's bytes — the user decides to discard it),
+ * never silently ignored. 'ok' is a legacy plaintext record.
  */
 export function loadAvatarRecord(ticker) {
   const s = storage();
-  if (!s) return { status: "absent", record: null };
+  if (!s) return { status: "absent", record: null, raw: null };
   let raw = null;
   try {
     raw = s.getItem(avatarRecordKey(ticker));
   } catch {
-    return { status: "absent", record: null };
+    return { status: "absent", record: null, raw: null };
   }
-  if (raw === null || raw === undefined) return { status: "absent", record: null };
+  if (raw === null || raw === undefined) return { status: "absent", record: null, raw: null };
+  if (isEncryptedRecord(raw)) return { status: "encrypted", record: null, raw };
   let record = null;
   try {
     record = parseAvatarRecord(raw);
   } catch {
     record = null;
   }
-  return record ? { status: "ok", record } : { status: "corrupt", record: null };
+  return record ? { status: "ok", record, raw } : { status: "corrupt", record: null, raw };
 }
-export function writeAvatarRecord(rec) {
+/** Decrypt the stored blob for `ticker` with `key` → `{ status: 'absent'|'ok'|'wrong-key'|'corrupt', record }`. */
+export async function unlockAvatarRecord(ticker, key) {
+  const l = loadAvatarRecord(ticker);
+  if (l.status !== "encrypted") return { status: l.status, record: l.record };
+  return decryptAvatarRecord(l.raw, key);
+}
+/**
+ * Persist a record: encrypted under `key` when one is given, plaintext
+ * otherwise (mock provider / legacy record only). → Promise<boolean>.
+ */
+export async function writeAvatarRecord(rec, key = null) {
   const s = storage();
   if (!s) return false;
   try {
-    s.setItem(avatarRecordKey(rec.ticker), serializeAvatarRecord(rec));
+    const text = key ? await encryptAvatarRecord(rec, key) : serializeAvatarRecord(rec);
+    s.setItem(avatarRecordKey(rec.ticker), text);
     return true;
   } catch {
     return false;

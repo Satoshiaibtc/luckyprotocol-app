@@ -58,6 +58,14 @@ import {
   signSweep,
   sweepVsize,
   classifyCommitState,
+  AVATAR_KEY_DOMAIN,
+  deriveRecordKey,
+  signatureToBytes,
+  encryptAvatarRecord,
+  decryptAvatarRecord,
+  isEncryptedRecord,
+  unlockAvatarRecord,
+  writeAvatarRecord,
 } from "../src/lib/inscribe.js";
 import { buildPayPsbt, estimatePayFeeSats, extractRawTxHex, MAX_FEE_RATE_SAT_VB } from "../src/lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, buildAvatarPayload, parsePayload, payloadToString } from "../src/lib/payloads.js";
@@ -466,16 +474,78 @@ const rec = {
     removeItem: (k) => store.delete(k),
   };
   try {
-    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "absent", record: null });
+    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "absent", record: null, raw: null });
     store.set(avatarRecordKey("LUCKY"), serializeAvatarRecord(rec));
-    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "ok", record: rec });
+    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "ok", record: rec, raw: serializeAvatarRecord(rec) });
     store.set(avatarRecordKey("LUCKY"), serializeAvatarRecord({ ...rec, commitAmount: ceiling + 1 }));
-    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "corrupt", record: null }, "out-of-bounds record is reported as corrupt, not as absent");
+    assert.equal(loadAvatarRecord("LUCKY").status, "corrupt", "out-of-bounds record is reported as corrupt, not as absent");
+    assert.equal(loadAvatarRecord("LUCKY").record, null);
     store.set(avatarRecordKey("LUCKY"), "{garbage");
     assert.equal(loadAvatarRecord("LUCKY").status, "corrupt");
   } finally {
     delete globalThis.localStorage;
   }
+}
+
+// ---- record encryption (L-13) -----------------------------------------------------------------------------
+{
+  assert.ok(AVATAR_KEY_DOMAIN.includes("LuckyProtocol avatar recovery key v1"), "fixed domain string");
+  // a 65-byte "signature" stands in for the wallet's signMessage output (base64, as UniSat / OKX return it)
+  const fakeSig = base64.encode(new Uint8Array([...sha256(new TextEncoder().encode("sig-a")), ...sha256(new TextEncoder().encode("sig-b")), 1]));
+  const sigBytes = signatureToBytes(fakeSig);
+  assert.equal(sigBytes.length, 65);
+  assert.equal(signatureToBytes(hex.encode(sigBytes)).length, 65, "hex signature accepted too");
+  assert.throws(() => signatureToBytes(""), /empty/);
+  const keyA = await deriveRecordKey(sigBytes, MOCK_WALLET.address);
+  const keyA2 = await deriveRecordKey(sigBytes, MOCK_WALLET.address);
+  const keyB = await deriveRecordKey(sigBytes, "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"); // same signature, another address → another key
+  await assert.rejects(deriveRecordKey(new Uint8Array(8), MOCK_WALLET.address), /at least 32 bytes/);
+  const blob = await encryptAvatarRecord(rec, keyA);
+  assert.equal(isEncryptedRecord(blob), true);
+  assert.equal(isEncryptedRecord(serializeAvatarRecord(rec)), false, "a plaintext record is not a blob");
+  assert.equal(isEncryptedRecord("{garbage"), false);
+  const parsedBlob = JSON.parse(blob);
+  assert.deepEqual(Object.keys(parsedBlob).sort(), ["ct", "enc", "iv", "ticker", "v"]);
+  assert.equal(parsedBlob.ticker, "LUCKY");
+  assert.ok(!blob.includes(rec.ephemeralPrivHex) && !blob.includes(rec.bytesBase64.slice(0, 32)), "neither the key nor the image is in clear");
+  // round-trip with the same key (re-derived independently), wrong key / tampered blob refused
+  assert.deepEqual((await decryptAvatarRecord(blob, keyA2)).record, rec, "round-trip via a re-derived key");
+  assert.equal((await decryptAvatarRecord(blob, keyB)).status, "wrong-key");
+  const tampered = JSON.parse(blob);
+  tampered.ct = base64.encode(base64.decode(tampered.ct).map((b, i) => (i === 5 ? b ^ 1 : b)));
+  assert.equal((await decryptAvatarRecord(JSON.stringify(tampered), keyA)).status, "wrong-key", "GCM authentication catches a flipped bit");
+  assert.equal((await decryptAvatarRecord("not json", keyA)).status, "corrupt");
+  // a blob that decrypts to an out-of-bounds record is corrupt, not ok
+  const badBlob = await encryptAvatarRecord({ ...rec, commitAmount: 1e12 }, keyA);
+  assert.equal((await decryptAvatarRecord(badBlob, keyA)).status, "corrupt");
+  // two encryptions of the same record differ (fresh IV) but both open
+  const blob2 = await encryptAvatarRecord(rec, keyA);
+  assert.notEqual(blob, blob2);
+  assert.equal((await decryptAvatarRecord(blob2, keyA)).status, "ok");
+
+  // storage: writeAvatarRecord(rec, key) stores a blob; loadAvatarRecord reports 'encrypted'; unlockAvatarRecord opens it
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  try {
+    assert.equal(await writeAvatarRecord(rec, keyA), true);
+    assert.equal(isEncryptedRecord(store.get(avatarRecordKey("LUCKY"))), true);
+    assert.equal(loadAvatarRecord("LUCKY").status, "encrypted");
+    assert.equal(loadAvatarRecord("LUCKY").record, null, "an encrypted record is never parsed without the key");
+    assert.deepEqual(await unlockAvatarRecord("LUCKY", keyA), { status: "ok", record: rec });
+    assert.equal((await unlockAvatarRecord("LUCKY", keyB)).status, "wrong-key");
+    assert.equal((await unlockAvatarRecord("ORE", keyA)).status, "absent");
+    // plaintext write (mock fallback) still loads as before
+    assert.equal(await writeAvatarRecord(rec, null), true);
+    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "ok", record: rec, raw: serializeAvatarRecord(rec) });
+    assert.deepEqual(await unlockAvatarRecord("LUCKY", keyA), { status: "ok", record: rec }, "unlock passes a plaintext record through");
+  } finally {
+    delete globalThis.localStorage;
+  }
+  console.log("record encryption: HKDF(signature, address) → AES-GCM, wrong key / tamper refused, storage round-trip");
 }
 
 // ---- duplicate-commit guard: adoptExistingCommit ---------------------------------------------------------

@@ -383,6 +383,29 @@ export async function signPsbt(psbtHex, { inputIndexes, address, autoFinalized =
   return signed.toLowerCase();
 }
 
+/**
+ * True when the connected provider can sign a plain message (UniSat / OKX
+ * `signMessage(text, "ecdsa")`). The mock provider cannot — it is the only
+ * plaintext fallback for the avatar record (audit L-13).
+ */
+export function canSignMessage() {
+  const p = current ? current.provider : null;
+  return !!p && typeof p.signMessage === "function";
+}
+
+/**
+ * Sign a plain message with the connected account (ECDSA, RFC 6979 →
+ * deterministic for a given key + message). Returns the provider's
+ * signature text (base64). Used ONLY to derive the avatar record key.
+ */
+export async function signMessage(text) {
+  const p = need();
+  if (typeof p.signMessage !== "function") throw new Error(`${providerName()} cannot sign messages`);
+  const sig = await p.signMessage(String(text), "ecdsa");
+  if (typeof sig !== "string" || sig.length < 32) throw new Error(`${providerName()} returned an unexpected signMessage result`);
+  return sig;
+}
+
 /** Broadcast a signed PSBT via the provider. Returns the txid. */
 export async function pushPsbt(signedPsbtHex) {
   const p = need();

@@ -160,7 +160,7 @@ function DiscardControl({ label = "Discard", confirmLabel, warning, onDiscard })
  */
 export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
   const { wallet, fee, indexerOk } = useApp();
-  const { avatar: av, isDeployer, pickFile, start, resume, payCommit, retryReveal, checkCommit, sweepCommit, rebuildReveal, discard, reset, busy } = useAvatar({
+  const { avatar: av, isDeployer, pickFile, start, unlock, resume, payCommit, retryReveal, checkCommit, sweepCommit, rebuildReveal, discard, reset, busy } = useAvatar({
     wallet,
     ticker,
     tokenInfo,
@@ -329,6 +329,20 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
         </div>
       )}
 
+      {av.phase === "locked" && (
+        <div className="notice notice-row" role="note">
+          <span>
+            An avatar inscription record for {ticker} from an earlier session is stored in this browser, encrypted with a key only your wallet can derive. Unlock it with one
+            wallet signature (a message, not a transaction — no fee) to resume or discard it.
+            {av.error ? <span className="err"> {av.error}</span> : null}
+          </span>
+          <button className="btn btn-primary btn-sm" type="button" onClick={unlock} disabled={busy}>
+            Unlock
+          </button>
+          <DiscardControl confirmLabel="Discard without unlocking" warning="Discarding forgets the record: if it holds a paid commit, those sats become unspendable." onDiscard={discard} />
+        </div>
+      )}
+
       {av.phase === "invalid-record" && (
         <div className="notice notice-row" role="note">
           <span>
@@ -457,7 +471,7 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
       break;
     case "compressed":
       led = "ok";
-      text = !feeRate ? missingFeeHint(fee.choice, feeRate, "inscribe") : !indexerOk ? "Indexer offline — inscribing paused until it is reachable." : "Ready. Two signatures: the commit payment, then the reveal. Fee inputs are spendable BTC only — dust and token-bearing outputs are never spent.";
+      text = av.note || (!feeRate ? missingFeeHint(fee.choice, feeRate, "inscribe") : !indexerOk ? "Indexer offline — inscribing paused until it is reachable." : "Ready. A message signature first (it derives the key that encrypts the recovery record in this browser), then two transaction signatures: the commit payment and the reveal. Fee inputs are spendable BTC only — dust and token-bearing outputs are never spent.");
       break;
     case "commit-checking":
       led = "busy";
@@ -667,6 +681,10 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
     case "resumable":
       led = "idle";
       text = "Resume the unfinished inscription above, or discard it.";
+      break;
+    case "locked":
+      led = "idle";
+      text = av.note || "Unlock the stored inscription record above with a wallet signature.";
       break;
     case "invalid-record":
       led = "err";
