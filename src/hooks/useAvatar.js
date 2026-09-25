@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { hex, base64 } from "@scure/base";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
-import { buildPayPsbt, outpointKey } from "../lib/psbt.js";
+import { buildPayPsbt, expectPsbtPayload, outpointKey } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
 import {
   adoptExistingCommit,
@@ -182,6 +182,8 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         throw new Error("This browser blocks localStorage — the recovery record could not be updated, so the commit was not signed.");
       }
       setAv((s) => ({ ...s, phase: "commit-signing", record: attempted, commitFeeSats: built.feeSats, commitFeeRate: built.feeRateSatVb, utxoSource: utxoRes.source }));
+      // Sign-time guard: the commit is a plain payment — no OP_RETURN at all.
+      expectPsbtPayload(built.psbtHex, { op: null });
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
       setAv((s) => ({ ...s, phase: "commit-broadcast" }));
       const txid = await wallet.broadcastSignedPsbt(signed);
@@ -304,6 +306,8 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
         ticker,
       });
       setAv((s) => ({ ...s, phase: "reveal-signing", revealFeeSats: built.feeSats, revealFeeRate: built.feeRateSatVb, revealInputCount: built.walletInputIndexes.length, utxoSource: utxoRes.source }));
+      // Sign-time guard (M-1): exactly one OP_RETURN and it is AVATAR|<this ticker>.
+      expectPsbtPayload(built.psbtHex, { op: "AVATAR", ticker });
       // 1. wallet: its inputs only, finalized
       const walletSigned = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.walletInputIndexes, address });
       // 2. app: input0 via the script path with the throw-away key

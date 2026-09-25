@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
-import { buildMinePsbt } from "../lib/psbt.js";
+import { buildMinePsbt, expectPsbtPayload } from "../lib/psbt.js";
 import { mineYield } from "../lib/yield.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { friendlyError } from "./useWallet.js";
@@ -60,6 +60,8 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
         assetSafe: utxoRes.assetSafe,
       });
 
+      // Sign-time guard: the OP_RETURN must be exactly one MINE for this ticker.
+      expectPsbtPayload(built.psbtHex, { op: "MINE", ticker });
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: addr });
       setMine((m) => ({ ...m, phase: "broadcasting" }));
       const txid = await wallet.broadcastSignedPsbt(signed);

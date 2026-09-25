@@ -37,6 +37,8 @@ import {
   buildDeployPayload,
   buildMinePayload,
   buildSendPayload,
+  parsePayload,
+  payloadToString,
 } from "./payloads.js";
 
 export const NETWORK = btc.NETWORK; // mainnet
@@ -157,6 +159,134 @@ export function makeOpReturnScript(data) {
 export function extractRawTxHex(signedPsbtHex) {
   const tx = btc.Transaction.fromPSBT(hex.decode(signedPsbtHex));
   return hex.encode(tx.extract());
+}
+
+// ---- OP_RETURN payload rule (mirrors the indexer, PROTOCOL-v3.md §2) ------------------------
+//
+// An OP_RETURN output is any output whose scriptPubKey starts with 0x6a.
+// The protocol payload is the LOWEST-index OP_RETURN output whose script
+// is exactly `OP_RETURN <one push>` (direct push, PUSHDATA1/2/4, nothing
+// after it) and whose push parses as a LUCKY-20 payload. Every other
+// OP_RETURN output is ignored by the rule — but this app never signs or
+// relays a tx with more than one (see expectPsbtPayload / assertSingleOpReturn),
+// because an indexer applying the stricter "more than one ⇒ not a protocol
+// tx" reading would strict-burn the input pool.
+
+const OP_RETURN = 0x6a;
+const OP_PUSHDATA1 = 0x4c;
+const OP_PUSHDATA2 = 0x4d;
+const OP_PUSHDATA4 = 0x4e;
+
+export const isOpReturnScript = (script) => script instanceof Uint8Array && script.length > 0 && script[0] === OP_RETURN;
+
+/**
+ * The data of an `OP_RETURN <single push>` script, or null when the script
+ * is not an OP_RETURN, has no push, uses an opcode other than a data push
+ * (e.g. `6a61` = OP_RETURN OP_NOP), is truncated, or carries anything after
+ * the push.
+ */
+export function decodeOpReturnPush(script) {
+  if (!isOpReturnScript(script) || script.length < 2) return null;
+  const op = script[1];
+  let start;
+  let len;
+  if (op >= 1 && op < OP_PUSHDATA1) {
+    len = op;
+    start = 2;
+  } else if (op === OP_PUSHDATA1) {
+    if (script.length < 3) return null;
+    len = script[2];
+    start = 3;
+  } else if (op === OP_PUSHDATA2) {
+    if (script.length < 4) return null;
+    len = script[2] | (script[3] << 8);
+    start = 4;
+  } else if (op === OP_PUSHDATA4) {
+    if (script.length < 6) return null;
+    len = (script[2] | (script[3] << 8) | (script[4] << 16) | (script[5] << 24)) >>> 0;
+    start = 6;
+  } else {
+    return null; // OP_0, OP_1..16, or a non-push opcode
+  }
+  if (start + len !== script.length) return null; // truncated, or trailing bytes
+  return script.subarray(start, start + len);
+}
+
+/**
+ * Apply the payload rule to a tx's output scripts (in vout order).
+ * → { opReturnCount, payload, payloadText, payloadVout }
+ */
+export function protocolPayloadOfScripts(scripts) {
+  let opReturnCount = 0;
+  let payload = null;
+  let payloadText = null;
+  let payloadVout = null;
+  (scripts || []).forEach((script, vout) => {
+    if (!isOpReturnScript(script)) return;
+    opReturnCount += 1;
+    if (payload !== null) return;
+    const data = decodeOpReturnPush(script);
+    if (!data) return;
+    const text = payloadToString(data);
+    const p = parsePayload(text);
+    if (p) {
+      payload = p;
+      payloadText = text;
+      payloadVout = vout;
+    }
+  });
+  return { opReturnCount, payload, payloadText, payloadVout };
+}
+
+function psbtOutputScripts(psbtHex) {
+  const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownInputs: true, allowUnknownOutputs: true });
+  const scripts = [];
+  for (let i = 0; i < tx.outputsLength; i++) scripts.push(tx.getOutput(i).script);
+  return scripts;
+}
+
+/**
+ * Sign-time guard (audit M-1 / M-3): before a PSBT goes to the wallet,
+ * assert that its OP_RETURN says what the flow believes it says.
+ *
+ *   expectPsbtPayload(hex, { op: "SEND", ticker: "LUCKY", amount: 100 })
+ *   expectPsbtPayload(hex, { op: null })          // a plain payment: no OP_RETURN at all
+ *
+ * Throws on: more than one OP_RETURN output, a missing / unparsable
+ * payload, the wrong opcode, ticker or amount. Returns the parsed payload
+ * (null for a plain payment).
+ */
+export function expectPsbtPayload(psbtHex, expect = {}) {
+  const found = protocolPayloadOfScripts(psbtOutputScripts(psbtHex));
+  return checkExpectedPayload(found, expect);
+}
+
+export function checkExpectedPayload(found, expect = {}) {
+  const want = expect && typeof expect === "object" ? expect : {};
+  if (found.opReturnCount > 1) {
+    throw new Error(`refusing to sign: the transaction has ${found.opReturnCount} OP_RETURN outputs (a protocol tx has exactly one)`);
+  }
+  if (want.op === null) {
+    if (found.opReturnCount !== 0) throw new Error("refusing to sign: a plain payment must not carry an OP_RETURN output");
+    return null;
+  }
+  if (!found.payload) {
+    throw new Error(
+      found.opReturnCount === 0
+        ? `refusing to sign: no OP_RETURN output — expected a ${want.op || "protocol"} payload`
+        : "refusing to sign: the OP_RETURN output does not parse as a LUCKY-20 payload",
+    );
+  }
+  if (want.op && found.payload.op !== want.op) {
+    throw new Error(`refusing to sign: OP_RETURN is ${found.payload.op}, expected ${want.op}`);
+  }
+  if (want.ticker !== undefined && found.payload.ticker !== want.ticker) {
+    throw new Error(`refusing to sign: OP_RETURN names ticker ${found.payload.ticker}, expected ${want.ticker}`);
+  }
+  if (want.amount !== undefined && Number(found.payload.amount) !== Number(want.amount)) {
+    throw new Error(`refusing to sign: OP_RETURN moves ${found.payload.amount} tokens, expected ${want.amount}`);
+  }
+  return found.payload;
 }
 
 // ---- fee estimate -----------------------------------------------------------------------

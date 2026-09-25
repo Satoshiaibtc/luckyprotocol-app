@@ -7,7 +7,7 @@ import { usePoll } from "../hooks/usePoll.js";
 import { useTxStatus } from "../hooks/useTxStatus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { buildListingPsbt, LISTING_SIGHASH, MIN_PRICE_SATS } from "../lib/swap.js";
-import { buildSendPsbt } from "../lib/psbt.js";
+import { buildSendPsbt, expectPsbtPayload } from "../lib/psbt.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { DUST_SATS } from "../lib/payloads.js";
 import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, shortTxid } from "../lib/format.js";
@@ -189,6 +189,8 @@ export default function SellPanel({ ticker, token, onSettled }) {
         toAddress: address,
       });
       setChain({ phase: "signing", kind, feeSats: built.feeSats });
+      // Sign-time guard (M-1): exactly one OP_RETURN and it is a SEND of this ticker/amount.
+      expectPsbtPayload(built.psbtHex, { op: "SEND", ticker, amount });
       const signed = await unisat.signPsbt(built.psbtHex, built.inputIndexes, address);
       setChain((c) => ({ ...c, phase: "broadcasting" }));
       const txid = await unisat.broadcastSignedPsbt(signed);

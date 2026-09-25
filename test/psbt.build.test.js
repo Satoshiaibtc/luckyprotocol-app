@@ -17,6 +17,8 @@ import {
   estimateDeployFeeSats,
   decodeAddress,
   extractRawTxHex,
+  expectPsbtPayload,
+  buildPayPsbt,
 } from "../src/lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, payloadToString } from "../src/lib/payloads.js";
 
@@ -218,6 +220,22 @@ assert.throws(
   }
   assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "lucky" }), /A-Z 0-9/);
   assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "TOOLONGTKN" }), /length/);
+}
+
+// ---- M-1: sign-time payload guard ---------------------------------------------------------------
+{
+  const mine = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
+  assert.deepEqual(expectPsbtPayload(mine.psbtHex, { op: "MINE", ticker: "LUCKY" }), { op: "MINE", ticker: "LUCKY" });
+  assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: "SEND" }), /OP_RETURN is MINE, expected SEND/);
+  assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: "MINE", ticker: "ORE" }), /names ticker LUCKY, expected ORE/);
+  assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: null }), /plain payment must not carry an OP_RETURN/);
+  const dep = buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "NEWTKN" });
+  assert.equal(expectPsbtPayload(dep.psbtHex, { op: "DEPLOY", ticker: "NEWTKN" }).op, "DEPLOY");
+  assert.throws(() => expectPsbtPayload(dep.psbtHex, { op: "MINE", ticker: "NEWTKN" }), /expected MINE/);
+  const pay = buildPayPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, toAddress: p2wpkhAddr, amountSats: 10_000 });
+  assert.equal(expectPsbtPayload(pay.psbtHex, { op: null }), null, "a plain payment has no OP_RETURN");
+  assert.throws(() => expectPsbtPayload(pay.psbtHex, { op: "MINE" }), /no OP_RETURN output — expected a MINE payload/);
+  console.log("psbt guard: expectPsbtPayload asserts op / ticker / amount before signing");
 }
 
 console.log("psbt build: all structural checks passed");

@@ -25,7 +25,8 @@ import {
   estimateFillCost,
   LISTING_SIGHASH,
 } from "../src/lib/swap.js";
-import { PROJECT_FEE_ADDRESS, payloadToString } from "../src/lib/payloads.js";
+import { PROJECT_FEE_ADDRESS, buildAvatarPayload, buildSendPayload, payloadToString } from "../src/lib/payloads.js";
+import { expectPsbtPayload, makeOpReturnScript } from "../src/lib/psbt.js";
 import { mockSignPsbt, MOCK_WALLET } from "../src/lib/mock.js";
 
 const enc = (s) => new TextEncoder().encode(s);
@@ -288,6 +289,26 @@ function runScenario(label, sellerType, buyerType) {
 
   // finalizeFill is idempotent on an already-finalized input0
   assert.equal(finalizeFill(hex.encode(fin.toPSBT())), rawHex);
+
+  // M-1: a fill whose OP_RETURN is not the SEND is never extracted, even
+  // when every input is signed (the seller's bearer signature would
+  // otherwise authorize e.g. an AVATAR for their token).
+  {
+    const avatar = makeOpReturnScript(buildAvatarPayload("LUCKY"));
+    const tampered = parse(signedFill);
+    tampered.updateOutput(3, { script: avatar }, true);
+    assert.throws(() => finalizeFill(hex.encode(tampered.toPSBT())), /OP_RETURN is AVATAR, expected SEND/, `${label}: AVATAR riding on the listing is refused`);
+    const wrongTicker = parse(signedFill);
+    wrongTicker.updateOutput(3, { script: makeOpReturnScript(buildSendPayload({ ticker: "OTHER", amount: 1200, toOutIdx: 1, changeOutIdx: 4 })) }, true);
+    assert.throws(() => finalizeFill(hex.encode(wrongTicker.toPSBT()), { op: "SEND", ticker: "LUCKY" }), /names ticker OTHER/, `${label}: wrong ticker refused`);
+    const noPayload = parse(signedFill);
+    noPayload.updateOutput(3, { script: new Uint8Array([0x6a, 0x04, 0x74, 0x65, 0x73, 0x74]) }, true);
+    assert.throws(() => finalizeFill(hex.encode(noPayload.toPSBT())), /does not parse as a LUCKY-20 payload/, `${label}: non-protocol OP_RETURN refused`);
+    // the sign-time guard sees the same PSBT the wallet would
+    assert.deepEqual(expectPsbtPayload(fill.psbtHex, { op: "SEND", ticker: "LUCKY", amount: 1200 }), { op: "SEND", ticker: "LUCKY", amount: 1200, toOutIdx: 1, changeOutIdx: 4 });
+    assert.throws(() => expectPsbtPayload(fill.psbtHex, { op: "SEND", amount: 1199 }), /moves 1200 tokens, expected 1199/);
+    assert.throws(() => expectPsbtPayload(fill.psbtHex, { op: null }), /plain payment must not carry an OP_RETURN/);
+  }
 
   // Buyer with only dust / token UTXOs cannot fill
   assert.throws(

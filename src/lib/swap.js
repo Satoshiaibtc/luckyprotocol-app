@@ -40,6 +40,8 @@ import {
   checkedFeeRate,
   makeOpReturnScript,
   outpointKey,
+  checkExpectedPayload,
+  protocolPayloadOfScripts,
 } from "./psbt.js";
 
 /** SIGHASH_SINGLE | SIGHASH_ANYONECANPAY — the only sighash a listing may use. */
@@ -86,6 +88,12 @@ function equalBytes(a, b) {
   if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array) || a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
+}
+
+function outputScripts(tx) {
+  const scripts = [];
+  for (let i = 0; i < tx.outputsLength; i++) scripts.push(tx.getOutput(i).script);
+  return scripts;
 }
 
 function checkOutpoint(txid, vout) {
@@ -434,6 +442,10 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   tx.addOutput({ script: opReturnScript, amount: 0n });                             // vout3 OP_RETURN
   tx.addOutputAddress(address, BigInt(change), NETWORK);                            // vout4 change — mandatory
 
+  // Self-check before handing the PSBT to the wallet: exactly one OP_RETURN,
+  // and it is the SEND of this order (M-1 / M-3).
+  checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), { op: "SEND", ticker: order.ticker, amount: order.amount });
+
   return {
     psbtHex: hex.encode(tx.toPSBT()),
     inputIndexes,
@@ -451,9 +463,13 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
  * from the seller's SINGLE|ANYONECANPAY signature, assert every input is
  * finalized, and extract the raw transaction hex for broadcast.
  */
-export function finalizeFill(signedPsbtHex) {
+export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
   const tx = loadPsbt(signedPsbtHex);
   if (tx.inputsLength < 2) throw new Error("fill has no buyer inputs");
+  // Broadcast-time guard (M-1 / M-3): the tx we are about to extract must be
+  // a single-OP_RETURN SEND — never an AVATAR / MINE / DEPLOY riding on the
+  // seller's bearer signature, never a second OP_RETURN a wallet injected.
+  checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), expect);
   if (tx.inputStatus(0) !== "finalized") tx.finalizeIdx(0);
   for (let i = 0; i < tx.inputsLength; i++) {
     const st = tx.inputStatus(i);
