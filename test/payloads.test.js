@@ -5,6 +5,7 @@
 // permanent state fork (the rejecting side strict-burns the input pool).
 import assert from "node:assert/strict";
 import {
+  ACTIVATION_HEIGHT,
   MAX_OUT_IDX,
   PROTOCOL_PREFIX,
   REQUIRED_TOKEN_SUPPLY,
@@ -17,6 +18,7 @@ import {
 } from "../src/lib/payloads.js";
 
 assert.equal(PROTOCOL_PREFIX, "LUCKY-20");
+assert.equal(ACTIVATION_HEIGHT, 969_300, "activation height per the 2026-09-26 owner decision (must match the indexer)");
 
 // ---- SEND: exactly six fields (§2.3) — mirrors protocol.rs parse tests ----------------------------
 // 5 fields (no CHANGE_OUT) → invalid. This is the case the Rust parser used
