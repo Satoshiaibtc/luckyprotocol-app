@@ -34,6 +34,29 @@ import {
 
 const NETWORK = btc.NETWORK; // mainnet
 
+/**
+ * Hard safety cap on the fee rate a builder will accept. The rate comes from
+ * the indexer's /fees (bitcoind estimatesmartfee); a buggy or compromised
+ * response of, say, 10⁶ sat/vB would otherwise turn a MINE into a wallet-
+ * draining miner fee. Mainnet has never sustained anything near this; if a
+ * real spike ever exceeds it, the user should wait — never auto-clamp to a
+ * number that still overpays.
+ */
+export const MAX_FEE_RATE_SAT_VB = 1_000;
+
+function checkedFeeRate(feeRateSatVb) {
+  let satVb = Number(feeRateSatVb);
+  if (!Number.isFinite(satVb) || satVb <= 0) satVb = 1;
+  satVb = Math.max(1, satVb);
+  if (satVb > MAX_FEE_RATE_SAT_VB) {
+    throw new Error(
+      `fee rate ${satVb} sat/vB exceeds the ${MAX_FEE_RATE_SAT_VB} sat/vB safety cap — ` +
+      `the fee estimate looks wrong; wait for it to normalize and retry`,
+    );
+  }
+  return satVb;
+}
+
 // ---- vsize model (BIP141 weights / 4) --------------------------------------------
 //
 // version(4) + locktime(4) + in-count(1) + out-count(1) = 10 vB, plus the
@@ -155,7 +178,10 @@ export function estimateMineFeeSats({ address, ticker, feeRateSatVb, inputCount 
     outputAddresses: [address, PROJECT_FEE_ADDRESS, address],
     opReturnScriptLen: makeOpReturnScript(payload).length,
   });
-  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * Math.max(1, feeRateSatVb)) };
+  // Display-only preview: clamp (don't throw) so the console can still render
+  // a number; the builder itself refuses rates above MAX_FEE_RATE_SAT_VB.
+  const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate) };
 }
 
 // ---- coin selection ------------------------------------------------------------------------
@@ -234,9 +260,7 @@ function buildUnsigned({
     );
   }
 
-  let satVb = Number(feeRateSatVb);
-  if (!Number.isFinite(satVb) || satVb <= 0) satVb = 1;
-  satVb = Math.max(1, satVb);
+  const satVb = checkedFeeRate(feeRateSatVb);
 
   const opReturnScript = makeOpReturnScript(opReturnData);
   const fixedOutValue = outputs.reduce((s, o) => s + o.value, 0);
@@ -384,9 +408,27 @@ export function buildSendPsbt({
   decodeAddress(toAddress);
   const payload = buildSendPayload({ ticker, amount, toOutIdx: 0, changeOutIdx: 3 });
 
-  // Token carriers are 546-sat outputs; the fee selector excludes them, so
-  // we pin them as inputs explicitly and let the selector fund the rest.
-  const carriers = (tokenUtxos || []).map((u) => ({ txid: u.txid, vout: u.vout, sats: DUST_SATS }));
+  // Token carriers are pinned as inputs (their balances form the input pool)
+  // and the fee selector funds the rest. They MUST be spent at their EXACT
+  // on-chain value: the segwit/taproot sighash commits to each input's
+  // amount, so a wrong witnessUtxo.amount yields an invalid signature (tx
+  // rejected) and wrong fee/change math. Carriers are usually 546-sat dust,
+  // but a SEND's vout3 change output carries residual tokens on top of
+  // arbitrary BTC change — never assume 546. Resolve each carrier's sats
+  // from the wallet's full UTXO list (the indexer's /btc-utxos includes
+  // token dust; UniSat's own list may not) and refuse to build otherwise.
+  const satsByKey = new Map((utxos || []).map((u) => [outpointKey(u), Number(u.sats)]));
+  const carriers = (tokenUtxos || []).map((u) => {
+    const own = Number(u.sats);
+    const sats = Number.isInteger(own) && own > 0 ? own : satsByKey.get(outpointKey(u));
+    if (!Number.isInteger(sats) || sats <= 0) {
+      throw new Error(
+        `token UTXO ${u.txid}:${u.vout} has no known BTC value — refresh UTXOs ` +
+        `(indexer /btc-utxos) before sending`,
+      );
+    }
+    return { txid: u.txid, vout: u.vout, sats };
+  });
   if (carriers.length === 0) {
     throw new Error(`no ${ticker} token UTXOs at ${address} to spend`);
   }
@@ -397,8 +439,7 @@ export function buildSendPsbt({
   const tapInternalKey = type === "tr" ? xOnlyFromCompressedHex(pubkeyHex) : null;
   const spendable = filterSpendable(feeUtxos, tokenOutpoints);
 
-  let satVb = Number(feeRateSatVb);
-  if (!Number.isFinite(satVb) || satVb <= 0) satVb = 1;
+  const satVb = checkedFeeRate(feeRateSatVb);
 
   const outputs = [
     { address: toAddress, value: DUST_SATS },                          // vout0 recipient
@@ -407,7 +448,7 @@ export function buildSendPsbt({
   const opReturnScript = makeOpReturnScript(payload);
   const fixedOutValue = outputs.reduce((s, o) => s + o.value, 0);
   const outputAddresses = outputs.map((o) => o.address).concat([address]);
-  const carrierValue = carriers.length * DUST_SATS;
+  const carrierValue = carriers.reduce((s, u) => s + u.sats, 0);
 
   let selected = [];
   let total = 0;

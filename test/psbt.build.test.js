@@ -141,7 +141,11 @@ assert.throws(
   const { ins, outs } = parse(r.psbtHex);
   assert.equal(outs.length, 4, "SEND: 4 outputs");
   assert.equal(hex.encode(ins[0].txid), T(3), "SEND: token carrier pinned as input 0");
-  assert.equal(ins[0].witnessUtxo.amount, 546n);
+  // The carrier is a 20_000-sat token-bearing UTXO (a prior SEND's residual
+  // change output, not dust). It MUST be spent at its real value: the
+  // segwit/taproot sighash commits to the input amount, so signing it as
+  // 546 would produce an invalid signature. Resolved from `utxos` by outpoint.
+  assert.equal(ins[0].witnessUtxo.amount, 20_000n, "SEND: carrier spent at its real on-chain value");
   assert.equal(addrOf(outs[0].script), p2wpkhAddr, "SEND: vout0 recipient");
   assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS);
   assert.equal(payloadToString(outs[2].script.slice(2)), "HASHMINT|SEND|HASH|100|0|3");
@@ -153,12 +157,29 @@ assert.throws(
 }
 
 // ---- SEND must refuse when change would be sub-dust ------------------------------------------
+// 2_500 funding + a 546-sat carrier covers the 1_092 fixed outputs + fee but
+// leaves change < 546 → the committed vout3 would be missing → refuse.
 assert.throws(
   () => buildSendPsbt({
     address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(5), vout: 0, sats: 2_500 }], tokenOutpoints: [],
-    tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "HASH", amount: 1, toAddress: p2wpkhAddr,
+    tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "HASH", amount: 1, toAddress: p2wpkhAddr,
   }),
   /change output required|insufficient funds/,
+);
+
+// ---- SEND must refuse a carrier whose on-chain value is unknown ----------------------------------
+assert.throws(
+  () => buildSendPsbt({
+    address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(4), vout: 2, sats: 90_000 }], tokenOutpoints: [],
+    tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "HASH", amount: 1, toAddress: p2wpkhAddr,
+  }),
+  /no known BTC value/,
+);
+
+// ---- fee-rate safety cap ------------------------------------------------------------------------
+assert.throws(
+  () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 5_000, ticker: "HASH" }),
+  /safety cap/,
 );
 
 // ---- extractRawTxHex on an (unsigned) PSBT must fail loudly, not silently ----------------------
