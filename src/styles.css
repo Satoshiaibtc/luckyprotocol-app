@@ -328,6 +328,13 @@ input {
     linear-gradient(var(--bezel), var(--bezel)) right bottom / 1px 10px no-repeat;
 }
 
+@media (max-width: 720px) {
+  .panel,
+  .card {
+    padding: 12px;
+  }
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -571,9 +578,9 @@ input[type="search"]::-webkit-search-decoration {
     padding: 6px var(--gutter);
   }
   .wordmark {
-    font-size: 13px;
-    letter-spacing: 0.1em;
-    gap: 8px;
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    gap: 7px;
     min-width: 0;
     flex: 1 1 auto;
     overflow: hidden;
@@ -581,26 +588,31 @@ input[type="search"]::-webkit-search-decoration {
   .topbar-right {
     flex: none;
     flex-wrap: nowrap;
-    gap: 8px;
+    gap: 6px;
   }
   .topbar-right .pill {
-    padding: 0 8px;
+    padding: 0 7px;
     height: 32px;
     gap: 6px;
   }
   .topbar-right .pill .num {
-    font-size: 12px;
+    font-size: 11.5px;
   }
   .topbar-right .btn-sm {
     height: 40px;
-    padding: 0 14px;
+    padding: 0 12px;
     font-size: 11.5px;
   }
   .topbar-right .wallet-addr {
     height: 40px;
-    padding: 0 10px;
-    gap: 7px;
-    font-size: 12px;
+    padding: 0 8px;
+    gap: 6px;
+    font-size: 11.5px;
+  }
+}
+@media (max-width: 380px) {
+  .wordmark .mark {
+    display: none;
   }
   .tip-chip {
     display: none;
@@ -969,19 +981,52 @@ input[type="search"]::-webkit-search-decoration {
     font-size: 28px;
   }
 }
-@media (max-width: 480px) {
+/* Phone hero: 23px title, 14px copy, and the three telemetry panels become one
+   row of bezel-less mini stats (label above number). */
+@media (max-width: 720px) {
+  .hero {
+    gap: 12px;
+    padding: 2px 0 0;
+  }
+  .hero h1 {
+    font-size: 23px;
+    line-height: 1.1;
+    margin-bottom: 6px;
+  }
+  .hero p {
+    font-size: 14px;
+  }
   .telemetry {
-    gap: 6px;
+    gap: 0;
+    border: 1px solid var(--border);
+    background: var(--surface);
   }
   .telemetry .panel {
-    padding: 10px 8px;
+    padding: 8px 10px;
+    border: 0;
+    background: transparent;
+  }
+  .telemetry .panel + .panel {
+    border-left: 1px solid var(--border);
+  }
+  .telemetry .panel::before,
+  .telemetry .panel::after {
+    display: none;
+  }
+  .telemetry .panel-head {
+    margin-bottom: 2px;
+    gap: 6px;
+    flex-wrap: nowrap;
   }
   .telemetry .panel-title {
     font-size: 9.5px;
     letter-spacing: 0.1em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .telemetry .hero-num {
-    font-size: 17px;
+    font-size: 19px;
   }
 }
 
@@ -1704,27 +1749,61 @@ input[type="search"]::-webkit-search-decoration {
 .tile-next .h-short {
   display: none;
 }
-@media (max-width: 720px) {
-  .tile,
-  .tile-next {
-    width: 44px;
-    height: 76px;
-  }
-  .tile .digit-bare {
-    font-size: 22px;
-  }
-  .tile .h,
-  .tile-next .h {
-    font-size: 9.5px;
-  }
-  .tile .h-full,
-  .tile-next .h-full {
-    display: none;
-  }
-  .tile .h-short,
-  .tile-next .h-short {
-    display: inline;
-  }
+/* Phone bead plate: 2 rows × 8 tiles filling the width; digit + yield only
+   (height and hash tail stay in the title / aria-label). */
+.tape-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 3px;
+  overflow: visible;
+  padding-bottom: 0;
+  scroll-snap-type: none;
+}
+.tape-grid > li {
+  min-width: 0;
+}
+.tape-grid .tile {
+  width: 100%;
+  height: 52px;
+}
+.tape-grid .tile .ch-in {
+  grid-template-rows: 1fr auto;
+  padding: 4px 2px 5px;
+  gap: 1px;
+}
+.tape-grid .tile .h,
+.tape-grid .tile .tail {
+  display: none;
+}
+.tape-grid .tile .digit-bare {
+  font-size: 22px;
+}
+.tape-grid .tile .y {
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+}
+.tape-grid .tile.tile-missing .q {
+  font-size: 22px;
+}
+.tape-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px 14px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.tape-next {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.tape-next .label {
+  font-size: 9.5px;
+}
+.tape-next .gauge .track {
+  stroke: var(--surface-3);
 }
 @keyframes slide-in {
   from {
@@ -2608,12 +2687,14 @@ input[type="search"]::-webkit-search-decoration {
 
 /* ---- narrow-screen fixes (verified at 375px) ------------------------------------------------ */
 
-@media (max-width: 480px) {
-  /* The tape tally overflowed the panel head (nowrap) — let it wrap and drop the model suffix. */
+@media (max-width: 720px) {
+  /* The tally sits under the bead plate as one wrapping line. */
   .tally {
     white-space: normal;
     line-height: 1.5;
   }
+}
+@media (max-width: 400px) {
   .tally .model {
     display: none;
   }

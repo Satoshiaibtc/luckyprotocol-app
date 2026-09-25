@@ -171,7 +171,7 @@ function WalletControl({ wallet, mock, mobile, onConnect, onDisconnect, onUseMoc
         return (
           <a className="wallet-addr" href="#/me" title={wallet.address} aria-label={`Wallet ${wallet.address} — open portfolio`}>
             <Led state="ok" />
-            <span>{shortAddr(wallet.address, 4, 4)}</span>
+            <span>{shortAddr(wallet.address, 4, 3)}</span>
           </a>
         );
       }
