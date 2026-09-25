@@ -132,14 +132,14 @@ All JSON. CORS open. Base: the operator's indexer origin.
 
 | Route | Returns |
 |---|---|
-| `GET /` | `{ network, indexed_height, tip_height, token_count, mine_count, last_progress_at, stalled, ... }` |
+| `GET /` (alias `GET /health`) | `{ network, indexed_height, tip_height, token_count, mine_count, last_progress_at, stalled, ... }` |
 | `GET /balances/:addr` | `{ address, balances: { TICKER: amount } }` |
 | `GET /utxos/:addr` | `{ address, utxos: [{ txid, vout, balances: {TICKER: amt} }] }` (token UTXOs only) |
 | `GET /btc-utxos/:addr` | `{ address, scanned_at_height, utxos: [{ txid, vout, sats, confirmed, block_height }] }` — first query 503 while seeding; includes pending mempool outputs with `confirmed:false` |
 | `GET /mines/:addr` | `{ address, mines: [MineView] }` (sender == addr, newest first) |
 | `GET /mines?limit&offset&ticker` | `{ total, offset, limit, items: [MineView] }` global feed |
 | `GET /mines/by-txid/:txid` | `MineView` or 404 |
-| `GET /tokens?limit&offset` | `{ total, offset, limit, items: [{ ticker, supply, minted, deployer, deploy_txid, deploy_block }] }` |
+| `GET /tokens?limit&offset` | `{ total, offset, limit, items: [{ ticker, supply, minted, deployer, deploy_txid, deploy_block, avatar_txid, avatar_content_type, … }] }` |
 | `GET /tokens/:ticker` | one registry entry (+ `holders` count) |
 | `GET /tokens/:ticker/holders?limit&offset` | `{ ticker, total, limit, offset, holders: [{ address, balance }] }` |
 | `GET /transfers/:addr` | `{ address, transfers: [TransferView] }` |
@@ -320,9 +320,104 @@ it on reorg):
 On `restore_from_snapshot` (reorg or restart) every non-open order whose
 outpoint is present again in `utxo_balances` reverts to `open`.
 
-### 7.6 What this is not
+### 7.6 What this is not (trading)
 
 There is no bonding curve, no pooled liquidity, no market maker and no
 custody. Prices are whatever sellers ask and buyers pay, settled by the
 Bitcoin network. The indexer can hide or lose orders (availability), but
 it cannot move anyone's funds (safety).
+
+## 8. Token avatars — `LUCKYPROTOCOL|AVATAR|<TICKER>` (on-chain image)
+
+A token's avatar is an **Ordinals-style inscription** carried by an AVATAR
+tx, so it lives on Bitcoin, is verifiable by any indexer, and shows up in
+the deployer's wallet like any other inscription. Nothing is uploaded to
+a server.
+
+### 8.1 Payload and layout
+
+Payload: `LUCKYPROTOCOL|AVATAR|<TICKER>` (exactly three fields; ticker
+grammar as §1).
+
+Reference layout (same shape as MINE):
+
+| vout | value | to | note |
+|---|---|---|---|
+| 0 | 546 | deployer | the inscribed sat lands here |
+| 1 | 546 | `PROJECT_FEE_ADDRESS` | consensus fee, exact amount |
+| 2 | 0 | OP_RETURN payload | |
+| 3+ | change | deployer | optional |
+
+Inputs: `input0` spends a **commit output** — a P2TR output whose script
+tree holds the inscription envelope (§8.2); it is spent via the script
+path, revealing the image in the witness. The reference client keys that
+leaf with a throw-away key generated in the browser, so any wallet can
+fund the commit with a plain payment and the app signs the reveal itself.
+**At least one other input must be a UTXO controlled by the token's
+`deployer` address** — that is the authorization: the wallet signs that
+input (key path) and pays the network fee from it.
+
+### 8.2 Envelope
+
+The reveal input's tapscript is the standard ord envelope:
+
+```
+OP_FALSE OP_IF
+  push "ord"
+  push 0x01  push <content-type>
+  push 0x00  push <body chunk> [push <body chunk> …]
+OP_ENDIF
+```
+
+preceded by `<leaf-key> OP_CHECKSIG` (any prefix before `OP_FALSE OP_IF`
+is ignored). Body chunks are concatenated. Only the FIRST envelope in
+the tx (lowest input index, first envelope in that input's script) is
+considered.
+
+Limits (consensus for this protocol, checked by every indexer):
+
+| Rule | Value |
+|---|---|
+| `content-type` | exactly one of `image/png`, `image/jpeg`, `image/webp`, `image/gif` |
+| body size | 1 ≤ bytes ≤ **16,384** |
+| reference client target | 256×256, WebP, ≤ 10,240 bytes (client-side compression) |
+
+### 8.3 Validity and effect
+
+An AVATAR tx is **applied** iff: the ticker is deployed; some input's
+prevout address equals `tokens[ticker].deployer`; the exact 546-sat
+protocol fee output is present; an envelope per §8.2 is found and within
+limits; `vout0` exists and is not an OP_RETURN. Otherwise it is recorded
+with `applied:false` and changes nothing (token inputs, if any, still
+route per §4 — but a builder must never spend token UTXOs in an AVATAR
+tx).
+
+Effect: `tokens[ticker].avatar = { content_type, bytes, txid, block_height }`.
+**Latest applied AVATAR wins** — the deployer may replace the image. The
+avatar is chain-derived state (snapshot; rolled back on reorg). Images are
+permanent on-chain; the UI must say so before inscribing.
+
+### 8.4 API
+
+| Route | Returns |
+|---|---|
+| `GET /tokens/:ticker/avatar` | the image bytes with its `Content-Type`, `ETag: "<txid>"`, `Cache-Control: public, max-age=300`; 404 when the token has no avatar |
+| `/tokens` items, `/tokens/:ticker` | gain `avatar_txid` (`string | null`) and `avatar_content_type` |
+| `GET /avatars/:addr` | `{ address, avatars: [AvatarView] }` — AVATAR txs sent by this address (audit) |
+
+`AvatarView`: `{ txid, block_height, block_hash, sender, ticker, applied, content_type, bytes_len }`.
+
+### 8.5 Reference client flow (web)
+
+1. Pick an image → canvas resize to 256×256 → encode WebP, lowering
+   quality until ≤ 10,240 bytes (reject if it cannot get under 16,384).
+2. Generate an ephemeral secp256k1 key in the browser; persist it in
+   localStorage until the reveal is confirmed (recovery on reload).
+3. Build the commit P2TR address (internal key = ephemeral key, leaf =
+   `<ephemeral-xonly> OP_CHECKSIG` + envelope). Ask the wallet to send
+   `546 + reveal_fee_share` sats to it (a plain payment).
+4. Build the reveal PSBT: `input0` = commit output (script path, signed
+   locally with the ephemeral key), `input1` = a deployer UTXO (fee +
+   authorization; filtered per §4), outputs per §8.1. Wallet signs
+   `input1` only (`toSignInputs: [{ index: 1, address }]`); the app
+   finalizes `input0`, extracts and broadcasts.
