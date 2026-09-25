@@ -63,6 +63,7 @@ import {
   validateTicker,
 } from "./payloads.js";
 import {
+  MAX_FEE_RATE_SAT_VB,
   NETWORK,
   VSIZE_TX_OVERHEAD,
   checkedFeeRate,
@@ -364,6 +365,18 @@ export function commitAmountFor({ leafScriptLen, feeRateSatVb }) {
   return DUST_SATS + Math.ceil(revealInput0Vsize(leafScriptLen) * rate);
 }
 
+/** Slack on top of the fee-cap bound below, so a record written at exactly the cap still parses. */
+export const COMMIT_AMOUNT_MARGIN_SATS = 1_000;
+
+/**
+ * Largest commitAmount a record may carry for a leaf of `leafScriptLen`
+ * bytes: what commitAmountFor yields at the MAX_FEE_RATE_SAT_VB safety cap,
+ * plus a small margin. Anything above it cannot have come from this app.
+ */
+export function maxCommitAmountFor(leafScriptLen) {
+  return DUST_SATS + Math.ceil(revealInput0Vsize(leafScriptLen) * MAX_FEE_RATE_SAT_VB) + COMMIT_AMOUNT_MARGIN_SATS;
+}
+
 // ---- reveal PSBT ----------------------------------------------------------------------------------
 
 /**
@@ -519,7 +532,24 @@ export const avatarRecordKey = (ticker) => `${AVATAR_RECORD_PREFIX}${String(tick
 
 const TXID_RE = /^[0-9a-f]{64}$/;
 
-/** Validate a stored record (JSON-parsed). Malformed → null. */
+/** Longest base64 text a ≤ 16,384-byte body can need (4 chars per 3 bytes, padded). */
+export const MAX_AVATAR_BASE64_LEN = Math.ceil(MAX_AVATAR_BYTES / 3) * 4;
+/** Ceiling for a stored commit output value (21 M BTC in sats) — any real UTXO is below it. */
+const MAX_COMMIT_SATS = 21_000_000 * 100_000_000;
+
+const posIntOrNull = (v, max) => (Number.isInteger(v) && v >= 0 && v <= max ? v : null);
+
+/**
+ * Validate a stored record (JSON-parsed). Malformed or out-of-bounds → null.
+ *
+ * Bounds (a record is only ever written by this app, so anything outside
+ * them is corruption or tampering, not a legitimate state):
+ *   * contentType   — the §8.2 allow-list
+ *   * bytesBase64   — decodes to 1 … 16,384 bytes (§8.2 body size)
+ *   * leafScriptHex — must equal the envelope rebuilt from key + image
+ *   * commitAmount  — 546 ≤ n ≤ maxCommitAmountFor(leaf) (fee-cap bound)
+ *   * commitSats    — 546 ≤ n ≤ 21 M BTC (the adopted output's real value)
+ */
 export function parseAvatarRecord(raw) {
   let r = raw;
   if (typeof raw === "string") {
@@ -539,11 +569,19 @@ export function parseAvatarRecord(raw) {
   if (!/^[0-9a-f]{64}$/.test(String(r.ephemeralPrivHex || ""))) return null;
   if (!/^[0-9a-f]+$/.test(String(r.leafScriptHex || "")) || String(r.leafScriptHex).length % 2 !== 0) return null;
   if (!isAvatarContentType(r.contentType)) return null;
-  if (typeof r.bytesBase64 !== "string" || !r.bytesBase64) return null;
+  if (typeof r.bytesBase64 !== "string" || !r.bytesBase64 || r.bytesBase64.length > MAX_AVATAR_BASE64_LEN) return null;
+  let bytes;
+  try {
+    bytes = base64.decode(r.bytesBase64);
+  } catch {
+    return null;
+  }
+  if (bytes.length < 1 || bytes.length > MAX_AVATAR_BYTES) return null;
   if (typeof r.commitAddress !== "string" || !r.commitAddress.startsWith("bc1p")) return null;
   const commitAmount = Number(r.commitAmount);
   if (!Number.isInteger(commitAmount) || commitAmount < DUST_SATS) return null;
   const txidOrNull = (v) => (TXID_RE.test(String(v || "").toLowerCase()) ? String(v).toLowerCase() : null);
+  const commitSats = Number.isInteger(r.commitSats) && r.commitSats >= DUST_SATS && r.commitSats <= MAX_COMMIT_SATS ? r.commitSats : null;
   const rec = {
     ticker,
     ephemeralPrivHex: String(r.ephemeralPrivHex).toLowerCase(),
@@ -554,19 +592,26 @@ export function parseAvatarRecord(raw) {
     commitAmount,
     commitTxid: txidOrNull(r.commitTxid),
     commitVout: Number.isInteger(r.commitVout) ? r.commitVout : null,
+    commitSats,
     commitChange: r.commitChange && Number.isInteger(r.commitChange.vout) && Number.isInteger(r.commitChange.sats) ? { vout: r.commitChange.vout, sats: r.commitChange.sats } : null,
     commitInputs: Array.isArray(r.commitInputs) ? r.commitInputs.filter((o) => o && TXID_RE.test(String(o.txid || "")) && Number.isInteger(o.vout)).map((o) => ({ txid: String(o.txid).toLowerCase(), vout: o.vout })) : [],
+    commitAttemptedAt: posIntOrNull(r.commitAttemptedAt, 1e13),
     revealTxid: txidOrNull(r.revealTxid),
+    revealBroadcastAt: posIntOrNull(r.revealBroadcastAt, 1e13),
     feeRateSatVb: Number.isInteger(r.feeRateSatVb) ? r.feeRateSatVb : null,
     createdAt: Number.isInteger(r.createdAt) ? r.createdAt : Date.now(),
   };
   // The stored leaf must be the envelope for the stored key + image.
+  let leafLen;
   try {
-    const rebuilt = buildEnvelopeScript(ephemeralXonly(hex.decode(rec.ephemeralPrivHex)), rec.contentType, base64.decode(rec.bytesBase64));
+    const rebuilt = buildEnvelopeScript(ephemeralXonly(hex.decode(rec.ephemeralPrivHex)), rec.contentType, bytes);
     if (hex.encode(rebuilt) !== rec.leafScriptHex) return null;
+    leafLen = rebuilt.length;
   } catch {
     return null;
   }
+  // Upper bound from the verified leaf: more than the fee cap could ever ask for is corrupt.
+  if (commitAmount > maxCommitAmountFor(leafLen)) return null;
   return rec;
 }
 
@@ -582,13 +627,31 @@ function storage() {
   }
 }
 export function readAvatarRecord(ticker) {
+  return loadAvatarRecord(ticker).record;
+}
+/**
+ * Like readAvatarRecord but tells "nothing stored" apart from "stored but
+ * unusable": → `{ status: 'absent' | 'ok' | 'corrupt', record }`. A corrupt
+ * record must be surfaced (it may still be the only copy of a funded key's
+ * bytes — the user decides to discard it), never silently ignored.
+ */
+export function loadAvatarRecord(ticker) {
   const s = storage();
-  if (!s) return null;
+  if (!s) return { status: "absent", record: null };
+  let raw = null;
   try {
-    return parseAvatarRecord(s.getItem(avatarRecordKey(ticker)));
+    raw = s.getItem(avatarRecordKey(ticker));
   } catch {
-    return null;
+    return { status: "absent", record: null };
   }
+  if (raw === null || raw === undefined) return { status: "absent", record: null };
+  let record = null;
+  try {
+    record = parseAvatarRecord(raw);
+  } catch {
+    record = null;
+  }
+  return record ? { status: "ok", record } : { status: "corrupt", record: null };
 }
 export function writeAvatarRecord(rec) {
   const s = storage();
@@ -613,6 +676,95 @@ export function clearAvatarRecord(ticker) {
 /** `data:<ct>;base64,…` for a preview or the mock's avatar URL. */
 export function bytesToDataUrl(bytes, contentType) {
   return `data:${contentType};base64,${base64.encode(bytes)}`;
+}
+
+// ---- recovery decisions (pure; used by useAvatar, tested in test/inscribe.test.js) -----------------
+
+/**
+ * Duplicate-commit guard: given `/btc-utxos/:commitAddress` rows, pick an
+ * output that can serve as the commit — `sats ≥ commitAmount`, confirmed or
+ * not. Preference: confirmed first, then the least over-funded, then
+ * txid:vout for determinism. `excludeKeys` drops outpoints already known to
+ * be spent. → `{ txid, vout, sats, confirmed }` | null.
+ */
+export function adoptExistingCommit(rows, commitAmount, { excludeKeys = [] } = {}) {
+  const amount = Number(commitAmount);
+  if (!Number.isInteger(amount) || amount < DUST_SATS) return null;
+  const exclude = new Set(excludeKeys);
+  const ok = (rows || []).filter((u) => u && TXID_RE.test(String(u.txid || "")) && Number.isInteger(u.vout) && Number.isInteger(u.sats) && u.sats >= amount && !exclude.has(`${u.txid}:${u.vout}`));
+  if (ok.length === 0) return null;
+  ok.sort((a, b) => {
+    const ca = a.confirmed !== false ? 0 : 1;
+    const cb = b.confirmed !== false ? 0 : 1;
+    if (ca !== cb) return ca - cb;
+    if (a.sats !== b.sats) return a.sats - b.sats;
+    if (a.txid !== b.txid) return a.txid < b.txid ? -1 : 1;
+    return a.vout - b.vout;
+  });
+  const u = ok[0];
+  return { txid: String(u.txid).toLowerCase(), vout: u.vout, sats: u.sats, confirmed: u.confirmed !== false };
+}
+
+/**
+ * What a node's rejection of a broadcast means for the reveal:
+ *   'already-known'    — this exact tx is already in the mempool / a block: success, same txid
+ *   'mempool-conflict' — another unconfirmed tx spends one of our inputs (an earlier reveal, or a
+ *                        stale wallet input)
+ *   'missing-or-spent' — an input is not in the UTXO set: the commit was spent (or never landed),
+ *                        or a wallet input is stale
+ *   'other'            — fee / policy / transport problem; retryable as-is
+ * Reads the message only, so it works for the wallet's "pushTx · indexer relay" combined errors.
+ */
+export function classifyNodeRejection(e) {
+  const m = String(e?.message || e || "");
+  if (/txn-already-in-mempool|txn-already-known|already in block chain|already.?in.?(the )?mempool|already known|transaction already exists/i.test(m)) return "already-known";
+  if (/txn-mempool-conflict|mempool-conflict|insufficient fee, rejecting replacement|replacement|\bconflict/i.test(m)) return "mempool-conflict";
+  if (/missingorspent|bad-txns-inputs|missing.?inputs|already.?spent|double.?spend|input.{0,20}\bspent|\bspent.{0,20}input/i.test(m)) return "missing-or-spent";
+  return "other";
+}
+
+export const REVEAL_REBUILD_AFTER_MS = 30 * 60_000;
+export const REVEAL_UNSEEN_GRACE_MS = 2 * 60_000;
+
+/**
+ * When the "Rebuild reveal" action is offered for a pending reveal:
+ *   'stale'  — broadcast (or last rebuild attempt) more than 30 minutes ago, whatever tx-status says
+ *   'unseen' — tx-status has never seen the txid AND the commit output is still listed unspent,
+ *              once a short grace period (indexer lag right after broadcast) has passed
+ *   null     — keep waiting
+ * `broadcastAt` null/unknown (a record from before this field existed) counts as stale.
+ */
+export function revealRebuildReason({ now = Date.now(), broadcastAt, seen, commitUnspent }) {
+  const age = Number.isInteger(broadcastAt) ? now - broadcastAt : Infinity;
+  if (age > REVEAL_REBUILD_AFTER_MS) return "stale";
+  if (seen === false && commitUnspent === true && age > REVEAL_UNSEEN_GRACE_MS) return "unseen";
+  return null;
+}
+
+/** True for the indexer's 503 "scan seeding" answer on the first query of an address. */
+export function isSeedingError(e) {
+  return !!e && (e.status === 503 || /HTTP 503/.test(String(e.message || "")));
+}
+
+/**
+ * Run `fn` and retry it (up to `attempts` calls in total, `delayMs` apart)
+ * while it fails with a seeding 503; any other error is thrown at once.
+ * `onRetry(attemptNumber)` fires before each wait.
+ */
+export async function retryOn503(fn, { attempts = 3, delayMs = 2_000, onRetry, sleep } = {}) {
+  const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  let last;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn(i);
+    } catch (e) {
+      if (!isSeedingError(e) || i === attempts) throw e;
+      last = e;
+      if (onRetry) onRetry(i);
+      await wait(delayMs);
+    }
+  }
+  throw last;
 }
 
 // ---- browser-only: image compression (§8.5 step 1) --------------------------------------------------

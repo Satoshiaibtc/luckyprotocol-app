@@ -7,7 +7,12 @@
 //     (mock provider, really signs) → ephemeral script-path signature →
 //     finalize → extract; §8.1 output layout; OP_RETURN text; fee == in − out
 //   * the same reveal with a P2WPKH deployer signed directly with btc-signer
-//   * the recovery record's parse / serialize round-trip
+//   * the recovery record's parse / serialize round-trip and its bounds
+//     (commitAmount fee-cap ceiling, body ≤ 16,384 bytes, content-type allow-list)
+//   * the pure recovery decisions useAvatar relies on: adoptExistingCommit
+//     (duplicate-commit guard), classifyNodeRejection (node error →
+//     commit-spent / mempool-conflict / already-known), revealRebuildReason
+//     (when "Rebuild reveal" is offered), retryOn503, loadAvatarRecord
 import assert from "node:assert/strict";
 import { sha256 } from "@noble/hashes/sha2.js";
 import * as btc from "@scure/btc-signer";
@@ -38,8 +43,19 @@ import {
   serializeAvatarRecord,
   avatarRecordKey,
   bytesToDataUrl,
+  maxCommitAmountFor,
+  COMMIT_AMOUNT_MARGIN_SATS,
+  MAX_AVATAR_BASE64_LEN,
+  loadAvatarRecord,
+  adoptExistingCommit,
+  classifyNodeRejection,
+  revealRebuildReason,
+  REVEAL_REBUILD_AFTER_MS,
+  REVEAL_UNSEEN_GRACE_MS,
+  isSeedingError,
+  retryOn503,
 } from "../src/lib/inscribe.js";
-import { buildPayPsbt, estimatePayFeeSats, extractRawTxHex } from "../src/lib/psbt.js";
+import { buildPayPsbt, estimatePayFeeSats, extractRawTxHex, MAX_FEE_RATE_SAT_VB } from "../src/lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, buildAvatarPayload, parsePayload, payloadToString } from "../src/lib/payloads.js";
 import { MOCK_WALLET, mockSignPsbt } from "../src/lib/mock.js";
 import { decodeRawTx } from "../src/lib/swap.js";
@@ -302,32 +318,194 @@ let commitTx;
 }
 
 // ---- recovery record --------------------------------------------------------------------------------------
+const rec = {
+  ticker: "LUCKY",
+  ephemeralPrivHex: hex.encode(PRIV),
+  leafScriptHex: hex.encode(leaf),
+  contentType: "image/webp",
+  bytesBase64: base64.encode(BODY),
+  commitAddress: commitAddr,
+  commitAmount,
+  commitTxid: null,
+  commitVout: null,
+  commitSats: null,
+  commitChange: null,
+  commitInputs: [],
+  commitAttemptedAt: null,
+  revealTxid: null,
+  revealBroadcastAt: null,
+  feeRateSatVb: 8,
+  createdAt: 1_700_000_000_000,
+};
 {
   assert.equal(avatarRecordKey("lucky"), "lp.avatar.LUCKY");
-  const rec = {
-    ticker: "LUCKY",
-    ephemeralPrivHex: hex.encode(PRIV),
-    leafScriptHex: hex.encode(leaf),
-    contentType: "image/webp",
-    bytesBase64: base64.encode(BODY),
-    commitAddress: commitAddr,
-    commitAmount,
-    commitTxid: null,
-    commitVout: null,
-    commitChange: null,
-    commitInputs: [],
-    revealTxid: null,
-    feeRateSatVb: 8,
-    createdAt: 1_700_000_000_000,
-  };
   assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(rec)), rec, "round-trip");
-  const withCommit = { ...rec, commitTxid: commitTx.txid, commitVout: 0, commitChange: { vout: 1, sats: 1234 }, commitInputs: [{ txid: T(2), vout: 1 }] };
-  assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(withCommit)), withCommit);
+  const withCommit = { ...rec, commitTxid: commitTx.txid, commitVout: 0, commitSats: commitAmount, commitChange: { vout: 1, sats: 1234 }, commitInputs: [{ txid: T(2), vout: 1 }], commitAttemptedAt: 1_700_000_001_000, revealTxid: T(5), revealBroadcastAt: 1_700_000_002_000 };
+  assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(withCommit)), withCommit, "round-trip with commit + reveal + timestamps");
   assert.equal(parseAvatarRecord("not json"), null);
   assert.equal(parseAvatarRecord({ ...rec, leafScriptHex: hex.encode(buildEnvelopeScript(XONLY, "image/png", BODY)) }), null, "leaf must match key + image + content type");
   assert.equal(parseAvatarRecord({ ...rec, ephemeralPrivHex: "00".repeat(32) }), null);
   assert.equal(parseAvatarRecord({ ...rec, commitTxid: "nope" }).commitTxid, null, "bad txid → null, record kept");
   assert.equal(bytesToDataUrl(new Uint8Array([1, 2, 3]), "image/png"), "data:image/png;base64,AQID");
+
+  // A record predating the new fields (no commitSats / commitAttemptedAt / revealBroadcastAt) still parses.
+  const legacy = { ...rec };
+  delete legacy.commitSats;
+  delete legacy.commitAttemptedAt;
+  delete legacy.revealBroadcastAt;
+  assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(legacy)), rec, "legacy record → new fields null");
+  // Timestamps / sats that are not plausible integers are dropped, not fatal.
+  const odd = parseAvatarRecord({ ...rec, commitAttemptedAt: "soon", revealBroadcastAt: -5, commitSats: 100 });
+  assert.deepEqual([odd.commitAttemptedAt, odd.revealBroadcastAt, odd.commitSats], [null, null, null], "implausible timestamps / sub-dust commitSats → null");
 }
 
-console.log("inscribe: envelope, commit/reveal build + sign (wallet-first), fee split, record ok");
+// ---- record bounds: commitAmount ceiling, body size, content-type allow-list ------------------------------------
+{
+  // test: record bounds — commitAmount upper bound from the stored leaf at the fee cap
+  const ceiling = maxCommitAmountFor(leaf.length);
+  assert.equal(ceiling, 546 + Math.ceil(revealInput0Vsize(leaf.length) * MAX_FEE_RATE_SAT_VB) + COMMIT_AMOUNT_MARGIN_SATS, "ceiling = 546 + input0 at the 1000 sat/vB cap + margin");
+  assert.equal(commitAmountFor({ leafScriptLen: leaf.length, feeRateSatVb: MAX_FEE_RATE_SAT_VB }) <= ceiling, true, "a commit written at the cap itself is within bounds");
+  assert.ok(parseAvatarRecord({ ...rec, commitAmount: ceiling }), "commitAmount == ceiling parses");
+  assert.equal(parseAvatarRecord({ ...rec, commitAmount: ceiling + 1 }), null, "commitAmount above the ceiling → corrupt");
+  assert.equal(parseAvatarRecord({ ...rec, commitAmount: 545 }), null, "commitAmount below dust → corrupt");
+  assert.equal(parseAvatarRecord({ ...rec, commitAmount: 1e12 }), null, "absurd commitAmount → corrupt");
+  assert.equal(parseAvatarRecord({ ...rec, commitAmount: 1000.5 }), null, "commitAmount must be an integer");
+  // The bound scales with the leaf: a bigger image allows a bigger commit.
+  assert.ok(maxCommitAmountFor(envelopeScriptLen("image/webp", MAX_AVATAR_BYTES)) > ceiling);
+
+  // test: record bounds — bytesBase64 decoded length ≤ 16,384 (and ≥ 1), with a pre-decode text-length cap
+  assert.equal(MAX_AVATAR_BASE64_LEN, Math.ceil(MAX_AVATAR_BYTES / 3) * 4);
+  const big = new Uint8Array(MAX_AVATAR_BYTES + 1).fill(7);
+  assert.equal(parseAvatarRecord({ ...rec, bytesBase64: base64.encode(big) }), null, "16,385-byte body → corrupt");
+  assert.equal(parseAvatarRecord({ ...rec, bytesBase64: "A".repeat(MAX_AVATAR_BASE64_LEN + 4) }), null, "over-long base64 text → corrupt before decoding");
+  assert.equal(parseAvatarRecord({ ...rec, bytesBase64: "" }), null, "empty body → corrupt");
+  assert.equal(parseAvatarRecord({ ...rec, bytesBase64: "not*base64!" }), null, "undecodable base64 → corrupt");
+  assert.equal(parseAvatarRecord({ ...rec, bytesBase64: 42 }), null, "non-string body → corrupt");
+  {
+    // A body of exactly 16,384 bytes is fine when key + leaf agree with it.
+    const maxBody = new Uint8Array(MAX_AVATAR_BYTES).fill(1);
+    const maxLeaf = buildEnvelopeScript(XONLY, "image/png", maxBody);
+    const maxRec = { ...rec, contentType: "image/png", bytesBase64: base64.encode(maxBody), leafScriptHex: hex.encode(maxLeaf), commitAddress: commitAddress(PRIV, maxLeaf), commitAmount: commitAmountFor({ leafScriptLen: maxLeaf.length, feeRateSatVb: 8 }) };
+    assert.ok(parseAvatarRecord(maxRec), "16,384-byte body parses");
+  }
+
+  // test: record bounds — contentType must be one of the §8.2 allow-list on parse
+  for (const bad of ["image/bmp", "image/svg+xml", "text/html", "", null, "IMAGE/WEBP; charset=x"]) {
+    assert.equal(parseAvatarRecord({ ...rec, contentType: bad }), null, `contentType ${JSON.stringify(bad)} → corrupt`);
+  }
+  assert.equal(parseAvatarRecord({ ...rec, contentType: "IMAGE/WEBP" }).contentType, "image/webp", "case-insensitive allow-list");
+
+  // test: loadAvatarRecord — absent / ok / corrupt from (a fake) localStorage
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  try {
+    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "absent", record: null });
+    store.set(avatarRecordKey("LUCKY"), serializeAvatarRecord(rec));
+    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "ok", record: rec });
+    store.set(avatarRecordKey("LUCKY"), serializeAvatarRecord({ ...rec, commitAmount: ceiling + 1 }));
+    assert.deepEqual(loadAvatarRecord("LUCKY"), { status: "corrupt", record: null }, "out-of-bounds record is reported as corrupt, not as absent");
+    store.set(avatarRecordKey("LUCKY"), "{garbage");
+    assert.equal(loadAvatarRecord("LUCKY").status, "corrupt");
+  } finally {
+    delete globalThis.localStorage;
+  }
+}
+
+// ---- duplicate-commit guard: adoptExistingCommit ---------------------------------------------------------
+{
+  // test: adoptExistingCommit — nothing at the address → null (only then may "Pay commit again" be offered)
+  assert.equal(adoptExistingCommit([], commitAmount), null);
+  assert.equal(adoptExistingCommit(null, commitAmount), null);
+  // test: adoptExistingCommit — an unconfirmed output ≥ commitAmount is adopted (never paid twice)
+  assert.deepEqual(adoptExistingCommit([{ txid: T(11), vout: 0, sats: commitAmount, confirmed: false, block_height: 0 }], commitAmount), { txid: T(11), vout: 0, sats: commitAmount, confirmed: false });
+  // test: adoptExistingCommit — an output below commitAmount is not a commit
+  assert.equal(adoptExistingCommit([{ txid: T(11), vout: 0, sats: commitAmount - 1, confirmed: true }], commitAmount), null);
+  // test: adoptExistingCommit — confirmed first, then the least over-funded, then txid:vout
+  const rows = [
+    { txid: T(13), vout: 1, sats: commitAmount + 500, confirmed: false },
+    { txid: T(12), vout: 0, sats: commitAmount + 900, confirmed: true },
+    { txid: T(14), vout: 0, sats: commitAmount + 1, confirmed: true },
+    { txid: T(14), vout: 2, sats: commitAmount + 1, confirmed: true },
+  ];
+  assert.deepEqual(adoptExistingCommit(rows, commitAmount), { txid: T(14), vout: 0, sats: commitAmount + 1, confirmed: true });
+  assert.deepEqual(adoptExistingCommit(rows.slice(0, 2), commitAmount), { txid: T(12), vout: 0, sats: commitAmount + 900, confirmed: true }, "confirmed beats a less over-funded unconfirmed one");
+  // test: adoptExistingCommit — excludeKeys skips an outpoint already known to be spent
+  assert.deepEqual(adoptExistingCommit(rows, commitAmount, { excludeKeys: [`${T(14)}:0`, `${T(14)}:2`, `${T(12)}:0`] }), { txid: T(13), vout: 1, sats: commitAmount + 500, confirmed: false });
+  // test: adoptExistingCommit — malformed rows / amounts are ignored
+  assert.equal(adoptExistingCommit([{ txid: "zz", vout: 0, sats: 1e6 }, { txid: T(11), vout: "0", sats: 1e6 }, null], commitAmount), null);
+  assert.equal(adoptExistingCommit(rows, 100), null, "sub-dust commitAmount is not a valid target");
+}
+
+// ---- node rejection classifier -----------------------------------------------------------------------------
+{
+  // test: classifyNodeRejection — the mock's / bitcoind's missing-or-spent input rejections ⇒ commit spent
+  assert.equal(classifyNodeRejection(new Error("broadcast HTTP 400: bad-txns-inputs-missingorspent (an input was already spent by another transaction)")), "missing-or-spent");
+  assert.equal(classifyNodeRejection(new Error("UniSat pushTx failed · indexer relay: /broadcast HTTP 400: bad-txns-inputs-missingorspent")), "missing-or-spent", "wallet + relay combined message");
+  assert.equal(classifyNodeRejection("Missing inputs"), "missing-or-spent");
+  assert.equal(classifyNodeRejection(new Error("input already spent")), "missing-or-spent");
+  assert.equal(classifyNodeRejection(new Error("unspent input required")), "other", "'unspent' is not 'spent'");
+  // test: classifyNodeRejection — an unconfirmed spender of the same input (the earlier reveal, or a stale wallet input)
+  assert.equal(classifyNodeRejection(new Error("txn-mempool-conflict")), "mempool-conflict");
+  assert.equal(classifyNodeRejection(new Error("insufficient fee, rejecting replacement abc; new feerate 0.00001 BTC/kvB <= old feerate")), "mempool-conflict");
+  // test: classifyNodeRejection — the very same tx is already known: success, txid unchanged
+  assert.equal(classifyNodeRejection(new Error("txn-already-in-mempool")), "already-known");
+  assert.equal(classifyNodeRejection(new Error("Transaction already in block chain")), "already-known");
+  assert.equal(classifyNodeRejection(new Error("txn-already-known")), "already-known");
+  // test: classifyNodeRejection — fee / policy / transport problems are retryable as-is
+  assert.equal(classifyNodeRejection(new Error("min relay fee not met, 100 < 110")), "other");
+  assert.equal(classifyNodeRejection(new Error("Indexer unreachable: http://127.0.0.1:8765/broadcast")), "other");
+  assert.equal(classifyNodeRejection(new Error("mempool min fee not met")), "other");
+  assert.equal(classifyNodeRejection(null), "other");
+}
+
+// ---- rebuild-reveal eligibility ---------------------------------------------------------------------------
+{
+  const now = 1_800_000_000_000;
+  // test: revealRebuildReason — freshly broadcast, seen by the indexer → keep waiting
+  assert.equal(revealRebuildReason({ now, broadcastAt: now - 60_000, seen: true, commitUnspent: null }), null);
+  // test: revealRebuildReason — pending > 30 minutes → 'stale', whatever tx-status says
+  assert.equal(revealRebuildReason({ now, broadcastAt: now - REVEAL_REBUILD_AFTER_MS - 1, seen: true, commitUnspent: null }), "stale");
+  assert.equal(revealRebuildReason({ now, broadcastAt: now - REVEAL_REBUILD_AFTER_MS, seen: true, commitUnspent: null }), null, "exactly 30 minutes is not yet stale");
+  // test: revealRebuildReason — never seen AND commit still unspent → 'unseen' once the grace period has passed
+  assert.equal(revealRebuildReason({ now, broadcastAt: now - REVEAL_UNSEEN_GRACE_MS - 1, seen: false, commitUnspent: true }), "unseen");
+  assert.equal(revealRebuildReason({ now, broadcastAt: now - 10_000, seen: false, commitUnspent: true }), null, "indexer lag right after broadcast is not a reason");
+  // test: revealRebuildReason — never seen but the commit is spent (or unknown) → keep waiting for the token row
+  assert.equal(revealRebuildReason({ now, broadcastAt: now - REVEAL_UNSEEN_GRACE_MS - 1, seen: false, commitUnspent: false }), null);
+  assert.equal(revealRebuildReason({ now, broadcastAt: now - REVEAL_UNSEEN_GRACE_MS - 1, seen: false, commitUnspent: null }), null);
+  // test: revealRebuildReason — no broadcast timestamp (a record from before the field existed) counts as stale
+  assert.equal(revealRebuildReason({ now, broadcastAt: null, seen: true, commitUnspent: null }), "stale");
+}
+
+// ---- 503-while-seeding retry ------------------------------------------------------------------------------
+{
+  const seeding = () => Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 503: seeding"), { status: 503 });
+  assert.equal(isSeedingError(seeding()), true);
+  assert.equal(isSeedingError(new Error("Indexer /x -> HTTP 503")), true, "status-less 503 message");
+  assert.equal(isSeedingError(new Error("HTTP 500")), false);
+  const noSleep = async () => {};
+  // test: retryOn503 — two seeding answers then rows: rows returned, onRetry fired twice
+  {
+    let calls = 0;
+    const retries = [];
+    const out = await retryOn503(async () => (++calls < 3 ? (() => { throw seeding(); })() : ["row"]), { attempts: 3, sleep: noSleep, onRetry: (n) => retries.push(n) });
+    assert.deepEqual([out, calls, retries], [["row"], 3, [1, 2]]);
+  }
+  // test: retryOn503 — still seeding after the last attempt → the 503 is thrown
+  {
+    let calls = 0;
+    await assert.rejects(retryOn503(async () => { calls += 1; throw seeding(); }, { attempts: 3, sleep: noSleep }), /HTTP 503/);
+    assert.equal(calls, 3);
+  }
+  // test: retryOn503 — any other error is thrown at once, no retry
+  {
+    let calls = 0;
+    await assert.rejects(retryOn503(async () => { calls += 1; throw new Error("Indexer unreachable"); }, { attempts: 3, sleep: noSleep }), /unreachable/);
+    assert.equal(calls, 1);
+  }
+}
+
+console.log("inscribe: envelope, commit/reveal build + sign (wallet-first), fee split, record + bounds, recovery decisions ok");

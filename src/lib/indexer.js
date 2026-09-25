@@ -413,14 +413,17 @@ function _sanitizeHolderRow(h) {
   return { address, balance };
 }
 
-function _sanitizeTxStatus(txid, s) {
+// `seen:false` only for a 404 (the indexer has never met the txid); an
+// unconfirmed-but-known tx answers 200 with confirmed:false and seen:true.
+function _sanitizeTxStatus(txid, s, seen = true) {
   if (!s || typeof s !== "object") {
-    return { txid, confirmed: false, block_height: null, block_hash: null, block_time: null };
+    return { txid, confirmed: false, seen, block_height: null, block_hash: null, block_time: null };
   }
   const confirmed = s.confirmed === true;
   return {
     txid,
     confirmed,
+    seen,
     block_height: confirmed ? _safeInt(s.block_height, 1e9) : null,
     block_hash: confirmed ? _safeHash(s.block_hash) : null,
     block_time: confirmed ? _safeInt(s.block_time, 1e12) : null,
@@ -577,15 +580,15 @@ export async function transfers(address, signal) {
 }
 
 /**
- * GET /tx-status/:txid → `{ txid, confirmed, block_height, block_hash, block_time }`.
- * A 404 means "not yet seen" and is returned as `confirmed:false`.
+ * GET /tx-status/:txid → `{ txid, confirmed, seen, block_height, block_hash, block_time }`.
+ * A 404 means "never seen" and is returned as `confirmed:false, seen:false`.
  */
 export async function txStatus(txid, signal) {
   try {
     const s = await _httpGet(`/tx-status/${encodeURIComponent(txid)}`, signal);
-    return _sanitizeTxStatus(txid, s);
+    return _sanitizeTxStatus(txid, s, true);
   } catch (e) {
-    if (_is404(e)) return _sanitizeTxStatus(txid, null);
+    if (_is404(e)) return _sanitizeTxStatus(txid, null, false);
     throw e;
   }
 }
