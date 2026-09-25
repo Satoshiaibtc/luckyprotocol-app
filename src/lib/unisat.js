@@ -1,4 +1,4 @@
-// UniSat wallet adapter (PROTOCOL-v3-HASHMINT.md §6).
+// UniSat wallet adapter (PROTOCOL-v3.md §6).
 //
 // The app holds no keys. Everything key-related is delegated to the
 // `window.unisat` provider injected by the UniSat browser extension:
@@ -64,7 +64,7 @@ export function hasProvider() {
 function makeMockProvider() {
   const listeners = new Map();
   return {
-    __hashmintMock: true,
+    __luckyprotocolMock: true,
     async requestAccounts() {
       await sleep(300);
       return [MOCK_WALLET.address];
@@ -140,7 +140,7 @@ export async function connect() {
       await p.switchNetwork("livenet");
       network = "livenet";
     } else {
-      throw new Error(`UniSat is on "${network}" — HashMint is mainnet only; switch to livenet`);
+      throw new Error(`UniSat is on "${network}" — LuckyProtocol is mainnet only; switch to livenet`);
     }
   }
   const pubkeyHex = String(await p.getPublicKey() || "").toLowerCase();

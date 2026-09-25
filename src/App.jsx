@@ -13,7 +13,7 @@ import BalanceCard from "./components/BalanceCard.jsx";
 import Footer from "./components/Footer.jsx";
 
 const MOCK = indexer.isMock();
-const DEFAULT_TICKER = "HASH";
+const DEFAULT_TICKER = "LUCKY";
 const STATUS_POLL_MS = 15_000;
 const RECONCILE_MAX_ATTEMPTS = 8;
 
@@ -84,7 +84,7 @@ export default function App() {
     });
     const offNet = unisat.on("networkChanged", (net) => {
       if (net && net !== "livenet") {
-        setWallet((w) => ({ ...w, status: "disconnected", address: null, pubkeyHex: null, balance: null, error: `UniSat switched to "${net}" — HashMint is mainnet only.` }));
+        setWallet((w) => ({ ...w, status: "disconnected", address: null, pubkeyHex: null, balance: null, error: `UniSat switched to "${net}" — LuckyProtocol is mainnet only.` }));
         setMine(IDLE_MINE);
       }
     });

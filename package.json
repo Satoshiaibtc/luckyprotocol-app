@@ -1,9 +1,9 @@
 {
-  "name": "hashmint-web",
+  "name": "luckyprotocol-app",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "HashMint v3 mining console — Bitcoin OP_RETURN token protocol, UniSat wallet, yield decided by the confirming block hash.",
+  "description": "LuckyProtocol v3 mining console — Bitcoin OP_RETURN token protocol, UniSat wallet, yield decided by the confirming block hash.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

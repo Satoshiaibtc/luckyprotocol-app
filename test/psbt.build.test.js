@@ -87,15 +87,15 @@ assert.throws(() => decodeAddress("1BoatSLRHtKNngkdXEeobR76b53LETtpyT"), /unsupp
 assert.throws(() => decodeAddress("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), /invalid mainnet address/);
 
 // ---- fee preview ------------------------------------------------------------------------
-const prev = estimateMineFeeSats({ address: p2trAddr, ticker: "HASH", feeRateSatVb: 8 });
+const prev = estimateMineFeeSats({ address: p2trAddr, ticker: "LUCKY", feeRateSatVb: 8 });
 assert.ok(prev.vsize > 150 && prev.vsize < 250, `preview vsize plausible: ${prev.vsize}`);
 assert.equal(prev.feeSats, Math.ceil(prev.vsize * 8));
 
 // ---- MINE p2tr ---------------------------------------------------------------------------
 {
-  const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "HASH" });
+  const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
   const { outs } = checkCommon("MINE p2tr", r, { expectOutputs: 4, expectTap: true, self: p2trAddr, vout0: p2trAddr });
-  assert.equal(payloadToString(outs[2].script.slice(2)), "HASHMINT|MINE|HASH");
+  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|MINE|LUCKY");
   assert.equal(r.changeOmitted, false);
   // Smallest-first: 3_000 alone cannot cover 1_092 + fee (~1.8k) + dust headroom,
   // so the selector takes T(2) first and then T(4); T(1) (dust) and T(3) (token) never.
@@ -107,7 +107,7 @@ assert.equal(prev.feeSats, Math.ceil(prev.vsize * 8));
 
 // ---- MINE p2wpkh --------------------------------------------------------------------------
 {
-  const r = buildMinePsbt({ address: p2wpkhAddr, pubkeyHex: P2WPKH_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "HASH" });
+  const r = buildMinePsbt({ address: p2wpkhAddr, pubkeyHex: P2WPKH_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
   checkCommon("MINE p2wpkh", r, { expectOutputs: 4, expectTap: false, self: p2wpkhAddr, vout0: p2wpkhAddr });
 }
 
@@ -116,7 +116,7 @@ assert.equal(prev.feeSats, Math.ceil(prev.vsize * 8));
 // headroom for a change output → MINE falls back to folding the remainder.
 {
   const tight = [{ txid: T(5), vout: 0, sats: 2_800 }];
-  const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: tight, tokenOutpoints: [], feeRateSatVb: 8, ticker: "HASH" });
+  const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: tight, tokenOutpoints: [], feeRateSatVb: 8, ticker: "LUCKY" });
   checkCommon("MINE tight", r, { expectOutputs: 3, expectTap: true, self: p2trAddr, vout0: p2trAddr });
   assert.equal(r.changeOmitted, true);
   assert.equal(r.changeSats, 0);
@@ -124,11 +124,11 @@ assert.equal(prev.feeSats, Math.ceil(prev.vsize * 8));
 
 // ---- MINE insufficient -----------------------------------------------------------------------
 assert.throws(
-  () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(6), vout: 0, sats: 1_200 }], tokenOutpoints: [], feeRateSatVb: 8, ticker: "HASH" }),
+  () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(6), vout: 0, sats: 1_200 }], tokenOutpoints: [], feeRateSatVb: 8, ticker: "LUCKY" }),
   /insufficient funds/,
 );
 assert.throws(
-  () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(1), vout: 0, sats: 546 }], tokenOutpoints: [], feeRateSatVb: 8, ticker: "HASH" }),
+  () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(1), vout: 0, sats: 546 }], tokenOutpoints: [], feeRateSatVb: 8, ticker: "LUCKY" }),
   /no spendable BTC/,
 );
 
@@ -136,7 +136,7 @@ assert.throws(
 {
   const r = buildSendPsbt({
     address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints,
-    tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "HASH", amount: 100, toAddress: p2wpkhAddr,
+    tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 100, toAddress: p2wpkhAddr,
   });
   const { ins, outs } = parse(r.psbtHex);
   assert.equal(outs.length, 4, "SEND: 4 outputs");
@@ -148,7 +148,7 @@ assert.throws(
   assert.equal(ins[0].witnessUtxo.amount, 20_000n, "SEND: carrier spent at its real on-chain value");
   assert.equal(addrOf(outs[0].script), p2wpkhAddr, "SEND: vout0 recipient");
   assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS);
-  assert.equal(payloadToString(outs[2].script.slice(2)), "HASHMINT|SEND|HASH|100|0|3");
+  assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|SEND|LUCKY|100|0|3");
   assert.equal(addrOf(outs[3].script), p2trAddr, "SEND: vout3 change → self");
   assert.ok(outs[3].amount >= 546n, "SEND: change ≥ dust");
   const inSum = ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n);
@@ -162,7 +162,7 @@ assert.throws(
 assert.throws(
   () => buildSendPsbt({
     address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(5), vout: 0, sats: 2_500 }], tokenOutpoints: [],
-    tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "HASH", amount: 1, toAddress: p2wpkhAddr,
+    tokenUtxos: [{ txid: T(3), vout: 0, sats: 546 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr,
   }),
   /change output required|insufficient funds/,
 );
@@ -171,20 +171,20 @@ assert.throws(
 assert.throws(
   () => buildSendPsbt({
     address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(4), vout: 2, sats: 90_000 }], tokenOutpoints: [],
-    tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "HASH", amount: 1, toAddress: p2wpkhAddr,
+    tokenUtxos: [{ txid: T(3), vout: 0 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr,
   }),
   /no known BTC value/,
 );
 
 // ---- fee-rate safety cap ------------------------------------------------------------------------
 assert.throws(
-  () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 5_000, ticker: "HASH" }),
+  () => buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 5_000, ticker: "LUCKY" }),
   /safety cap/,
 );
 
 // ---- extractRawTxHex on an (unsigned) PSBT must fail loudly, not silently ----------------------
 {
-  const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "HASH" });
+  const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
   assert.throws(() => extractRawTxHex(r.psbtHex), /not finalized|finalize|sign/i);
 }
 

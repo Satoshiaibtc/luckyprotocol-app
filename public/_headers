@@ -1,7 +1,7 @@
 # Cloudflare Pages + Netlify static-header file.
 # Applies HTTP response headers to every path served from /.
 #
-# HashMint web holds NO keys (signing is delegated to the UniSat extension),
+# LuckyProtocol web holds NO keys (signing is delegated to the UniSat extension),
 # but a strict CSP still matters: an XSS could swap the PSBT the user is
 # asked to sign, or repoint indexer reads at a poisoned origin. The bundle
 # is fully self-contained (fonts via @fontsource, no CDNs, no inline

@@ -117,7 +117,7 @@ export default function Console({
       {wallet.status === "absent" && (
         <div className="cta">
           <div>
-            The UniSat browser extension is required to sign mining transactions. HashMint never
+            The UniSat browser extension is required to sign mining transactions. LuckyProtocol never
             holds keys.
           </div>
           <div className="row">

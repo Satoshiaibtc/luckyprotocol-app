@@ -19,9 +19,9 @@ export default function TopBar({ wallet, health, mock, onConnect, onDisconnect, 
 
   return (
     <header className="topbar">
-      <div className="wordmark" aria-label="HashMint">
+      <div className="wordmark" aria-label="LuckyProtocol">
         <span className="mark" aria-hidden="true" />
-        HASH<span className="accent">MINT</span>
+        LUCKY<span className="accent">PROTOCOL</span>
       </div>
 
       <div className="topbar-right">

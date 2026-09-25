@@ -1,4 +1,4 @@
-const SPEC_URL = import.meta.env.VITE_SPEC_URL || "/PROTOCOL-v3-HASHMINT.md";
+const SPEC_URL = import.meta.env.VITE_SPEC_URL || "/PROTOCOL-v3.md";
 
 export default function Footer() {
   return (

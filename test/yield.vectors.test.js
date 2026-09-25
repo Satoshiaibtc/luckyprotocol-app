@@ -1,6 +1,6 @@
-// Cross-impl conformance test for the HashMint yield function. Runs in
+// Cross-impl conformance test for the LuckyProtocol yield function. Runs in
 // plain Node — no test framework, no deps — against the golden vectors
-// shared with the Rust indexer (PROTOCOL-v3-HASHMINT.md §3). A mismatch
+// shared with the Rust indexer (PROTOCOL-v3.md §3). A mismatch
 // throws and exits non-zero, so `npm test` works as a CI gate.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

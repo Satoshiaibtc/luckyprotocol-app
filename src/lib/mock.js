@@ -67,7 +67,7 @@ const FEED = YIELD_PATTERN.map((y, i) => {
     block_height: height,
     block_hash: blockHashAt(height),
     sender: SENDERS[i % SENDERS.length],
-    ticker: "HASH",
+    ticker: "LUCKY",
     status: "settled",
     yield_smallest: y,
     cap_exhausted: false,
@@ -111,7 +111,7 @@ export function simulateBroadcast(rawHex, meta = {}) {
   SIM.set(txid, {
     at: Date.now(),
     address: meta.address || SENDERS[0],
-    ticker: meta.ticker || "HASH",
+    ticker: meta.ticker || "LUCKY",
     height: BASE_TIP + simOrder,
   });
   return txid;
@@ -131,7 +131,7 @@ const MY_SEEDED_MINES = (addr) =>
       block_height: height,
       block_hash: blockHashAt(height),
       sender: addr,
-      ticker: "HASH",
+      ticker: "LUCKY",
       status: "settled",
       yield_smallest: y,
       cap_exhausted: false,
@@ -172,7 +172,7 @@ const TOKENS = () => {
   );
   return [
     {
-      ticker: "HASH",
+      ticker: "LUCKY",
       supply: REQUIRED_TOKEN_SUPPLY,
       minted: HASH_MINTED_BASE + simMinted,
       deployer: fakeP2tr("deployer-hash"),
@@ -213,14 +213,14 @@ export async function mockGet(path) {
   }
   if ((m = p.match(/^\/balances\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);
-    return { address: addr, balances: { HASH: 3_121 + simYieldFor(addr), ORE: 42 } };
+    return { address: addr, balances: { LUCKY: 3_121 + simYieldFor(addr), ORE: 42 } };
   }
   if ((m = p.match(/^\/utxos\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);
     const carrier = btcUtxosFor(addr)[0];
     return {
       address: addr,
-      utxos: [{ txid: carrier.txid, vout: carrier.vout, balances: { HASH: 3_121, ORE: 42 } }],
+      utxos: [{ txid: carrier.txid, vout: carrier.vout, balances: { LUCKY: 3_121, ORE: 42 } }],
     };
   }
   if ((m = p.match(/^\/btc-utxos\/([^/]+)$/))) {
@@ -332,7 +332,7 @@ export async function mockPostText(path, body, meta) {
  * coherent with the pubkey exactly like a UniSat account. Never fund it.
  */
 export const MOCK_WALLET = (() => {
-  const priv = sha256(enc("hashmint-mock-wallet:privkey (public seed, never fund)"));
+  const priv = sha256(enc("luckyprotocol-mock-wallet:privkey (public seed, never fund)"));
   const pub = pubECDSA(priv, true); // 33-byte compressed
   return {
     address: p2tr(pub.slice(1), undefined, NETWORK).address,

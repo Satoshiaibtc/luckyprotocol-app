@@ -1,19 +1,19 @@
-// HashMint OP_RETURN payload encoders + protocol constants.
+// LuckyProtocol OP_RETURN payload encoders + protocol constants.
 //
-// Byte-identical to the indexer's parser (PROTOCOL-v3-HASHMINT.md §1–§2).
+// Byte-identical to the indexer's parser (PROTOCOL-v3.md §1–§2).
 // The indexer strictly validates every field — a single-byte drift means
 // the tx is treated as a plain BTC spend (and strict-burn applies to any
 // token inputs), so the encoders here are deliberately narrow.
 //
 // Wire formats (ASCII, `|`-delimited, no trailing newline, ≤ 80 bytes):
 //
-//   DEPLOY:  HASHMINT|DEPLOY|<TICKER>
-//   MINE:    HASHMINT|MINE|<TICKER>              (no tier / pick / indices)
-//   SEND:    HASHMINT|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>
+//   DEPLOY:  LUCKYPROTOCOL|DEPLOY|<TICKER>
+//   MINE:    LUCKYPROTOCOL|MINE|<TICKER>              (no tier / pick / indices)
+//   SEND:    LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>
 
 // ---- §1 constants ----------------------------------------------------------
 
-export const PROTOCOL_PREFIX = "HASHMINT";
+export const PROTOCOL_PREFIX = "LUCKYPROTOCOL";
 export const ACTIVATION_HEIGHT = 969_500;          // PLACEHOLDER per spec; finalized at launch
 export const SNAPSHOT_VERSION = 12;
 export const REQUIRED_TOKEN_SUPPLY = 21_000_000;   // implicit on every DEPLOY
@@ -77,7 +77,7 @@ function capPayload(bytes) {
 // ---- encoders ------------------------------------------------------------------
 
 /**
- * `HASHMINT|DEPLOY|<TICKER>` — registers the ticker with supply 21,000,000.
+ * `LUCKYPROTOCOL|DEPLOY|<TICKER>` — registers the ticker with supply 21,000,000.
  * The tx must also pay exactly DEPLOY_PROTOCOL_FEE_SATS to
  * PROJECT_FEE_ADDRESS (consensus rule, §2.1).
  */
@@ -87,7 +87,7 @@ export function buildDeployPayload(ticker) {
 }
 
 /**
- * `HASHMINT|MINE|<TICKER>` — yield is credited to vout0; the yield-slot and
+ * `LUCKYPROTOCOL|MINE|<TICKER>` — yield is credited to vout0; the yield-slot and
  * change-slot indices are implicit (both 0, §2.2) and NOT encoded. Nothing
  * else is encoded: the yield is a pure function of the confirming block's
  * hash.
@@ -98,7 +98,7 @@ export function buildMinePayload(ticker) {
 }
 
 /**
- * `HASHMINT|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>` (§2.3).
+ * `LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>` (§2.3).
  * `amount` is whole tokens (1 ≤ AMT ≤ 21,000,000). The residual input
  * pool routes to vout[CHANGE_OUT], so a builder must always emit that
  * output — see buildSendPsbt.

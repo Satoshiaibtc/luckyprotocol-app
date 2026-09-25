@@ -1,8 +1,8 @@
-// HashMint yield function — the ONLY settlement authority on the JS side.
+// LuckyProtocol yield function — the ONLY settlement authority on the JS side.
 //
 // Deliberately dependency-free (no fetch, no wallet, no PSBT) so it can be
 // unit-tested in plain Node against the golden vectors shared with the Rust
-// indexer (PROTOCOL-v3-HASHMINT.md §3). Any drift in case handling or digit
+// indexer (PROTOCOL-v3.md §3). Any drift in case handling or digit
 // bucketing fails `npm test`.
 //
 //   yield(block_hash) :=

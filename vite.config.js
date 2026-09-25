@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// HashMint web — plain Vite + React SPA. No PWA, no service worker: the
+// LuckyProtocol web — plain Vite + React SPA. No PWA, no service worker: the
 // app is a thin console over the indexer + UniSat, and a cached shell that
 // could serve a stale tip / supply view is worse than a hard reload.
 export default defineConfig({

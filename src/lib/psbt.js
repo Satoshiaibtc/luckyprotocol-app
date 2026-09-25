@@ -1,4 +1,4 @@
-// Unsigned PSBT construction for HashMint MINE / SEND (spec §4 + §6).
+// Unsigned PSBT construction for LuckyProtocol MINE / SEND (spec §4 + §6).
 //
 // The web app holds no keys. This module selects BTC inputs, lays out the
 // protocol outputs in the exact order the indexer expects, and returns an
@@ -6,16 +6,16 @@
 //
 // MINE layout (§2.2):   vout0 546 → self (yield slot)
 //                       vout1 546 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  HASHMINT|MINE|<TICKER>
+//                       vout2 OP_RETURN  LUCKYPROTOCOL|MINE|<TICKER>
 //                       vout3 change → self (omitted if < dust; folded into fee)
 //
 // SEND layout (§2.3):   vout0 546 → recipient
 //                       vout1 546 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  HASHMINT|SEND|<TICKER>|<AMT>|0|3
+//                       vout2 OP_RETURN  LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|0|3
 //                       vout3 change → self  (MUST exist — throws otherwise)
 //
 // Builder obligation (§4): never spend a token-bearing UTXO as a fee input.
-// Every UTXO with value ≤ 546 sats is dropped (all HashMint carriers are
+// Every UTXO with value ≤ 546 sats is dropped (all LuckyProtocol carriers are
 // 546-sat outputs), and every outpoint the indexer reports as token-bearing
 // is excluded explicitly.
 //
@@ -85,7 +85,7 @@ export function decodeAddress(address) {
   }
   if (decoded.type !== "wpkh" && decoded.type !== "tr") {
     throw new Error(
-      `unsupported address type "${decoded.type}" — HashMint supports Native SegWit (bc1q) ` +
+      `unsupported address type "${decoded.type}" — LuckyProtocol supports Native SegWit (bc1q) ` +
       `and Taproot (bc1p) only; switch the address type in UniSat`,
     );
   }

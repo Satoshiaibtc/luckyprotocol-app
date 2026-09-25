@@ -1,4 +1,4 @@
-// HashMint indexer adapter — HTTP only (PROTOCOL-v3-HASHMINT.md §5).
+// LuckyProtocol indexer adapter — HTTP only (PROTOCOL-v3.md §5).
 //
 // Every chain-derived read goes through the indexer. There is NO
 // third-party fallback: if the indexer is unreachable, reads throw and the

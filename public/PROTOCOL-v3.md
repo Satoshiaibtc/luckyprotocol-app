@@ -1,8 +1,8 @@
-# HashMint Protocol — v3 (cohort `genesis-v3`)
+# LuckyProtocol Protocol — v3 (cohort `genesis-v3`)
 
-Canonical wire spec for **HashMint**, the v3 successor to LUCKYPROTOCOL v2.
-Both the Rust indexer (branch `v3-hashmint`) and the web app
-(`hashmint-web`) implement exactly this document. Where code and spec
+Canonical wire spec for **LuckyProtocol**, the v3 successor to LUCKYPROTOCOL v2.
+Both the Rust indexer (branch `v3-luckyprotocol`) and the web app
+(`luckyprotocol-app`) implement exactly this document. Where code and spec
 disagree, the spec wins.
 
 ## 0. What changed from v2 (and why)
@@ -23,7 +23,7 @@ index, consensus-enforced protocol fee outputs, fixed 21M supply.
 
 | Name | Value | Notes |
 |---|---|---|
-| `PROTOCOL_PREFIX` | `HASHMINT` | Clean on-chain break from v2's `LUCKYPROTOCOL`; v2/v3 indexers are mutually invisible. |
+| `PROTOCOL_PREFIX` | `LUCKYPROTOCOL` | Clean on-chain break from v2's `LUCKYPROTOCOL`; v2/v3 indexers are mutually invisible. |
 | `ACTIVATION_HEIGHT` | **969_500** | **PLACEHOLDER** — finalize at launch; MUST be > tip at deploy (tip was 968,518 on 2026-09-25). Txs in earlier blocks are ignored. |
 | `SNAPSHOT_VERSION` | 12 | Fresh state; v2 snapshots are refused. |
 | `REQUIRED_TOKEN_SUPPLY` | 21_000_000 | Implicit on every DEPLOY, not user-settable. |
@@ -38,11 +38,11 @@ index, consensus-enforced protocol fee outputs, fixed 21M supply.
 ## 2. Payload encoding
 
 One OP_RETURN output per protocol tx. ASCII, `|`-separated, ≤ 80 bytes.
-Field 0 is always `HASHMINT`. Any parse failure = not a protocol tx (the
+Field 0 is always `LUCKYPROTOCOL`. Any parse failure = not a protocol tx (the
 tx is then treated as a plain BTC spend → strict-burn applies to any
 token inputs).
 
-### 2.1 DEPLOY — `HASHMINT|DEPLOY|<TICKER>`
+### 2.1 DEPLOY — `LUCKYPROTOCOL|DEPLOY|<TICKER>`
 
 Registers `<TICKER>` with supply 21,000,000. Ignored (recorded as
 `applied:false`) if the ticker already exists.
@@ -53,7 +53,7 @@ Consensus fee rule: the tx MUST have at least one output paying **exactly
 Reference layout: `vout0` 546 → deployer (proof), `vout1` 5,460 → fee,
 `vout2` OP_RETURN, `vout3+` change.
 
-### 2.2 MINE — `HASHMINT|MINE|<TICKER>`
+### 2.2 MINE — `LUCKYPROTOCOL|MINE|<TICKER>`
 
 `win_out_idx = 0` and `change_out_idx = 0` are **implicit** (not
 encoded). The yield is credited to `vout0`; any residual token input pool
@@ -69,7 +69,7 @@ yield 0, no state change (token inputs still route/burn per §4).
 Reference layout: `vout0` 546 → miner (yield slot), `vout1` 546 → fee,
 `vout2` OP_RETURN, `vout3+` change.
 
-### 2.3 SEND — `HASHMINT|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>`
+### 2.3 SEND — `LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>`
 
 Unchanged from v2. `AMT` is a canonical unsigned integer (whole tokens,
 1 ≤ AMT ≤ 21,000,000). Moves `AMT` from the tx's input pool to
@@ -121,7 +121,7 @@ suites assert them):
 
 Builder obligation (web): **never select a token-bearing UTXO as a fee
 input**. Practical rule: exclude every UTXO with value ≤ 546 sats (all
-HashMint token carriers are 546-sat outputs; this also shields most
+LuckyProtocol token carriers are 546-sat outputs; this also shields most
 inscription UTXOs) AND exclude every outpoint the indexer's
 `/utxos/:addr` reports as token-bearing.
 
@@ -151,7 +151,7 @@ All JSON. CORS open. Base: the operator's indexer origin.
 
 ```json
 { "txid": "...", "block_height": 969600, "block_hash": "...", "sender": "bc1...",
-  "ticker": "HASH", "status": "settled" | "invalid",
+  "ticker": "LUCKY", "status": "settled" | "invalid",
   "yield_smallest": 100, "cap_exhausted": false }
 ```
 
