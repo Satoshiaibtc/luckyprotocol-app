@@ -1,6 +1,18 @@
+import { useState } from "react";
+import { useApp } from "../context.js";
 import { fmtBtc, fmtInt, shortAddr, UNISAT_INSTALL_URL } from "../lib/format.js";
+import { tokenHref } from "../hooks/useHashRoute.js";
 
-export default function TopBar({ wallet, health, mock, onConnect, onDisconnect, onUseMock }) {
+const NAV = [
+  { name: "board", href: "#/", label: "Board" },
+  { name: "create", href: "#/create", label: "Create" },
+  { name: "me", href: "#/me", label: "Portfolio" },
+];
+
+export default function TopBar() {
+  const { wallet, health, mock, connect, disconnect, useMock, route, navigate, tokens } = useApp();
+  const [q, setQ] = useState("");
+
   const h = health.data;
   let pillClass = "pill";
   let pillText = "connecting…";
@@ -10,39 +22,72 @@ export default function TopBar({ wallet, health, mock, onConnect, onDisconnect, 
   } else if (h) {
     if (h.stalled) {
       pillClass += " pill-warn";
-      pillText = `${h.network} · stalled`;
+      pillText = `#${fmtInt(h.tip_height)} · stalled`;
     } else {
       pillClass += " pill-ok";
-      pillText = `${h.network} · #${fmtInt(h.tip_height)}`;
+      pillText = `#${fmtInt(h.tip_height)}`;
     }
   }
 
+  const submit = (e) => {
+    e.preventDefault();
+    const t = q.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+    if (!t) return;
+    setQ("");
+    navigate(tokenHref(t));
+  };
+
+  const tickers = tokens.data?.items?.map((t) => t.ticker) || [];
+
   return (
     <header className="topbar">
-      <div className="wordmark" aria-label="LuckyProtocol">
-        <span className="mark" aria-hidden="true" />
-        LUCKY<span className="accent">PROTOCOL</span>
-      </div>
+      <div className="topbar-inner">
+        <a className="wordmark" href="#/" aria-label="LuckyProtocol home">
+          <span className="mark" aria-hidden="true" />
+          LUCKY<span className="accent">PROTOCOL</span>
+        </a>
 
-      <div className="topbar-right">
-        {mock && (
-          <span className="pill pill-warn" title="VITE_MOCK=1 — deterministic fake indexer">
+        <form className="search" role="search" onSubmit={submit}>
+          <input
+            className="search-input mono"
+            type="search"
+            list="ticker-list"
+            placeholder="Search ticker"
+            aria-label="Search ticker"
+            value={q}
+            onChange={(e) => setQ(e.target.value.toUpperCase())}
+            maxLength={8}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <datalist id="ticker-list">
+            {tickers.map((t) => (
+              <option value={t} key={t} />
+            ))}
+          </datalist>
+        </form>
+
+        <nav className="nav" aria-label="Primary">
+          {NAV.map((n) => (
+            <a key={n.name} href={n.href} className={`nav-link${route.name === n.name ? " active" : ""}`} aria-current={route.name === n.name ? "page" : undefined}>
+              {n.label}
+            </a>
+          ))}
+        </nav>
+
+        <div className="topbar-right">
+          {mock && (
+            <span className="pill pill-warn" title="VITE_MOCK=1 — deterministic fake indexer">
+              <span className="dot" aria-hidden="true" />
+              mock
+            </span>
+          )}
+          <span className={pillClass} title={health.error ? String(health.error.message) : `indexer ${h?.network || ""} · block height`}>
             <span className="dot" aria-hidden="true" />
-            mock
+            {pillText}
           </span>
-        )}
-        <span className={pillClass} title={health.error ? String(health.error.message) : "indexer status"}>
-          <span className="dot" aria-hidden="true" />
-          {pillText}
-        </span>
-
-        <WalletControl
-          wallet={wallet}
-          mock={mock}
-          onConnect={onConnect}
-          onDisconnect={onDisconnect}
-          onUseMock={onUseMock}
-        />
+          <WalletControl wallet={wallet} mock={mock} onConnect={connect} onDisconnect={disconnect} onUseMock={useMock} />
+        </div>
       </div>
     </header>
   );
@@ -74,11 +119,11 @@ function WalletControl({ wallet, mock, onConnect, onDisconnect, onUseMock }) {
     case "connected":
       return (
         <div className="wallet">
-          <span className="wallet-addr" title={wallet.address}>
-            <span>{shortAddr(wallet.address)}</span>
+          <a className="wallet-addr" href="#/me" title={wallet.address}>
+            <span>{shortAddr(wallet.address, 5, 4)}</span>
             <span className="bal">{wallet.balance !== null ? `${fmtBtc(wallet.balance)} BTC` : "…"}</span>
-          </span>
-          <button className="btn btn-ghost btn-sm" onClick={onDisconnect} type="button">
+          </a>
+          <button className="btn btn-ghost btn-sm" onClick={onDisconnect} type="button" aria-label="Disconnect wallet">
             Disconnect
           </button>
         </div>
