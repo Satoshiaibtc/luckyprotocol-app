@@ -8,7 +8,6 @@ import { AVATAR_PROTOCOL_FEE_SATS, DUST_SATS } from "../lib/payloads.js";
 import { fmtInt, fmtTime, txUrl, shortTxid, shortAddr } from "../lib/format.js";
 import TokenAvatar from "./TokenAvatar.jsx";
 import FeeSelector from "./FeeSelector.jsx";
-import UtxoSafetyNotice from "./UtxoSafetyNotice.jsx";
 import { SpentInputs } from "./TxProgress.jsx";
 import Led from "./hud/Led.jsx";
 
@@ -303,7 +302,6 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
       <div className="notice" role="note">
         Images are inscribed on Bitcoin permanently and cannot be removed; anyone can see them.
       </div>
-      <UtxoSafetyNotice />
 
       {av.phase === "resumable" && av.record && (
         <div className="notice notice-row" role="note">
