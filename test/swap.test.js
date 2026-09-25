@@ -26,7 +26,7 @@ import {
   LISTING_SIGHASH,
 } from "../src/lib/swap.js";
 import { PROJECT_FEE_ADDRESS, buildAvatarPayload, buildSendPayload, payloadToString } from "../src/lib/payloads.js";
-import { expectPsbtPayload, makeOpReturnScript } from "../src/lib/psbt.js";
+import { assertSingleOpReturn, decodeOpReturnPush, expectPsbtPayload, makeOpReturnScript } from "../src/lib/psbt.js";
 import { mockSignPsbt, MOCK_WALLET } from "../src/lib/mock.js";
 
 const enc = (s) => new TextEncoder().encode(s);
@@ -378,6 +378,77 @@ runScenario("wpkh-seller/tr-buyer", "wpkh", "tr");
   const order = { id: `${T(7)}:0`, ticker: "ORE", amount: 100, price_sats: 10_000, seller: MOCK_WALLET.address, carrier_sats: 546 };
   assert.equal(verifyListing({ psbtHex: signed, order }).ok, true, "mock-signed listing verifies");
   console.log("swap mock signer: toSignInputs / sighashTypes / autoFinalized honored");
+}
+
+// ---- M-3: decodeRawTx follows the indexer's OP_RETURN rule ---------------------------------------
+{
+  const enc2 = (s) => new TextEncoder().encode(s);
+  const opret = (bytes) => makeOpReturnScript(bytes);
+  const p2 = (bytes) => new Uint8Array([0x6a, 0x4d, bytes.length & 0xff, bytes.length >> 8, ...bytes]); // PUSHDATA2
+  const p4 = (bytes) => new Uint8Array([0x6a, 0x4e, bytes.length & 0xff, (bytes.length >> 8) & 0xff, 0, 0, ...bytes]); // PUSHDATA4
+  const pay = btc.p2wpkh(hex.decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"), btc.NETWORK);
+  const raw = (scripts) =>
+    hex.encode(
+      btc.RawTx.encode({
+        version: 2,
+        segwitFlag: false,
+        lockTime: 0,
+        inputs: [{ txid: hex.decode(T(1)), index: 0, finalScriptSig: new Uint8Array(), sequence: 0xffffffff }],
+        outputs: scripts.map((script, i) => ({ amount: BigInt(546 + i), script })),
+      }),
+    );
+  const send = enc2("LUCKY-20|SEND|LUCKY|100|0|3");
+  const memo = enc2("hello");
+  // single OP_RETURN, direct push
+  {
+    const d = decodeRawTx(raw([pay.script, opret(send)]));
+    assert.equal(d.opReturnCount, 1);
+    assert.equal(d.payloadVout, 1);
+    assert.deepEqual(d.payload, { op: "SEND", ticker: "LUCKY", amount: 100, toOutIdx: 0, changeOutIdx: 3 });
+    assert.equal(d.outputs[0].address, pay.address);
+    assert.equal(d.outputs[1].address, null);
+  }
+  // payload first, memo second → payload found, count 2
+  {
+    const d = decodeRawTx(raw([opret(send), pay.script, opret(memo)]));
+    assert.equal(d.opReturnCount, 2);
+    assert.equal(d.payloadVout, 0);
+    assert.equal(d.payload.op, "SEND");
+  }
+  // memo first, payload second → lowest-index PARSING OP_RETURN wins
+  {
+    const d = decodeRawTx(raw([opret(memo), pay.script, opret(send)]));
+    assert.equal(d.opReturnCount, 2);
+    assert.equal(d.payloadVout, 2);
+    assert.equal(d.payload.op, "SEND");
+  }
+  // PUSHDATA2 / PUSHDATA4 encodings of the same push parse
+  assert.equal(decodeRawTx(raw([p2(send)])).payload.op, "SEND", "PUSHDATA2 payload parses");
+  assert.equal(decodeRawTx(raw([p4(send)])).payload.op, "SEND", "PUSHDATA4 payload parses");
+  // OP_RETURN OP_NOP (6a61): an OP_RETURN output (no address, counted) but no payload
+  {
+    const d = decodeRawTx(raw([new Uint8Array([0x6a, 0x61]), pay.script]));
+    assert.equal(d.opReturnCount, 1);
+    assert.equal(d.payload, null);
+    assert.equal(d.outputs[0].address, null, "0x6a outputs never get an address");
+  }
+  // trailing bytes after the push, or a push followed by a second push → not `OP_RETURN <one push>`
+  assert.equal(decodeRawTx(raw([new Uint8Array([...opret(send), 0x61])])).payload, null, "trailing opcode → no payload");
+  assert.equal(decodeRawTx(raw([new Uint8Array([...opret(send), 0x01, 0x00])])).payload, null, "second push → no payload");
+  assert.equal(decodeRawTx(raw([new Uint8Array([0x6a])])).payload, null, "bare OP_RETURN → no payload");
+  assert.equal(decodeRawTx(raw([new Uint8Array([0x6a, 0x4c])])).payload, null, "truncated PUSHDATA1 → no payload");
+  // broadcast guard: two OP_RETURN outputs are refused before any relay sees them
+  assert.equal(assertSingleOpReturn(raw([pay.script, opret(send)])), 1);
+  assert.equal(assertSingleOpReturn(raw([pay.script])), 0, "a plain payment passes");
+  assert.throws(() => assertSingleOpReturn(raw([opret(send), pay.script, opret(memo)])), /2 OP_RETURN outputs/);
+  assert.throws(() => assertSingleOpReturn(raw([opret(memo), opret(send)])), /2 OP_RETURN outputs/);
+  // decodeOpReturnPush vectors
+  assert.equal(hex.encode(decodeOpReturnPush(opret(send))), hex.encode(send));
+  assert.equal(hex.encode(decodeOpReturnPush(p2(send))), hex.encode(send));
+  assert.equal(decodeOpReturnPush(new Uint8Array([0x6a, 0x00])), null, "OP_0 is not a data push");
+  assert.equal(decodeOpReturnPush(new Uint8Array([0x6a, 0x51])), null, "OP_1 is not a data push");
+  assert.equal(decodeOpReturnPush(pay.script), null, "not an OP_RETURN");
+  console.log("swap decodeRawTx: lowest-index single-push OP_RETURN rule, PUSHDATA1/2/4, multi-OP_RETURN broadcast guard");
 }
 
 console.log("swap: all checks passed");

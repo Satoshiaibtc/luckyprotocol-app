@@ -158,7 +158,30 @@ export function makeOpReturnScript(data) {
  */
 export function extractRawTxHex(signedPsbtHex) {
   const tx = btc.Transaction.fromPSBT(hex.decode(signedPsbtHex));
-  return hex.encode(tx.extract());
+  const raw = hex.encode(tx.extract());
+  assertSingleOpReturn(raw);
+  return raw;
+}
+
+/**
+ * Broadcast-time guard (audit M-3): count the OP_RETURN outputs (byte-0
+ * 0x6a) of a raw tx and refuse more than one. A wallet or aggregator that
+ * appends its own OP_RETURN (memo, runestone) to one of our protocol txs
+ * would otherwise turn it into "not a protocol tx" for an indexer that
+ * rejects multi-OP_RETURN transactions — and strict-burn the input pool.
+ * Zero OP_RETURNs is fine (plain payments, the avatar commit / sweep).
+ * → the count.
+ */
+export function assertSingleOpReturn(rawHex) {
+  if (typeof rawHex !== "string" || !/^[0-9a-f]+$/i.test(rawHex) || rawHex.length % 2 !== 0) {
+    throw new Error("raw tx must be an even-length hex string");
+  }
+  const parsed = btc.RawTx.decode(hex.decode(rawHex));
+  const n = parsed.outputs.filter((o) => isOpReturnScript(o.script)).length;
+  if (n > 1) {
+    throw new Error(`refusing to broadcast: the transaction has ${n} OP_RETURN outputs (a protocol tx has exactly one)`);
+  }
+  return n;
 }
 
 // ---- OP_RETURN payload rule (mirrors the indexer, PROTOCOL-v3.md §2) ------------------------

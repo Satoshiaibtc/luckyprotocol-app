@@ -25,7 +25,7 @@
 
 import * as indexer from "./indexer.js";
 import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
-import { extractRawTxHex } from "./psbt.js";
+import { assertSingleOpReturn, extractRawTxHex } from "./psbt.js";
 import {
   PROVIDER_IDS,
   PROVIDER_META,
@@ -394,10 +394,12 @@ function _msg(e) {
  * both fail.
  */
 export async function broadcastSignedPsbt(signedPsbtHex) {
+  // Extract first: a PSBT that does not finalize, or a finalized tx with
+  // more than one OP_RETURN output (M-3), never reaches any relay.
+  const raw = extractRawTxHex(signedPsbtHex);
   try {
     return await pushPsbt(signedPsbtHex);
   } catch (pushErr) {
-    const raw = extractRawTxHex(signedPsbtHex);
     try {
       return await indexer.broadcast(raw);
     } catch (bErr) {
@@ -412,6 +414,7 @@ export async function broadcastSignedPsbt(signedPsbtHex) {
  * caller can detect a double-spend race (see isConflictError).
  */
 export async function broadcastRawTx(rawHex) {
+  assertSingleOpReturn(rawHex);
   try {
     return await pushTx(rawHex);
   } catch (pushErr) {

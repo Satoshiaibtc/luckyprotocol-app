@@ -26,8 +26,6 @@ import {
   REQUIRED_TOKEN_SUPPLY,
   TICKER_RE,
   buildSendPayload,
-  parsePayload,
-  payloadToString,
 } from "./payloads.js";
 import {
   NETWORK,
@@ -41,6 +39,7 @@ import {
   makeOpReturnScript,
   outpointKey,
   checkExpectedPayload,
+  isOpReturnScript,
   protocolPayloadOfScripts,
 } from "./psbt.js";
 
@@ -482,8 +481,14 @@ export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
 
 /**
  * Parse a raw signed tx into `{ txid, inputs: [{txid, vout}], outputs:
- * [{ vout, sats, script(hex), address|null }], payload|null }` where
- * `payload` is the parsed LuckyProtocol OP_RETURN (parsePayload) if any.
+ * [{ vout, sats, script(hex), address|null }], payload|null, payloadText,
+ * payloadVout, opReturnCount }`.
+ *
+ * `payload` follows the indexer's rule (§2, audit M-3): the LOWEST-index
+ * OP_RETURN output whose script is exactly `OP_RETURN <one push>` (direct
+ * push or PUSHDATA1/2/4, nothing after it) and whose push parses. Every
+ * output starting 0x6a counts towards `opReturnCount` and never gets an
+ * address, whatever follows the opcode.
  */
 export function decodeRawTx(rawHex) {
   if (typeof rawHex !== "string" || !/^[0-9a-f]+$/i.test(rawHex) || rawHex.length % 2 !== 0) {
@@ -493,21 +498,13 @@ export function decodeRawTx(rawHex) {
   const tx = btc.Transaction.fromRaw(bytes, { allowUnknownOutputs: true, allowUnknownInputs: true, disableScriptCheck: true });
   const parsed = btc.RawTx.decode(bytes);
   const inputs = parsed.inputs.map((i) => ({ txid: hex.encode(i.txid), vout: i.index }));
-  let payload = null;
-  let payloadText = null;
-  const outputs = parsed.outputs.map((o, vout) => {
-    const script = o.script;
-    let address = null;
-    if (script[0] === 0x6a) {
-      // OP_RETURN: direct push or PUSHDATA1
-      const data = script[1] === 0x4c ? script.subarray(3) : script.subarray(2);
-      const text = payloadToString(data);
-      const p = parsePayload(text);
-      if (p && payload === null) { payload = p; payloadText = text; }
-    } else {
-      address = scriptAddress(script);
-    }
-    return { vout, sats: Number(o.amount), script: hex.encode(script), address };
-  });
-  return { txid: tx.id, inputs, outputs, payload, payloadText };
+  const scripts = parsed.outputs.map((o) => o.script);
+  const { opReturnCount, payload, payloadText, payloadVout } = protocolPayloadOfScripts(scripts);
+  const outputs = parsed.outputs.map((o, vout) => ({
+    vout,
+    sats: Number(o.amount),
+    script: hex.encode(o.script),
+    address: isOpReturnScript(o.script) ? null : scriptAddress(o.script),
+  }));
+  return { txid: tx.id, inputs, outputs, payload, payloadText, payloadVout, opReturnCount };
 }
