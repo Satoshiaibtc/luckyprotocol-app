@@ -269,7 +269,9 @@ function buildUnsigned({
 
   const satVb = checkedFeeRate(feeRateSatVb);
 
-  const opReturnScript = makeOpReturnScript(opReturnData);
+  // `opReturnData: null` → a plain payment (no protocol output; §8.5 commit).
+  const opReturnScript = opReturnData ? makeOpReturnScript(opReturnData) : null;
+  const opReturnLen = opReturnScript ? opReturnScript.length : 0;
   const fixedOutValue = outputs.reduce((s, o) => s + o.value, 0);
   const fixedAddresses = outputs.map((o) => o.address);
 
@@ -288,14 +290,14 @@ function buildUnsigned({
         inputCount: selected.length,
         inputType: type,
         outputAddresses,
-        opReturnScriptLen: opReturnScript.length,
+        opReturnScriptLen: opReturnLen,
       });
       const newFee = Math.ceil(vsize * satVb);
       if (newFee === fee) break;
       fee = newFee;
     }
     return { selected, total, fee, vsize: estimateVsize({
-      inputCount: selected.length, inputType: type, outputAddresses, opReturnScriptLen: opReturnScript.length,
+      inputCount: selected.length, inputType: type, outputAddresses, opReturnScriptLen: opReturnLen,
     }) };
   };
 
@@ -354,7 +356,7 @@ function buildUnsigned({
   for (const o of outputs) {
     tx.addOutputAddress(o.address, BigInt(o.value), NETWORK);
   }
-  tx.addOutput({ script: opReturnScript, amount: 0n });
+  if (opReturnScript) tx.addOutput({ script: opReturnScript, amount: 0n });
   if (!changeOmitted) {
     tx.addOutputAddress(address, BigInt(change), NETWORK);
   }
@@ -366,10 +368,44 @@ function buildUnsigned({
     inputs: selected.map((u) => ({ txid: u.txid, vout: u.vout, sats: Number(u.sats) })),
     changeSats: changeOmitted ? 0 : change,
     changeOmitted,
-    outputCount: outputs.length + 1 + (changeOmitted ? 0 : 1),
+    changeVout: changeOmitted ? null : outputs.length + (opReturnScript ? 1 : 0),
+    outputCount: outputs.length + (opReturnScript ? 1 : 0) + (changeOmitted ? 0 : 1),
     estimatedVsize: Math.ceil(sel.vsize),
     feeRateSatVb: satVb,
   };
+}
+
+/**
+ * Build an unsigned plain payment: one output of `amountSats` to `toAddress`
+ * plus change to `address` (sub-dust change folds into the fee). No
+ * OP_RETURN — this is NOT a protocol tx, which is exactly why the §4 filter
+ * matters: a token-bearing input here would strict-burn its tokens. Used
+ * for the §8.5 avatar commit (paying the commit P2TR address).
+ */
+export function buildPayPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, toAddress, amountSats }) {
+  decodeAddress(toAddress);
+  const amount = Number(amountSats);
+  if (!Number.isInteger(amount) || amount < DUST_SATS) {
+    throw new Error(`payment amount must be an integer ≥ ${DUST_SATS} sats`);
+  }
+  return buildUnsigned({
+    address,
+    pubkeyHex,
+    utxos,
+    tokenOutpoints,
+    feeRateSatVb,
+    outputs: [{ address: toAddress, value: amount }], // vout0 payment
+    opReturnData: null,
+    requireChange: false,                             // vout1 change, optional
+  });
+}
+
+/** Display-only fee preview for a plain payment (one input of the wallet's type, payment + change). */
+export function estimatePayFeeSats({ address, toAddress, feeRateSatVb, inputCount = 1 }) {
+  const type = isP2tr(address) ? "tr" : "wpkh";
+  const vsize = estimateVsize({ inputCount, inputType: type, outputAddresses: [toAddress, address], opReturnScriptLen: 0 });
+  const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate) };
 }
 
 /**

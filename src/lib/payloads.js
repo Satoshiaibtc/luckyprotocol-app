@@ -10,6 +10,7 @@
 //   DEPLOY:  LUCKYPROTOCOL|DEPLOY|<TICKER>
 //   MINE:    LUCKYPROTOCOL|MINE|<TICKER>              (no tier / pick / indices)
 //   SEND:    LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>
+//   AVATAR:  LUCKYPROTOCOL|AVATAR|<TICKER>            (§8; image rides in input0's witness)
 
 // ---- §1 constants ----------------------------------------------------------
 
@@ -23,6 +24,7 @@ export const PROJECT_FEE_ADDRESS =
 export const DEPLOY_PROTOCOL_FEE_SATS = 5_460;
 export const MINE_PROTOCOL_FEE_SATS = 546;
 export const SEND_PROTOCOL_FEE_SATS = 546;
+export const AVATAR_PROTOCOL_FEE_SATS = 546;      // §8.1 vout1, exact amount
 export const MAX_OUT_IDX = 255;
 export const MAX_PAYLOAD_BYTES = 80;
 export const TICKER_RE = /^[A-Z0-9]{1,8}$/;
@@ -126,10 +128,23 @@ export function buildSendPayload({ ticker, amount, toOutIdx, changeOutIdx }) {
 }
 
 /**
+ * `LUCKYPROTOCOL|AVATAR|<TICKER>` (§8.1) — exactly three fields. The image
+ * itself is not in the payload: it is the ord-style envelope revealed in
+ * input0's witness (see src/lib/inscribe.js). The tx must also pay exactly
+ * AVATAR_PROTOCOL_FEE_SATS to PROJECT_FEE_ADDRESS and spend at least one
+ * UTXO of the token's deployer (§8.3).
+ */
+export function buildAvatarPayload(ticker) {
+  validateTicker(ticker);
+  return capPayload(asciiBytes(`${PROTOCOL_PREFIX}|AVATAR|${ticker}`));
+}
+
+/**
  * Parse an OP_RETURN payload string back into its fields, or return null
  * when it is not a LuckyProtocol payload. Mirrors the indexer's grammar:
- * DEPLOY|T, MINE|T, SEND|T|AMT|TO|CHG — anything else is "not a protocol
- * tx". Used by the mock indexer and by display code; never by consensus.
+ * DEPLOY|T, MINE|T, AVATAR|T, SEND|T|AMT|TO|CHG — anything else is "not a
+ * protocol tx". Used by the mock indexer and by display code; never by
+ * consensus.
  */
 export function parsePayload(str) {
   if (typeof str !== "string") return null;
@@ -138,7 +153,7 @@ export function parsePayload(str) {
   const op = f[1];
   const ticker = f[2];
   if (!TICKER_RE.test(ticker)) return null;
-  if ((op === "DEPLOY" || op === "MINE") && f.length === 3) return { op, ticker };
+  if ((op === "DEPLOY" || op === "MINE" || op === "AVATAR") && f.length === 3) return { op, ticker };
   if (op === "SEND" && f.length === 6) {
     if (!/^(0|[1-9][0-9]*)$/.test(f[3]) || !/^(0|[1-9][0-9]*)$/.test(f[4]) || !/^(0|[1-9][0-9]*)$/.test(f[5])) return null;
     const amount = Number(f[3]);
