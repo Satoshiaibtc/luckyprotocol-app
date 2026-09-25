@@ -1,0 +1,36 @@
+{
+  "name": "hashmint-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "HashMint v3 mining console — Bitcoin OP_RETURN token protocol, UniSat wallet, yield decided by the confirming block hash.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src/ test/",
+    "lint:fix": "eslint src/ test/ --fix",
+    "test": "node test/yield.vectors.test.js",
+    "test:psbt": "node test/psbt.build.test.js",
+    "check": "npm run lint && npm run test && npm run test:psbt && npm run build"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/manrope": "^5.2.8",
+    "@noble/hashes": "^2.2.0",
+    "@scure/base": "^2.2.0",
+    "@scure/btc-signer": "^2.2.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.26",
+    "globals": "^16.5.0",
+    "vite": "^8.3.0"
+  }
+}
