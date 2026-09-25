@@ -1,77 +1,142 @@
 import { useCallback, useEffect, useState } from "react";
-import * as unisat from "../lib/unisat.js";
+import * as wallet from "../lib/wallet.js";
 
-const IDLE_WALLET = { status: "detecting", address: null, pubkeyHex: null, balance: null, error: null };
+const IDLE_WALLET = {
+  status: "detecting",
+  address: null,
+  pubkeyHex: null,
+  balance: null,
+  error: null,
+  provider: null, // "unisat" | "okx" | "mock"
+  providerName: null,
+  assetSafe: null, // false when UTXOs come from the indexer (no asset-aware wallet list)
+  providers: [], // [{ id, name, present }] from detection
+};
 
 export function friendlyError(e) {
   const msg = String(e?.message || e || "unknown error");
-  if (/reject|denied|cancel/i.test(msg) && !/cancelled by someone/i.test(msg)) return "Signature declined in UniSat.";
+  if (/reject|denied|cancel/i.test(msg) && !/cancelled by someone/i.test(msg)) return "Signature declined in the wallet.";
   return msg;
 }
 
 /**
  * Wallet state machine: detecting → absent | disconnected → connecting →
- * connected. Reacts to the extension's accountsChanged / networkChanged.
- * `onDisconnect` lets callers reset in-flight flows.
+ * connected. Detects UniSat and OKX Wallet, restores the last session
+ * silently (never pops the wallet on load), and reacts to the provider's
+ * accountsChanged / networkChanged. `onDisconnect` lets callers reset
+ * in-flight flows.
  */
 export function useWallet({ onDisconnect } = {}) {
-  const [wallet, setWallet] = useState(IDLE_WALLET);
-
-  useEffect(() => {
-    let alive = true;
-    unisat.detect(2000).then((p) => {
-      if (alive) setWallet((w) => ({ ...w, status: p ? "disconnected" : "absent" }));
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
+  const [w, setWallet] = useState(IDLE_WALLET);
 
   const refreshBalance = useCallback(async () => {
     try {
-      const b = await unisat.getBalance();
-      setWallet((w) => (w.status === "connected" ? { ...w, balance: b.total } : w));
+      const b = await wallet.getBalance();
+      setWallet((s) => (s.status === "connected" ? { ...s, balance: b.total } : s));
     } catch {
       /* balance is cosmetic */
     }
   }, []);
 
-  const connect = useCallback(async () => {
-    setWallet((w) => ({ ...w, status: "connecting", error: null }));
-    try {
-      const { address, pubkeyHex } = await unisat.connect();
-      setWallet({ status: "connected", address, pubkeyHex, balance: null, error: null });
+  const applySession = useCallback(
+    (s) => {
+      setWallet((prev) => ({
+        ...prev,
+        status: "connected",
+        address: s.address,
+        pubkeyHex: s.pubkeyHex,
+        balance: null,
+        error: null,
+        provider: s.providerId,
+        providerName: s.providerName,
+        assetSafe: s.assetSafe,
+      }));
       refreshBalance();
-    } catch (e) {
-      setWallet((w) => ({ ...w, status: unisat.hasProvider() ? "disconnected" : "absent", error: friendlyError(e) }));
-    }
-  }, [refreshBalance]);
+    },
+    [refreshBalance],
+  );
+
+  // Detect the injected providers, then try a silent restore of the last session.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const providers = await wallet.detectProviders(2000);
+      if (!alive) return;
+      setWallet((s) => ({ ...s, providers, status: providers.some((p) => p.present) ? "disconnected" : "absent" }));
+      try {
+        const session = await wallet.restoreSession();
+        if (alive && session) applySession(session);
+      } catch (e) {
+        if (alive) setWallet((s) => ({ ...s, error: friendlyError(e) }));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [applySession]);
+
+  /** `connect("okx")`; with no id the only injected provider (or the current one) is used. */
+  const connect = useCallback(
+    async (providerId) => {
+      const id = typeof providerId === "string" ? providerId : undefined;
+      setWallet((s) => ({ ...s, status: "connecting", error: null }));
+      try {
+        const session = await wallet.connect(id);
+        applySession(session);
+      } catch (e) {
+        setWallet((s) => ({
+          ...s,
+          status: wallet.hasProvider() ? "disconnected" : "absent",
+          address: null,
+          pubkeyHex: null,
+          balance: null,
+          provider: null,
+          providerName: null,
+          assetSafe: null,
+          error: friendlyError(e),
+        }));
+      }
+    },
+    [applySession],
+  );
 
   const disconnect = useCallback(() => {
-    setWallet((w) => ({ ...IDLE_WALLET, status: unisat.hasProvider() ? "disconnected" : "absent", error: w.error }));
+    wallet.disconnect();
+    setWallet((s) => ({ ...IDLE_WALLET, providers: s.providers, status: wallet.hasProvider() ? "disconnected" : "absent", error: s.error }));
     onDisconnect?.();
   }, [onDisconnect]);
 
   const useMock = useCallback(() => {
     try {
-      unisat.enableMockWallet();
-      connect();
+      wallet.enableMockWallet();
+      connect("mock");
     } catch (e) {
-      setWallet((w) => ({ ...w, error: friendlyError(e) }));
+      setWallet((s) => ({ ...s, error: friendlyError(e) }));
     }
   }, [connect]);
 
-  // Account / network changes from the extension.
+  // Account / network changes from the connected provider.
   useEffect(() => {
-    if (wallet.status !== "connected") return undefined;
-    const offAcc = unisat.on("accountsChanged", (accounts) => {
+    if (w.status !== "connected") return undefined;
+    const offAcc = wallet.on("accountsChanged", (accounts) => {
       const next = Array.isArray(accounts) ? accounts[0] : null;
       if (!next) disconnect();
-      else if (next !== wallet.address) connect();
+      else if (next !== w.address) connect(w.provider);
     });
-    const offNet = unisat.on("networkChanged", (net) => {
+    const offNet = wallet.on("networkChanged", (net) => {
       if (net && net !== "livenet") {
-        setWallet((w) => ({ ...w, status: "disconnected", address: null, pubkeyHex: null, balance: null, error: `UniSat switched to "${net}" — LuckyProtocol is mainnet only.` }));
+        wallet.disconnect();
+        setWallet((s) => ({
+          ...s,
+          status: "disconnected",
+          address: null,
+          pubkeyHex: null,
+          balance: null,
+          provider: null,
+          providerName: null,
+          assetSafe: null,
+          error: `${w.providerName || "The wallet"} switched to "${net}" — LuckyProtocol is mainnet only.`,
+        }));
         onDisconnect?.();
       }
     });
@@ -79,14 +144,14 @@ export function useWallet({ onDisconnect } = {}) {
       offAcc();
       offNet();
     };
-  }, [wallet.status, wallet.address, connect, disconnect, onDisconnect]);
+  }, [w.status, w.address, w.provider, w.providerName, connect, disconnect, onDisconnect]);
 
-  const connected = wallet.status === "connected";
+  const connected = w.status === "connected";
   return {
-    wallet,
+    wallet: w,
     connected,
-    address: connected ? wallet.address : null,
-    pubkeyHex: connected ? wallet.pubkeyHex : null,
+    address: connected ? w.address : null,
+    pubkeyHex: connected ? w.pubkeyHex : null,
     connect,
     disconnect,
     useMock,

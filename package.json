@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "LuckyProtocol v3 mining console — Bitcoin OP_RETURN token protocol: create and mine tokens with UniSat; yield decided by the last hex digit of the confirming block hash.",
+  "description": "LuckyProtocol v3 mining console — Bitcoin OP_RETURN token protocol: create and mine tokens with UniSat or OKX Wallet; yield decided by the last hex digit of the confirming block hash.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -14,7 +14,8 @@
     "test:vocab": "node test/vocab.test.js",
     "test:psbt": "node test/psbt.build.test.js",
     "test:swap": "node test/swap.test.js",
-    "check": "npm run lint && npm run test:vocab && npm run test && npm run test:psbt && npm run test:swap && npm run build"
+    "test:wallet": "node test/wallet.test.js",
+    "check": "npm run lint && npm run test:vocab && npm run test && npm run test:psbt && npm run test:swap && npm run test:wallet && npm run build"
   },
   "dependencies": {
     "@fontsource/chakra-petch": "^5.3.0",

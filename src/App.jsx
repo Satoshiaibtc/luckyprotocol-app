@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef } from "react";
 import * as indexer from "./lib/indexer.js";
 import { usePoll } from "./hooks/usePoll.js";
 import { useWallet } from "./hooks/useWallet.js";
+import { useFeeRate } from "./hooks/useFeeRate.js";
 import { useHashRoute } from "./hooks/useHashRoute.js";
 import { useIsMobile } from "./hooks/useMediaQuery.js";
 import { AppContext } from "./context.js";
@@ -26,6 +27,8 @@ export default function App() {
   const health = usePoll((s) => indexer.health(s), STATUS_POLL_MS, []);
   const tokens = usePoll((s) => indexer.tokens({ limit: 200 }, s), 30_000, []);
   const fees = usePoll((s) => indexer.fees(s), 60_000, []);
+  // One fee choice (preset from /fees or custom sat/vB) for every builder.
+  const fee = useFeeRate(fees.data);
   const tipHeight = health.data?.tip_height ?? null;
   const tipBlock = usePoll(tipHeight ? (s) => indexer.blockInfo(tipHeight, s) : null, 0, [tipHeight]);
   const indexerOk = !health.error && !!health.data;
@@ -52,6 +55,7 @@ export default function App() {
       health,
       tokens,
       fees,
+      fee,
       tipBlock,
       indexerOk,
       mock: MOCK,
@@ -59,7 +63,7 @@ export default function App() {
       navigate,
       refreshAll,
     }),
-    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, health, tokens, fees, tipBlock, indexerOk, route, navigate, refreshAll],
+    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, health, tokens, fees, fee, tipBlock, indexerOk, route, navigate, refreshAll],
   );
 
   let page;

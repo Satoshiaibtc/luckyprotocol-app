@@ -3,8 +3,6 @@
 export const MEMPOOL_TX_URL = "https://mempool.space/tx/";
 export const MEMPOOL_BLOCK_URL = "https://mempool.space/block/";
 export const MEMPOOL_ADDR_URL = "https://mempool.space/address/";
-export const UNISAT_INSTALL_URL = "https://unisat.io";
-export const UNISAT_DOWNLOAD_URL = "https://unisat.io/download";
 
 export function fmtInt(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";

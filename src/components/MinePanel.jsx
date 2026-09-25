@@ -2,12 +2,15 @@ import { useCallback, useMemo } from "react";
 import { useApp } from "../context.js";
 import { useMine } from "../hooks/useMine.js";
 import { estimateMineFeeSats } from "../lib/psbt.js";
+import { missingFeeHint } from "../lib/feechoice.js";
 import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS, ACTIVATION_HEIGHT } from "../lib/payloads.js";
 import { fmtInt, fmtTime, txUrl, shortTxid } from "../lib/format.js";
 import { ConnectPrompt } from "./TxProgress.jsx";
 import TipReadout from "./TipReadout.jsx";
 import EVReadout from "./EVReadout.jsx";
 import HashReveal from "./HashReveal.jsx";
+import FeeSelector from "./FeeSelector.jsx";
+import UtxoSafetyNotice from "./UtxoSafetyNotice.jsx";
 import Led from "./hud/Led.jsx";
 import RingGauge from "./hud/RingGauge.jsx";
 
@@ -54,7 +57,7 @@ function litCount(mine) {
  * pending→confirmed state line with indexer reconcile.
  */
 export default function MinePanel({ ticker, tokenInfo, onSettled }) {
-  const { wallet, fees, indexerOk, tipBlock, refreshAll, health } = useApp();
+  const { wallet, fee, indexerOk, tipBlock, refreshAll, health } = useApp();
   // Before the activation height the indexer ignores every protocol tx, so a
   // MINE would only burn fees — lock the button and say when it opens.
   const tipNow = health.data?.tip_height ?? null;
@@ -67,14 +70,14 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     wallet,
     ticker,
     tokenInfo,
-    feesData: fees.data,
+    feeRateSatVb: fee.satVb,
     onSettled: settled,
   });
 
   const minted = tokenInfo?.minted ?? 0;
   const supply = tokenInfo?.supply ?? 0;
   const exhausted = !!tokenInfo && minted >= supply;
-  const feeRate = fees.data?.halfHourFee ?? null;
+  const feeRate = fee.satVb;
   const feeEstimate = useMemo(() => {
     if (!feeRate || !tokenInfo) return null;
     try {
@@ -85,13 +88,15 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   }, [feeRate, tokenInfo, wallet.address, ticker]);
 
   const connected = wallet.status === "connected";
-  const canMine = connected && indexerOk && !busy && !!tokenInfo && !exhausted && !preActivation;
+  const canMine = connected && indexerOk && !busy && !!tokenInfo && !exhausted && !preActivation && !!feeRate;
   const lit = litCount(mine);
 
   return (
     <div className="action-body">
       <TipReadout tipBlock={tipBlock} ticker={ticker} />
       <EVReadout size="md" ticker={ticker} />
+
+      <FeeSelector fee={fee} disabled={busy} />
 
       <div className="fee-row">
         <span>
@@ -111,6 +116,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
 
       {!connected && <ConnectPrompt action="mine" />}
       {connected && wallet.error && <div className="notice">{wallet.error}</div>}
+      <UtxoSafetyNotice />
       {exhausted && <div className="notice">{ticker} supply is fully minted. New mines credit 0.</div>}
       {preActivation && (
         <div className="notice">
@@ -139,12 +145,12 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
         })}
       </div>
 
-      <StatusLine mine={mine} ticker={ticker} wallet={wallet} onReset={resetMine} indexerOk={indexerOk} />
+      <StatusLine mine={mine} ticker={ticker} wallet={wallet} onReset={resetMine} indexerOk={indexerOk} fee={fee} feeRate={feeRate} />
     </div>
   );
 }
 
-function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
+function StatusLine({ mine, ticker, wallet, onReset, indexerOk, fee, feeRate }) {
   let led = "idle";
   let text;
   let detail = null;
@@ -165,11 +171,12 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
       break;
     case "signing":
       led = "busy";
-      text = "Awaiting signature — confirm in the UniSat popup.";
+      text = `Awaiting signature — confirm in ${wallet.providerName || "your wallet"}.`;
       detail = (
         <>
           {mine.inputCount} input{mine.inputCount === 1 ? "" : "s"} · network fee <span className="mono">{fmtInt(mine.feeSats)} sats</span>
-          {mine.utxoSource === "indexer" ? " · inputs from indexer (UniSat UTXO API unavailable)" : ""}
+          {mine.feeRateSatVb ? ` @ ${mine.feeRateSatVb} sat/vB` : ""}
+          {mine.utxoSource === "indexer" ? " · inputs from indexer (no wallet UTXO API)" : ""}
         </>
       );
       break;
@@ -242,8 +249,9 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk }) {
       );
       break;
     default:
-      if (wallet.status !== "connected") text = "Connect UniSat to mine.";
+      if (wallet.status !== "connected") text = "Connect a wallet to mine.";
       else if (!indexerOk) text = "Indexer offline — mining paused until it is reachable.";
+      else if (!feeRate) text = missingFeeHint(fee.choice, feeRate, "mine");
       else text = "Ready. Fee inputs are selected from spendable BTC only — dust and token-bearing outputs are never spent.";
   }
 

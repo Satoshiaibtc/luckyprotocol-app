@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
-import * as unisat from "../lib/unisat.js";
+import * as wallet from "../lib/wallet.js";
 import { useTxStatus } from "../hooks/useTxStatus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { buildDeployPsbt, estimateDeployFeeSats } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
+import { missingFeeHint } from "../lib/feechoice.js";
 import { ACTIVATION_HEIGHT, DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
 import { BUCKETS, EXPECTED_YIELD } from "../lib/yield.js";
 import { fmtDec, fmtInt, fmtSats } from "../lib/format.js";
 import TokenCard from "../components/TokenCard.jsx";
 import TxProgress, { ConnectPrompt } from "../components/TxProgress.jsx";
+import FeeSelector from "../components/FeeSelector.jsx";
+import UtxoSafetyNotice from "../components/UtxoSafetyNotice.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
 
@@ -19,8 +22,8 @@ const IDLE = { phase: "idle" };
 const AVAIL_LED = { idle: "idle", checking: "busy", free: "ok", taken: "err", error: "err" };
 
 export default function CreatePage({ params, navigate }) {
-  const { wallet, address, pubkeyHex, fees, indexerOk, health, refreshAll } = useApp();
-  const connected = wallet.status === "connected";
+  const { wallet: walletState, address, pubkeyHex, fee, indexerOk, health, refreshAll } = useApp();
+  const connected = walletState.status === "connected";
   // A DEPLOY below the activation height is ignored by the indexer (fees lost).
   const tipNow = health.data?.tip_height ?? null;
   const preActivation = tipNow !== null && tipNow < ACTIVATION_HEIGHT;
@@ -50,7 +53,7 @@ export default function CreatePage({ params, navigate }) {
     };
   }, [ticker, valid]);
 
-  const feeRate = fees.data?.halfHourFee ?? null;
+  const feeRate = fee.satVb;
   const feeEstimate = useMemo(() => {
     if (!feeRate || !valid) return null;
     try {
@@ -84,11 +87,10 @@ export default function CreatePage({ params, navigate }) {
     const t = ticker;
     setFlow({ phase: "building", ticker: t });
     try {
-      const [feeInfo, utxoRes, tokenRows] = await Promise.all([
-        fees.data ? Promise.resolve(fees.data) : indexer.fees(),
-        unisat.getBitcoinUtxos(address),
-        indexer.tokenUtxos(address),
-      ]);
+      if (!Number.isInteger(feeRate) || feeRate < 1) {
+        throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
+      }
+      const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address), indexer.tokenUtxos(address)]);
       // A DEPLOY funded with a token UTXO burns those tokens (§4.2) — the
       // §4 filter is applied here exactly as for MINE.
       const built = buildDeployPsbt({
@@ -96,13 +98,19 @@ export default function CreatePage({ params, navigate }) {
         pubkeyHex,
         utxos: utxoRes.utxos,
         tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout }))),
-        feeRateSatVb: feeInfo.halfHourFee,
+        feeRateSatVb: feeRate,
         ticker: t,
       });
-      setFlow({ phase: "signing", ticker: t, feeSats: built.feeSats, detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"}` });
-      const signed = await unisat.signPsbt(built.psbtHex, built.inputIndexes, address);
+      setFlow({
+        phase: "signing",
+        ticker: t,
+        feeSats: built.feeSats,
+        feeRateSatVb: built.feeRateSatVb,
+        detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"}${utxoRes.source === "indexer" ? " · inputs from indexer" : ""}`,
+      });
+      const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
       setFlow((f) => ({ ...f, phase: "broadcasting" }));
-      const txid = await unisat.broadcastSignedPsbt(signed);
+      const txid = await wallet.broadcastSignedPsbt(signed);
       setFlow((f) => ({ ...f, phase: "pending", txid }));
     } catch (e) {
       setFlow((f) => ({ ...f, phase: "error", error: friendlyError(e) }));
@@ -193,6 +201,9 @@ export default function CreatePage({ params, navigate }) {
             </div>
           </dl>
 
+          <FeeSelector fee={fee} disabled={busy} />
+          <UtxoSafetyNotice />
+
           {preActivation && (
             <div className="notice">
               The protocol activates at block #{fmtInt(ACTIVATION_HEIGHT)} — {fmtInt(ACTIVATION_HEIGHT - tipNow)} blocks from now. Token creation
@@ -202,7 +213,7 @@ export default function CreatePage({ params, navigate }) {
           {!connected ? (
             <ConnectPrompt action="create a token" />
           ) : (
-            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.state !== "free" || busy || !indexerOk || preActivation || flow.phase === "confirmed"}>
+            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.state !== "free" || busy || !indexerOk || preActivation || !feeRate || flow.phase === "confirmed"}>
               {flow.phase === "confirmed" ? `Created ${flow.ticker}` : busy ? "Working…" : `Create ${valid ? ticker : "token"}`}
             </button>
           )}
@@ -210,8 +221,10 @@ export default function CreatePage({ params, navigate }) {
             flow={flow}
             status={status}
             onReset={() => setFlow(IDLE)}
+            idleText={connected ? missingFeeHint(fee.choice, feeRate, "deploy") || undefined : undefined}
             labels={{
               building: "Building the DEPLOY — fee inputs never include token-bearing UTXOs.",
+              signing: `Awaiting signature — confirm in ${walletState.providerName || "your wallet"}.`,
               pending: "DEPLOY broadcast. Pending confirmation — checking every 15 s.",
               confirmed: `${flow.ticker} is deployed. Opening its page…`,
             }}

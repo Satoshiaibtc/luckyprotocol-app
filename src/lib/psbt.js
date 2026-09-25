@@ -93,7 +93,7 @@ export function decodeAddress(address) {
   if (decoded.type !== "wpkh" && decoded.type !== "tr") {
     throw new Error(
       `unsupported address type "${decoded.type}" — LuckyProtocol supports Native SegWit (bc1q) ` +
-      `and Taproot (bc1p) only; switch the address type in UniSat`,
+      `and Taproot (bc1p) only; switch the address type in your wallet`,
     );
   }
   return { type: decoded.type, script: btc.OutScript.encode(decoded) };

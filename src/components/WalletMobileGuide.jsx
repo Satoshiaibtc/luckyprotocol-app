@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { UNISAT_DOWNLOAD_URL } from "../lib/format.js";
+import { PROVIDER_META } from "../lib/walletShapes.js";
 
 /** Current page URL (hash included, so the app's browser lands on this page). */
 function siteUrl() {
@@ -36,11 +36,12 @@ async function copyText(text) {
 }
 
 /**
- * Shown on phones when no `window.unisat` provider exists: mobile browsers
- * cannot run the extension, so the way in is the UniSat app's built-in
- * browser. `action` = what connecting unlocks ("mine", "create a token", …).
+ * Shown on phones when no provider is injected: mobile browsers cannot run
+ * an extension, so the way in is a wallet app's built-in browser (UniSat
+ * app → Discover; OKX Wallet app → DApp browser). `action` = what
+ * connecting unlocks ("mine", "create a token", …).
  */
-export default function UniSatMobileGuide({ action = "continue", extra = null }) {
+export default function WalletMobileGuide({ action = "continue", extra = null }) {
   const [copied, setCopied] = useState(null); // null | "ok" | "fail"
   useEffect(() => {
     if (copied === null) return undefined;
@@ -53,17 +54,20 @@ export default function UniSatMobileGuide({ action = "continue", extra = null })
   };
 
   return (
-    <div className="cta unisat-guide">
+    <div className="cta wallet-guide">
       <div>
-        <strong>No UniSat extension on phones.</strong> To {action}, open this site inside the UniSat mobile app: in the app, tap{" "}
-        <strong>Discover</strong>, paste the site URL into its built-in browser, then connect. LuckyProtocol never holds keys.
+        <strong>No wallet extension on phones.</strong> To {action}, open this site inside the UniSat app or the OKX Wallet app (Discover / DApp browser),
+        then connect. LuckyProtocol never holds keys.
       </div>
       <div className="row">
         <button className="btn btn-primary btn-sm" type="button" onClick={onCopy} aria-live="polite">
           {copied === "ok" ? "Copied" : copied === "fail" ? "Copy failed — long-press the address bar" : "Copy site URL"}
         </button>
-        <a className="btn btn-sm" href={UNISAT_DOWNLOAD_URL} target="_blank" rel="noopener noreferrer">
+        <a className="btn btn-sm" href={PROVIDER_META.unisat.appUrl} target="_blank" rel="noopener noreferrer">
           Get the UniSat app
+        </a>
+        <a className="btn btn-sm" href={PROVIDER_META.okx.appUrl} target="_blank" rel="noopener noreferrer">
+          Get the OKX Wallet app
         </a>
         {extra}
       </div>

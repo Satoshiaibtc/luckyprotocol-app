@@ -1,7 +1,8 @@
-import { fmtInt, txUrl, shortTxid, UNISAT_INSTALL_URL } from "../lib/format.js";
-import { isMobileBrowser } from "../lib/unisat.js";
+import { fmtInt, txUrl, shortTxid } from "../lib/format.js";
+import { isMobileBrowser } from "../lib/wallet.js";
+import { PROVIDER_IDS, PROVIDER_META } from "../lib/walletShapes.js";
 import { useApp } from "../context.js";
-import UniSatMobileGuide from "./UniSatMobileGuide.jsx";
+import WalletMobileGuide from "./WalletMobileGuide.jsx";
 
 /**
  * One status line for every sign-and-broadcast flow (buy / sell / split /
@@ -31,10 +32,11 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
       break;
     case "signing":
       cls += " s-busy";
-      text = labels.signing || "Awaiting signature — confirm in the UniSat popup.";
+      text = labels.signing || "Awaiting signature — confirm in your wallet.";
       detail = flow.feeSats != null ? (
         <>
           network fee <span className="mono">{fmtInt(flow.feeSats)} sats</span>
+          {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}
           {flow.detail ? ` · ${flow.detail}` : ""}
         </>
       ) : flow.detail || null;
@@ -94,15 +96,45 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
   );
 }
 
-/** "Connect UniSat to …" block with the install / simulated-wallet affordances. */
+/**
+ * "Install …" links for every provider that is not injected (desktop), or
+ * one "Connect <name>" / two provider buttons when they are. Shared by the
+ * top bar and the ConnectPrompt.
+ */
+export function ProviderButtons({ wallet, onConnect, size = "btn-sm", className = "" }) {
+  const present = (wallet.providers || []).filter((p) => p.present);
+  const busy = wallet.status === "connecting" || wallet.status === "detecting";
+  if (present.length === 0) {
+    return PROVIDER_IDS.map((id) => (
+      <a key={id} className={`btn btn-primary ${size} ${className}`.trim()} href={PROVIDER_META[id].installUrl} target="_blank" rel="noopener noreferrer">
+        Install {PROVIDER_META[id].name}
+      </a>
+    ));
+  }
+  if (present.length === 1) {
+    const p = present[0];
+    return (
+      <button className={`btn btn-primary ${size} ${className}`.trim()} type="button" onClick={() => onConnect(p.id)} disabled={busy}>
+        {wallet.status === "connecting" ? "Connecting…" : `Connect ${p.name}`}
+      </button>
+    );
+  }
+  return present.map((p) => (
+    <button key={p.id} className={`btn btn-primary ${size} ${className}`.trim()} type="button" onClick={() => onConnect(p.id)} disabled={busy}>
+      {p.name}
+    </button>
+  ));
+}
+
+/** "Connect a wallet to …" block with the install / simulated-wallet affordances. */
 export function ConnectPrompt({ action = "continue" }) {
   const { wallet, mock, connect, useMock } = useApp();
-  // No provider on a phone: the extension link is useless there — point at the
-  // UniSat app's built-in browser instead (simulated wallet stays in mock mode).
+  // No provider on a phone: the extension links are useless there — point at
+  // the wallet apps' built-in browsers instead (simulated wallet stays in mock mode).
   if (wallet.status === "absent" && isMobileBrowser()) {
     return (
       <>
-        <UniSatMobileGuide
+        <WalletMobileGuide
           action={action}
           extra={
             mock ? (
@@ -116,23 +148,18 @@ export function ConnectPrompt({ action = "continue" }) {
       </>
     );
   }
+  const present = (wallet.providers || []).filter((p) => p.present);
   return (
     <div className="cta">
       <div>
         {wallet.status === "absent"
-          ? `The UniSat browser extension is required to ${action}. LuckyProtocol never holds keys.`
-          : `Connect UniSat to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`}
+          ? `A Bitcoin wallet extension (UniSat or OKX Wallet) is required to ${action}. LuckyProtocol never holds keys.`
+          : present.length > 1
+            ? `Choose a wallet to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`
+            : `Connect ${present[0]?.name || "a wallet"} to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`}
       </div>
       <div className="row">
-        {wallet.status === "absent" ? (
-          <a className="btn btn-primary btn-sm" href={UNISAT_INSTALL_URL} target="_blank" rel="noopener noreferrer">
-            Install UniSat
-          </a>
-        ) : (
-          <button className="btn btn-primary btn-sm" type="button" onClick={connect} disabled={wallet.status === "connecting" || wallet.status === "detecting"}>
-            {wallet.status === "connecting" ? "Connecting…" : "Connect UniSat"}
-          </button>
-        )}
+        <ProviderButtons wallet={wallet} onConnect={connect} />
         {mock && (
           <button className="btn btn-sm" type="button" onClick={useMock}>
             Use simulated wallet

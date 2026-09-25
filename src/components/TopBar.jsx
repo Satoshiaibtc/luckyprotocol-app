@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { useApp } from "../context.js";
-import { blockUrl, fmtBtc, fmtInt, shortAddr, UNISAT_INSTALL_URL } from "../lib/format.js";
+import { blockUrl, fmtBtc, fmtInt, shortAddr } from "../lib/format.js";
+import { chipLabel } from "../lib/walletShapes.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import { bucketOfHash, yieldDigit } from "../lib/yield.js";
 import Led from "./hud/Led.jsx";
 import DigitChip from "./DigitChip.jsx";
+import { ProviderButtons } from "./TxProgress.jsx";
 
 const NAV = [
   { name: "board", href: "#/", label: "Board" },
@@ -135,12 +137,13 @@ export default function TopBar() {
 }
 
 function WalletControl({ wallet, mock, mobile, onConnect, onDisconnect, onUseMock }) {
+  const present = (wallet.providers || []).filter((p) => p.present);
   switch (wallet.status) {
     case "detecting":
-      return <span className="pill">{mobile ? "wallet…" : "detecting UniSat…"}</span>;
+      return <span className="pill">{mobile ? "wallet…" : "detecting wallets…"}</span>;
     case "absent":
       if (mobile) {
-        // No extension on phones: the portfolio page carries the UniSat-app guidance
+        // No extension on phones: the portfolio page carries the wallet-app guidance
         // (and the simulated-wallet button in mock mode).
         return (
           <a className="btn btn-primary btn-sm" href="#/me">
@@ -150,9 +153,7 @@ function WalletControl({ wallet, mock, mobile, onConnect, onDisconnect, onUseMoc
       }
       return (
         <div className="wallet">
-          <a className="btn btn-primary btn-sm" href={UNISAT_INSTALL_URL} target="_blank" rel="noopener noreferrer">
-            Install UniSat
-          </a>
+          <ProviderButtons wallet={wallet} onConnect={onConnect} />
           {mock && (
             <button className="btn btn-sm" onClick={onUseMock} type="button">
               Use simulated wallet
@@ -166,19 +167,20 @@ function WalletControl({ wallet, mock, mobile, onConnect, onDisconnect, onUseMoc
           Connecting…
         </button>
       );
-    case "connected":
+    case "connected": {
+      const title = `${wallet.providerName || "Wallet"} · ${wallet.address}`;
       if (mobile) {
         return (
-          <a className="wallet-addr" href="#/me" title={wallet.address} aria-label={`Wallet ${wallet.address} — open portfolio`}>
+          <a className="wallet-addr" href="#/me" title={title} aria-label={`${wallet.providerName || "Wallet"} ${wallet.address} — open portfolio`}>
             <Led state="ok" />
-            <span>{shortAddr(wallet.address, 4, 3)}</span>
+            <span>{chipLabel(wallet.provider, shortAddr(wallet.address, 4, 3))}</span>
           </a>
         );
       }
       return (
         <div className="wallet">
-          <a className="wallet-addr" href="#/me" title={wallet.address}>
-            <span>{shortAddr(wallet.address, 5, 4)}</span>
+          <a className="wallet-addr" href="#/me" title={title}>
+            <span>{chipLabel(wallet.provider, shortAddr(wallet.address, 5, 4))}</span>
             <span className="bal">{wallet.balance !== null ? `${fmtBtc(wallet.balance)} BTC` : "…"}</span>
           </a>
           <button className="btn btn-ghost btn-sm" onClick={onDisconnect} type="button" aria-label="Disconnect wallet">
@@ -186,19 +188,23 @@ function WalletControl({ wallet, mock, mobile, onConnect, onDisconnect, onUseMoc
           </button>
         </div>
       );
+    }
     default:
       if (mobile) {
-        return (
-          <button className="btn btn-primary btn-sm" onClick={onConnect} type="button">
+        // One provider injected → connect it directly; two → the portfolio page offers both.
+        return present.length === 1 ? (
+          <button className="btn btn-primary btn-sm" onClick={() => onConnect(present[0].id)} type="button">
             Connect
           </button>
+        ) : (
+          <a className="btn btn-primary btn-sm" href="#/me">
+            Connect
+          </a>
         );
       }
       return (
         <div className="wallet">
-          <button className="btn btn-primary btn-sm" onClick={onConnect} type="button">
-            Connect UniSat
-          </button>
+          <ProviderButtons wallet={wallet} onConnect={onConnect} />
           {mock && (
             <button className="btn btn-sm" onClick={onUseMock} type="button">
               Simulated wallet

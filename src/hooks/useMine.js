@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
-import * as unisat from "../lib/unisat.js";
+import * as wallet from "../lib/wallet.js";
 import { buildMinePsbt } from "../lib/psbt.js";
 import { mineYield } from "../lib/yield.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
@@ -15,58 +15,60 @@ export const MINE_BUSY = new Set(["building", "signing", "broadcasting", "pendin
  * The MINE state machine:
  *   idle → building → signing → broadcasting → pending → confirmed (+ reconcile with /mines/by-txid)
  *                                                        ↘ error
- * `wallet` is the connected wallet ({ address, pubkeyHex } when status ==
- * "connected"); `feesData` is the last /fees read (fetched fresh if absent);
- * `onSettled` runs after confirmation and again after reconcile so callers
- * refresh balances / token stats / feeds.
+ * `walletState` is the connected wallet ({ address, pubkeyHex } when status ==
+ * "connected"); `feeRateSatVb` is the user's fee choice (see useFeeRate —
+ * null when a preset was chosen but /fees is unavailable, which refuses to
+ * build); `onSettled` runs after confirmation and again after reconcile so
+ * callers refresh balances / token stats / feeds.
  */
-export function useMine({ wallet, ticker, tokenInfo, feesData, onSettled }) {
+export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, onSettled }) {
   const [mine, setMine] = useState(IDLE_MINE);
   const settledRef = useRef(onSettled);
   settledRef.current = onSettled;
 
   // A wallet change or disconnect abandons an in-flight flow's UI state.
-  const address = wallet.status === "connected" ? wallet.address : null;
+  const address = walletState.status === "connected" ? walletState.address : null;
   useEffect(() => {
     setMine(IDLE_MINE);
   }, [address]);
 
   const startMine = useCallback(async () => {
-    if (wallet.status !== "connected" || !tokenInfo) return;
-    const { address: addr, pubkeyHex } = wallet;
+    if (walletState.status !== "connected" || !tokenInfo) return;
+    const { address: addr, pubkeyHex } = walletState;
     setMine({ phase: "building", ticker });
     try {
-      const [feeInfo, utxoRes, tokenRows] = await Promise.all([
-        feesData ? Promise.resolve(feesData) : indexer.fees(),
-        unisat.getBitcoinUtxos(addr),
-        indexer.tokenUtxos(addr),
-      ]);
+      if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) {
+        throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
+      }
+      const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr), indexer.tokenUtxos(addr)]);
       const tokenOutpoints = withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })));
       const built = buildMinePsbt({
         address: addr,
         pubkeyHex,
         utxos: utxoRes.utxos,
         tokenOutpoints,
-        feeRateSatVb: feeInfo.halfHourFee,
+        feeRateSatVb,
         ticker,
       });
       setMine({
         phase: "signing",
         ticker,
         feeSats: built.feeSats,
+        feeRateSatVb: built.feeRateSatVb,
         inputCount: built.inputIndexes.length,
         utxoSource: utxoRes.source,
+        assetSafe: utxoRes.assetSafe,
       });
 
-      const signed = await unisat.signPsbt(built.psbtHex, built.inputIndexes, addr);
+      const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: addr });
       setMine((m) => ({ ...m, phase: "broadcasting" }));
-      const txid = await unisat.broadcastSignedPsbt(signed);
+      const txid = await wallet.broadcastSignedPsbt(signed);
       addPendingTokenOutpoints([{ txid, vout: 0 }]);
       setMine((m) => ({ ...m, phase: "pending", txid, broadcastAt: Date.now() }));
     } catch (e) {
       setMine((m) => ({ ...m, phase: "error", error: friendlyError(e) }));
     }
-  }, [wallet, tokenInfo, ticker, feesData]);
+  }, [walletState, tokenInfo, ticker, feeRateSatVb]);
 
   const resetMine = useCallback(() => setMine(IDLE_MINE), []);
 
