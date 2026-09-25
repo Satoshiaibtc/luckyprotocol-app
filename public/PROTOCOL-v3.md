@@ -87,24 +87,28 @@ must never drop it as sub-dust.
 ```
 yield(block_hash) :=
   let d = last hex char of lowercase(block_hash)
-  d == 'f'        → 1000
-  d in 'a'..='e'  → 500
-  d in '0'..='9'  → 100
+  d == 'f'        → 1000   (1 of 16)
+  d in 'a'..='e'  → 500    (5 of 16)
+  d in '5'..='9'  → 200    (5 of 16)
+  d in '0'..='4'  → 100    (5 of 16)
 ```
 
 `block_hash` is the hash of the block that **confirms the MINE tx**.
 Credit = `min(yield, remaining_supply)`; when remaining supply is 0 the
 MINE records `cap_exhausted:true` and credits 0.
 
-Expected yield per MINE = (1000 + 5·500 + 10·100) / 16 = **281.25**;
-21,000,000 / 281.25 ≈ 74,700 MINEs to exhaust a ticker.
+Expected yield per MINE = (1000 + 5·500 + 5·200 + 5·100) / 16 = **312.5**;
+21,000,000 / 312.5 = **67,200** MINEs exhaust a ticker exactly. Every tier and the
+supply are multiples of 100, so the MINE that crosses the cap is credited a
+multiple of 100 (`min(tier, remaining)`); later MINEs in that block credit 0.
 
 Golden vectors (shared byte-identical by indexer and web; both test
 suites assert them):
 
 | last hex char | yield |
 |---|---|
-| `0` `5` `9` | 100 |
+| `0` `4` | 100 |
+| `5` `9` | 200 |
 | `a` `e` | 500 |
 | `f` | 1000 |
 | `F` (uppercase input) | 1000 |
