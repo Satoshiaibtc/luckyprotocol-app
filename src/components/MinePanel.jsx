@@ -59,9 +59,11 @@ function litCount(mine) {
 export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   const { wallet, fee, indexerOk, tipBlock, refreshAll, health } = useApp();
   // Before the activation height the indexer ignores every protocol tx, so a
-  // MINE would only burn fees — lock the button and say when it opens.
+  // MINE would only burn fees — lock the button and say when it opens. An
+  // unknown tip counts as pre-activation (fail closed, audit L-12).
   const tipNow = health.data?.tip_height ?? null;
-  const preActivation = tipNow !== null && tipNow < ACTIVATION_HEIGHT;
+  const tipUnknown = tipNow === null;
+  const preActivation = tipUnknown || tipNow < ACTIVATION_HEIGHT;
   const settled = useCallback(() => {
     refreshAll();
     onSettled?.();
@@ -120,8 +122,9 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
       {exhausted && <div className="notice">{ticker} supply is fully minted. New mines credit 0.</div>}
       {preActivation && (
         <div className="notice">
-          The protocol activates at block #{fmtInt(ACTIVATION_HEIGHT)} — {fmtInt(ACTIVATION_HEIGHT - tipNow)} blocks from now. Mining opens then; a
-          transaction sent earlier is ignored and only costs fees.
+          {tipUnknown
+            ? `The indexer has not reported the chain tip yet, so it cannot be confirmed that block #${fmtInt(ACTIVATION_HEIGHT)} has been reached. Mining stays locked until it does — a transaction sent before activation is ignored and only costs fees.`
+            : `The protocol activates at block #${fmtInt(ACTIVATION_HEIGHT)} — ${fmtInt(ACTIVATION_HEIGHT - tipNow)} blocks from now. Mining opens then; a transaction sent earlier is ignored and only costs fees.`}
         </div>
       )}
 

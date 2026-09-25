@@ -24,9 +24,12 @@ const AVAIL_LED = { idle: "idle", checking: "busy", free: "ok", taken: "err", er
 export default function CreatePage({ params, navigate }) {
   const { wallet: walletState, address, pubkeyHex, fee, indexerOk, health, refreshAll } = useApp();
   const connected = walletState.status === "connected";
-  // A DEPLOY below the activation height is ignored by the indexer (fees lost).
+  // A DEPLOY below the activation height is ignored by the indexer (fees
+  // lost). An UNKNOWN tip counts as pre-activation: the gate must fail
+  // closed, never open (audit L-12).
   const tipNow = health.data?.tip_height ?? null;
-  const preActivation = tipNow !== null && tipNow < ACTIVATION_HEIGHT;
+  const tipUnknown = tipNow === null;
+  const preActivation = tipUnknown || tipNow < ACTIVATION_HEIGHT;
   const [ticker, setTicker] = useState(() => String(params.ticker || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8));
   const valid = TICKER_RE.test(ticker);
 
@@ -211,9 +214,17 @@ export default function CreatePage({ params, navigate }) {
 
           {preActivation && (
             <div className="notice">
-              The protocol activates at block #{fmtInt(ACTIVATION_HEIGHT)} — {fmtInt(ACTIVATION_HEIGHT - tipNow)} blocks from now. Token creation
-              opens then; a transaction sent earlier is ignored and only costs fees.
+              {tipUnknown
+                ? `The indexer has not reported the chain tip yet, so it cannot be confirmed that block #${fmtInt(ACTIVATION_HEIGHT)} has been reached. Token creation stays locked until it does — a DEPLOY sent before activation is ignored and only costs fees.`
+                : `The protocol activates at block #${fmtInt(ACTIVATION_HEIGHT)} — ${fmtInt(ACTIVATION_HEIGHT - tipNow)} blocks from now. Token creation opens then; a transaction sent earlier is ignored and only costs fees.`}
             </div>
+          )}
+          {connected && !preActivation && valid && avail.state === "free" && (
+            <p className="fineprint">
+              First DEPLOY to confirm claims {ticker}. Availability is checked against confirmed state only: a competing DEPLOY for {ticker} that is already in the mempool,
+              or one that pays a higher fee and confirms first, takes the name — yours is then ignored, and the {fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee plus the network fee
+              are still paid.
+            </p>
           )}
           {!connected ? (
             <ConnectPrompt action="create a token" />
@@ -229,8 +240,8 @@ export default function CreatePage({ params, navigate }) {
             idleText={connected ? missingFeeHint(fee.choice, feeRate, "deploy") || undefined : undefined}
             labels={{
               building: "Building the DEPLOY — fee inputs never include token-bearing UTXOs.",
-              signing: `Awaiting signature — confirm in ${walletState.providerName || "your wallet"}.`,
-              pending: "DEPLOY broadcast. Pending confirmation — checking every 15 s.",
+              signing: `Awaiting signature — confirm in ${walletState.providerName || "your wallet"}. If a competing DEPLOY for ${flow.ticker || ticker} confirms first, this one is ignored and the ${fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee + network fee are still paid.`,
+              pending: `DEPLOY broadcast. Pending confirmation — checking every 15 s. A competing DEPLOY for ${flow.ticker || ticker} that confirms first takes the name; the fees are paid either way.`,
               confirmed: `${flow.ticker} is deployed. Opening its page…`,
             }}
           />
