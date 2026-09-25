@@ -6,6 +6,7 @@ import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import TokenAvatar from "../components/TokenAvatar.jsx";
 import { ConnectPrompt } from "../components/TxProgress.jsx";
+import UtxoSafetyNotice from "../components/UtxoSafetyNotice.jsx";
 import { MinesTable } from "../components/Tables.jsx";
 import ObservedMix from "../components/ObservedMix.jsx";
 import Panel from "../components/hud/Panel.jsx";
@@ -64,6 +65,8 @@ export default function PortfolioPage() {
           </div>
         </div>
       </header>
+
+      <UtxoSafetyNotice />
 
       <div className="portfolio-grid">
         <Panel title="Balances" led={ledFromPoll(balances)} aria-label="Balances">
