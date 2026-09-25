@@ -2,19 +2,11 @@ import { useMemo, useState } from "react";
 import { useApp } from "../context.js";
 import TokenCard from "../components/TokenCard.jsx";
 import BlockTape from "../components/BlockTape.jsx";
-import YieldSpectrum from "../components/YieldSpectrum.jsx";
-import TierTable from "../components/TierTable.jsx";
-import EVReadout from "../components/EVReadout.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
-import ObservedMix from "../components/ObservedMix.jsx";
-import * as indexer from "../lib/indexer.js";
-import { usePoll } from "../hooks/usePoll.js";
 import { fmtInt } from "../lib/format.js";
-import { yieldDigit } from "../lib/yield.js";
 import { DEPLOY_PROTOCOL_FEE_SATS, REQUIRED_TOKEN_SUPPLY } from "../lib/payloads.js";
 
-const MIX_LIMIT = 200;
 
 const SORTS = [
   { id: "active", label: "Active" },
@@ -38,11 +30,9 @@ export function sortTokens(items, sort) {
 }
 
 export default function Board({ notice }) {
-  const { tokens, health, tipBlock } = useApp();
+  const { tokens, health } = useApp();
   const [sort, setSort] = useState("active");
   const [q, setQ] = useState("");
-
-  const mixQ = usePoll((s) => indexer.minesFeed({ limit: MIX_LIMIT }, s), 30_000, []);
 
   const items = useMemo(() => tokens.data?.items || [], [tokens.data]);
   const shown = useMemo(() => {
@@ -78,16 +68,6 @@ export default function Board({ notice }) {
       </section>
 
       <BlockTape />
-
-      <Panel title="Yield model" led="ok" aria-label="Yield model">
-        <YieldSpectrum compact tipDigit={yieldDigit(tipBlock.data?.hash)} />
-        <TierTable compact />
-        <EVReadout size="md" />
-      </Panel>
-
-      <Panel title={`Observed mix · network · last ${MIX_LIMIT} mines`} led={ledFromPoll(mixQ)} aria-label="Observed mix">
-        <ObservedMix rows={mixQ.data?.items} loading={mixQ.loading} error={mixQ.error} meanLabel="Observed mean" />
-      </Panel>
 
       <div className="board-controls">
         <div className="chips" role="tablist" aria-label="Sort">
