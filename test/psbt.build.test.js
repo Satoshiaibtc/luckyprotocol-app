@@ -12,7 +12,9 @@ import { hex } from "@scure/base";
 import {
   buildMinePsbt,
   buildSendPsbt,
+  buildDeployPsbt,
   estimateMineFeeSats,
+  estimateDeployFeeSats,
   decodeAddress,
   extractRawTxHex,
 } from "../src/lib/psbt.js";
@@ -186,6 +188,36 @@ assert.throws(
 {
   const r = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
   assert.throws(() => extractRawTxHex(r.psbtHex), /not finalized|finalize|sign/i);
+}
+
+// ---- DEPLOY (§2.1): vout0 546 → self, vout1 5,460 → fee, vout2 OP_RETURN, vout3 change ------------
+{
+  const prevD = estimateDeployFeeSats({ address: p2trAddr, ticker: "NEWTKN", feeRateSatVb: 8 });
+  assert.ok(prevD.vsize > 150 && prevD.vsize < 250, `deploy preview vsize plausible: ${prevD.vsize}`);
+  for (const [label, address, pubkeyHex, expectTap] of [["p2tr", p2trAddr, P2TR_PUB, true], ["p2wpkh", p2wpkhAddr, P2WPKH_PUB, false]]) {
+    const r = buildDeployPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "NEWTKN" });
+    const { ins, outs } = parse(r.psbtHex);
+    assert.equal(outs.length, 4, `DEPLOY ${label}: 4 outputs`);
+    for (const inp of ins) {
+      assert.ok(inp.witnessUtxo.amount > 546n, `DEPLOY ${label}: dust input selected`);
+      assert.notEqual(hex.encode(inp.txid), T(3), `DEPLOY ${label}: token outpoint selected (would burn tokens)`);
+      if (expectTap) assert.equal(hex.encode(inp.tapInternalKey), XONLY);
+      else assert.equal(inp.tapInternalKey, undefined);
+    }
+    assert.equal(addrOf(outs[0].script), address, `DEPLOY ${label}: vout0 → deployer`);
+    assert.equal(outs[0].amount, 546n);
+    assert.equal(addrOf(outs[1].script), PROJECT_FEE_ADDRESS, `DEPLOY ${label}: vout1 → fee address`);
+    assert.equal(outs[1].amount, 5_460n, `DEPLOY ${label}: exact 5,460-sat protocol fee`);
+    assert.equal(outs[2].script[0], 0x6a);
+    assert.equal(payloadToString(outs[2].script.slice(2)), "LUCKYPROTOCOL|DEPLOY|NEWTKN");
+    assert.equal(addrOf(outs[3].script), address, `DEPLOY ${label}: change → self`);
+    assert.ok(outs[3].amount >= 546n);
+    const inSum = ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n);
+    const outSum = outs.reduce((s, o) => s + o.amount, 0n);
+    assert.equal(inSum - outSum, BigInt(r.feeSats), `DEPLOY ${label}: fee == inputs − outputs`);
+  }
+  assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "lucky" }), /A-Z 0-9/);
+  assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "TOOLONGTKN" }), /length/);
 }
 
 console.log("psbt build: all structural checks passed");

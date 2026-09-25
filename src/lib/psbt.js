@@ -1,8 +1,13 @@
-// Unsigned PSBT construction for LuckyProtocol MINE / SEND (spec §4 + §6).
+// Unsigned PSBT construction for LuckyProtocol DEPLOY / MINE / SEND (spec §4 + §6).
 //
 // The web app holds no keys. This module selects BTC inputs, lays out the
 // protocol outputs in the exact order the indexer expects, and returns an
 // UNSIGNED PSBT (hex) that the UniSat extension signs + finalizes.
+//
+// DEPLOY layout (§2.1): vout0 546 → self (deployer proof)
+//                       vout1 5,460 → PROJECT_FEE_ADDRESS
+//                       vout2 OP_RETURN  LUCKYPROTOCOL|DEPLOY|<TICKER>
+//                       vout3 change → self (omitted if < dust; folded into fee)
 //
 // MINE layout (§2.2):   vout0 546 → self (yield slot)
 //                       vout1 546 → PROJECT_FEE_ADDRESS
@@ -26,13 +31,15 @@ import { hex } from "@scure/base";
 import {
   DUST_SATS,
   PROJECT_FEE_ADDRESS,
+  DEPLOY_PROTOCOL_FEE_SATS,
   MINE_PROTOCOL_FEE_SATS,
   SEND_PROTOCOL_FEE_SATS,
+  buildDeployPayload,
   buildMinePayload,
   buildSendPayload,
 } from "./payloads.js";
 
-const NETWORK = btc.NETWORK; // mainnet
+export const NETWORK = btc.NETWORK; // mainnet
 
 /**
  * Hard safety cap on the fee rate a builder will accept. The rate comes from
@@ -44,7 +51,7 @@ const NETWORK = btc.NETWORK; // mainnet
  */
 export const MAX_FEE_RATE_SAT_VB = 1_000;
 
-function checkedFeeRate(feeRateSatVb) {
+export function checkedFeeRate(feeRateSatVb) {
   let satVb = Number(feeRateSatVb);
   if (!Number.isFinite(satVb) || satVb <= 0) satVb = 1;
   satVb = Math.max(1, satVb);
@@ -96,11 +103,11 @@ export function isP2tr(address) {
   return typeof address === "string" && address.startsWith("bc1p");
 }
 
-function outputVsize(address) {
+export function outputVsize(address) {
   return isP2tr(address) ? VSIZE_P2TR_OUTPUT : VSIZE_P2WPKH_OUTPUT;
 }
 
-function inputVsize(type) {
+export function inputVsize(type) {
   return type === "tr" ? VSIZE_P2TR_INPUT : VSIZE_P2WPKH_INPUT;
 }
 
@@ -186,7 +193,7 @@ export function estimateMineFeeSats({ address, ticker, feeRateSatVb, inputCount 
 
 // ---- coin selection ------------------------------------------------------------------------
 
-const outpointKey = (u) => `${u.txid}:${u.vout}`;
+export const outpointKey = (u) => `${u.txid}:${u.vout}`;
 
 /**
  * Apply the §4 builder obligation: drop every UTXO with value ≤ DUST_SATS
@@ -363,6 +370,47 @@ function buildUnsigned({
     estimatedVsize: Math.ceil(sel.vsize),
     feeRateSatVb: satVb,
   };
+}
+
+/**
+ * Build an unsigned DEPLOY PSBT (§2.1). The 5,460-sat protocol fee output
+ * is a consensus rule; vout0 is the deployer's proof output. DEPLOY has no
+ * token routing, so — like MINE — sub-dust change may fold into the fee.
+ * The §4 filter matters here more than anywhere: a DEPLOY funded with a
+ * token UTXO burns those tokens.
+ */
+export function buildDeployPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker }) {
+  const payload = buildDeployPayload(ticker);
+  return buildUnsigned({
+    address,
+    pubkeyHex,
+    utxos,
+    tokenOutpoints,
+    feeRateSatVb,
+    outputs: [
+      { address, value: DUST_SATS },                                    // vout0 deployer proof
+      { address: PROJECT_FEE_ADDRESS, value: DEPLOY_PROTOCOL_FEE_SATS }, // vout1 fee (5,460)
+    ],
+    opReturnData: payload,                                              // vout2
+    requireChange: false,                                               // vout3 optional
+  });
+}
+
+/**
+ * Display-only fee preview for the DEPLOY form (one input of the wallet's
+ * type + three fixed outputs + change). Clamps instead of throwing.
+ */
+export function estimateDeployFeeSats({ address, ticker, feeRateSatVb, inputCount = 1 }) {
+  const type = isP2tr(address) ? "tr" : "wpkh";
+  const payload = buildDeployPayload(ticker);
+  const vsize = estimateVsize({
+    inputCount,
+    inputType: type,
+    outputAddresses: [address, PROJECT_FEE_ADDRESS, address],
+    opReturnScriptLen: makeOpReturnScript(payload).length,
+  });
+  const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate) };
 }
 
 /**

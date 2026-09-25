@@ -1,4 +1,4 @@
-// UniSat wallet adapter (PROTOCOL-v3.md §6).
+// UniSat wallet adapter (PROTOCOL-v3.md §6 + §7).
 //
 // The app holds no keys. Everything key-related is delegated to the
 // `window.unisat` provider injected by the UniSat browser extension:
@@ -9,16 +9,23 @@
 //   switchNetwork(net)
 //   getBalance()          → { confirmed, unconfirmed, total } sats
 //   getBitcoinUtxos()     → asset-safe BTC UTXO list (feature-detected)
-//   signPsbt(hex, opts)   → signed (finalized) PSBT hex
+//   signPsbt(hex, opts)   → signed PSBT hex (finalized unless autoFinalized:false)
 //   pushPsbt(hex)         → txid
+//   pushTx(rawHex)        → txid
 //   on / removeListener   → 'accountsChanged' | 'networkChanged'
 //
+// Exact option objects used by the trading flows (§7):
+//   seller (listing):  { autoFinalized: false, toSignInputs: [{ index: 0, address, sighashTypes: [0x83] }] }
+//   buyer  (fill):     { autoFinalized: true,  toSignInputs: [{ index: i, address }, …] }  (i = 1..n)
+//
 // Mock mode (VITE_MOCK=1) without the extension installed can opt into a
-// simulated provider (`enableMockWallet`) so the whole MINE state machine
-// is demoable; it is never enabled automatically.
+// simulated provider (`enableMockWallet`) whose signPsbt REALLY signs with
+// the public-seed mock key, so listing → fill is exercised end-to-end; it
+// is never enabled automatically.
 
 import * as indexer from "./indexer.js";
-import { MOCK_WALLET } from "./mock.js";
+import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
+import { extractRawTxHex } from "./psbt.js";
 
 export const INSTALL_URL = "https://unisat.io";
 
@@ -88,12 +95,17 @@ function makeMockProvider() {
       return { confirmed, unconfirmed, total: confirmed + unconfirmed };
     },
     // Deliberately absent: getBitcoinUtxos — exercises the indexer fallback.
-    async signPsbt(psbtHex) {
+    async signPsbt(psbtHex, opts = {}) {
       await sleep(900); // stands in for the extension's approval popup
-      return psbtHex;
+      // Honors toSignInputs (index + sighashTypes) and autoFinalized exactly
+      // like the extension: signs with the mock key, finalizes only when asked.
+      return mockSignPsbt(psbtHex, opts);
     },
-    async pushPsbt() {
-      throw new Error("mock wallet cannot broadcast — use indexer.broadcast()");
+    async pushPsbt(psbtHex) {
+      return indexer.broadcast(extractRawTxHex(psbtHex));
+    },
+    async pushTx(rawHex) {
+      return indexer.broadcast(rawHex);
     },
     on(event, fn) {
       if (!listeners.has(event)) listeners.set(event, new Set());
@@ -158,6 +170,7 @@ export async function getBalance() {
 }
 
 const _TXID_RE = /^[0-9a-f]{64}$/i;
+const _HEX_RE = /^[0-9a-f]+$/i;
 
 function _normalizeUnisatUtxo(u) {
   if (!u || typeof u !== "object") return null;
@@ -198,17 +211,27 @@ export async function getBitcoinUtxos(address) {
 }
 
 /**
- * Sign every input in `inputIndexes` with `address` and finalize.
- * Returns the signed PSBT hex (finalized, ready for pushPsbt / extract).
+ * Sign every input in `inputIndexes` with `address`.
+ *
+ *   options.autoFinalized  (default true)  — false for a §7.1 listing, whose
+ *                                            lone input must stay un-finalized
+ *   options.sighashTypes   (default unset) — e.g. [0x83] for a listing; UniSat
+ *                                            refuses non-default sighashes
+ *                                            unless they are declared here
+ *
+ * Returns the signed PSBT hex.
  */
-export async function signPsbt(psbtHex, inputIndexes, address) {
+export async function signPsbt(psbtHex, inputIndexes, address, options = {}) {
   const p = need();
-  const opts = {
-    autoFinalized: true,
-    toSignInputs: inputIndexes.map((index) => ({ index, address })),
-  };
+  const { autoFinalized = true, sighashTypes } = options;
+  const toSignInputs = inputIndexes.map((index) => {
+    const row = { index, address };
+    if (Array.isArray(sighashTypes) && sighashTypes.length) row.sighashTypes = sighashTypes.slice();
+    return row;
+  });
+  const opts = { autoFinalized, toSignInputs };
   const signed = await p.signPsbt(psbtHex, opts);
-  if (typeof signed !== "string" || !/^[0-9a-f]+$/i.test(signed)) {
+  if (typeof signed !== "string" || !_HEX_RE.test(signed) || signed.length % 2 !== 0) {
     throw new Error("UniSat returned an unexpected signPsbt result");
   }
   return signed.toLowerCase();
@@ -219,6 +242,67 @@ export async function pushPsbt(signedPsbtHex) {
   const txid = String(await need().pushPsbt(signedPsbtHex) || "").toLowerCase();
   if (!_TXID_RE.test(txid)) throw new Error(`UniSat pushPsbt returned an unexpected value`);
   return txid;
+}
+
+/** Broadcast a raw signed tx via the extension (`unisat.pushTx`). Returns the txid. */
+export async function pushTx(rawHex) {
+  const p = need();
+  if (typeof p.pushTx !== "function") throw new Error("UniSat pushTx is not available in this extension version");
+  const res = await p.pushTx(typeof rawHex === "string" ? rawHex : { rawtx: rawHex });
+  const txid = String(res || "").toLowerCase();
+  if (!_TXID_RE.test(txid)) throw new Error(`UniSat pushTx returned an unexpected value`);
+  return txid;
+}
+
+function _msg(e) {
+  return String(e?.message || e || "unknown error");
+}
+
+/**
+ * Broadcast a finalized PSBT: UniSat `pushPsbt` first, then the indexer's
+ * `/broadcast` relay with the extracted raw tx. Throws with both reasons if
+ * both fail.
+ */
+export async function broadcastSignedPsbt(signedPsbtHex) {
+  try {
+    return await pushPsbt(signedPsbtHex);
+  } catch (pushErr) {
+    const raw = extractRawTxHex(signedPsbtHex);
+    try {
+      return await indexer.broadcast(raw);
+    } catch (bErr) {
+      throw new Error(`${_msg(pushErr)} · indexer relay: ${_msg(bErr)}`);
+    }
+  }
+}
+
+/**
+ * Broadcast a raw tx: UniSat `pushTx` first, then the indexer's `/broadcast`
+ * relay. A node rejection surfaces from BOTH paths, so the caller can detect
+ * a double-spend race (see isConflictError).
+ */
+export async function broadcastRawTx(rawHex) {
+  try {
+    return await pushTx(rawHex);
+  } catch (pushErr) {
+    try {
+      return await indexer.broadcast(rawHex);
+    } catch (bErr) {
+      const err = new Error(`${_msg(pushErr)} · indexer relay: ${_msg(bErr)}`);
+      err.conflict = isConflictError(pushErr) || isConflictError(bErr);
+      throw err;
+    }
+  }
+}
+
+/**
+ * True when a broadcast error reads like a double-spend / already-spent
+ * input rejection (the listed UTXO was filled or moved by someone else).
+ */
+export function isConflictError(e) {
+  if (e && e.conflict === true) return true;
+  const m = _msg(e);
+  return /missingorspent|missing.?inputs|mempool-conflict|txn-mempool-conflict|conflict|already.?spent|double.?spend|bad-txns-inputs|insufficient fee, rejecting replacement|replacement/i.test(m);
 }
 
 /**

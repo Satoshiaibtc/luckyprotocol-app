@@ -27,8 +27,14 @@
 //   GET  /block-info/:height        blockInfo
 //   GET  /fees                      fees
 //   POST /broadcast                 broadcast         (text/plain raw hex)
+//   POST /orders                    postOrder         (JSON, §7.4)
+//   GET  /orders?ticker&status…     orders            (psbt omitted)
+//   GET  /orders/:id                order             (incl. psbt)
+//   GET  /orders/by-address/:addr   ordersByAddress
+//   GET  /trades?ticker&limit…      trades
+//   GET  /trades/:addr              tradesByAddress
 
-import { mockGet, mockPostText } from "./mock.js";
+import { mockGet, mockPostText, mockPostJson } from "./mock.js";
 
 export const DEFAULT_INDEXER_URL = "http://127.0.0.1:8765";
 const MOCK = import.meta.env.VITE_MOCK === "1";
@@ -137,6 +143,37 @@ async function _httpPostText(path, body, signal, meta) {
   return text;
 }
 
+async function _httpPostJson(path, bodyObj, signal) {
+  if (MOCK) return mockPostJson(path, bodyObj);
+  const url = `${INDEXER_URL}${path}`;
+  const t = _timedSignal(signal);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyObj),
+      signal: t.signal,
+    });
+  } catch (e) {
+    if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
+    throw new Error(`Indexer unreachable: ${url} — ${e.message || e}`);
+  } finally {
+    t.done();
+  }
+  const text = (await res.text().catch(() => "")).trim();
+  if (!res.ok) {
+    const err = new Error(`${path} HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+    err.status = res.status;
+    throw err;
+  }
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`${path}: response is not JSON`);
+  }
+}
+
 const _is404 = (e) => e && (e.status === 404 || /HTTP 404/.test(String(e.message)));
 
 // ---- Response sanitization -----------------------------------------------------------
@@ -148,6 +185,11 @@ const _is404 = (e) => e && (e.status === 404 || /HTTP 404/.test(String(e.message
 const _TICKER_RE = /^[A-Z0-9]{1,8}$/;
 const _TXID_RE = /^[0-9a-f]{64}$/i;
 const _HASH_RE = /^[0-9a-f]{64}$/i;
+// Mainnet address shapes the app can display/link: bech32/bech32m (bc1…)
+// and legacy base58 (1…/3…). Anything else is dropped.
+const _ADDR_RE = /^(bc1[ac-hj-np-z02-9]{8,87}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})$/;
+const _ORDER_ID_RE = /^[0-9a-f]{64}:(0|[1-9][0-9]{0,6})$/i;
+const _HEX_RE = /^[0-9a-f]+$/i;
 const _MAX_TOKEN_AMT = 21_000_000;
 const _MAX_SATS = 21_000_000 * 100_000_000;
 
@@ -160,6 +202,20 @@ const _safeStr = (v, max) =>
   typeof v === "string" && v.length > 0 && v.length <= max ? v : null;
 
 const _safeHash = (v) => (_HASH_RE.test(String(v || "")) ? String(v).toLowerCase() : null);
+
+const _safeAddr = (v) => (_ADDR_RE.test(String(v || "")) ? String(v) : null);
+
+// Finite float ≥ 0 (unit prices). NaN / Infinity / negative → null.
+const _safeFloat = (v, max = 1e18) => {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= max ? n : null;
+};
+
+const _safeHex = (v, maxLen = 200_000) =>
+  typeof v === "string" && v.length > 0 && v.length <= maxLen && v.length % 2 === 0 && _HEX_RE.test(v)
+    ? v.toLowerCase()
+    : null;
 
 function _sanitizeBalances(raw) {
   const out = {};
@@ -225,6 +281,68 @@ function _sanitizeTransferRow(t) {
   return { ...t, txid: String(t.txid).toLowerCase(), block_height: height, amount };
 }
 
+// TradeView (§7.5). Chain-derived; every field is checked.
+function _sanitizeTradeRow(t) {
+  if (!t || typeof t !== "object") return null;
+  if (!_TXID_RE.test(String(t.txid || ""))) return null;
+  if (!_TICKER_RE.test(String(t.ticker || ""))) return null;
+  const height = _safeInt(t.block_height, 1e9);
+  const amount = _safeInt(t.amount, _MAX_TOKEN_AMT);
+  const price = _safeInt(t.price_sats, _MAX_SATS);
+  const seller = _safeAddr(t.seller);
+  const buyer = _safeAddr(t.buyer);
+  if (height === null || amount === null || amount < 1 || price === null || !seller || !buyer) return null;
+  const unit = _safeFloat(t.unit_price);
+  return {
+    txid: String(t.txid).toLowerCase(),
+    block_height: height,
+    block_hash: _safeHash(t.block_hash),
+    block_time: _safeInt(t.block_time, 1e12),
+    ticker: t.ticker,
+    amount,
+    price_sats: price,
+    unit_price: unit !== null ? unit : price / amount,
+    seller,
+    buyer,
+    order_id: _ORDER_ID_RE.test(String(t.order_id || "")) ? String(t.order_id).toLowerCase() : null,
+  };
+}
+
+// OrderView (§7.4). `psbt` is hex-only and only present on GET /orders/:id.
+const _ORDER_STATUS = new Set(["open", "filled", "cancelled"]);
+function _sanitizeOrderRow(o) {
+  if (!o || typeof o !== "object") return null;
+  if (!_ORDER_ID_RE.test(String(o.id || ""))) return null;
+  if (!_TICKER_RE.test(String(o.ticker || ""))) return null;
+  const amount = _safeInt(o.amount, _MAX_TOKEN_AMT);
+  const price = _safeInt(o.price_sats, _MAX_SATS);
+  const carrier = _safeInt(o.carrier_sats, _MAX_SATS);
+  const seller = _safeAddr(o.seller);
+  if (amount === null || amount < 1 || price === null || price < 546 || carrier === null || !seller) return null;
+  const status = _ORDER_STATUS.has(o.status) ? o.status : null;
+  if (!status) return null;
+  const unit = _safeFloat(o.unit_price);
+  const psbt = o.psbt !== undefined && o.psbt !== null ? _safeHex(o.psbt) : null;
+  const spentTxid = _TXID_RE.test(String(o.spent_txid || "")) ? String(o.spent_txid).toLowerCase() : null;
+  return {
+    id: String(o.id).toLowerCase(),
+    ticker: o.ticker,
+    amount,
+    price_sats: price,
+    unit_price: unit !== null ? unit : price / amount,
+    seller,
+    carrier_sats: carrier,
+    status,
+    created_at: _safeInt(o.created_at, 1e12),
+    updated_at: _safeInt(o.updated_at, 1e12),
+    spent_txid: spentTxid,
+    spent_block: _safeInt(o.spent_block, 1e9),
+    buyer: _safeAddr(o.buyer),
+    ...(psbt ? { psbt } : {}),
+    ...(o.replaced === true ? { replaced: true } : {}),
+  };
+}
+
 function _sanitizeTokenRow(t) {
   if (!t || typeof t !== "object") return null;
   if (!_TICKER_RE.test(String(t.ticker || ""))) return null;
@@ -235,6 +353,7 @@ function _sanitizeTokenRow(t) {
   if (supply === null || minted === null || block === null) return null;
   if (!_safeStr(t.deployer, 128)) return null;
   const holders = _safeInt(t.holders, 1e9);
+  const lastTrade = t.last_trade ? _sanitizeTradeRow(t.last_trade) : null;
   return {
     ticker: t.ticker,
     supply,
@@ -243,6 +362,13 @@ function _sanitizeTokenRow(t) {
     deploy_txid: String(t.deploy_txid).toLowerCase(),
     deploy_block: block,
     ...(holders !== null ? { holders } : {}),
+    // per-ticker stats (§5); missing/malformed → 0 / null, never NaN
+    mine_count: _safeInt(t.mine_count, 1e12) ?? 0,
+    trade_count: _safeInt(t.trade_count, 1e12) ?? 0,
+    volume_sats: _safeInt(t.volume_sats, _MAX_SATS) ?? 0,
+    open_orders: _safeInt(t.open_orders, 1e9) ?? 0,
+    floor_unit_price: _safeFloat(t.floor_unit_price),
+    last_trade: lastTrade,
   };
 }
 
@@ -284,8 +410,18 @@ function _pageQuery(opts = {}) {
   if (opts.limit != null) params.set("limit", String(opts.limit));
   if (opts.offset != null) params.set("offset", String(opts.offset));
   if (opts.ticker) params.set("ticker", String(opts.ticker));
+  if (opts.status) params.set("status", String(opts.status));
   const q = params.toString();
   return q ? `?${q}` : "";
+}
+
+function _page(env, maxTotal, sanitize) {
+  return {
+    total: _safeInt(env && env.total, maxTotal) ?? 0,
+    offset: _safeInt(env && env.offset, maxTotal) ?? 0,
+    limit: _safeInt(env && env.limit, 1e6) ?? 0,
+    items: ((env && env.items) || []).map(sanitize).filter(Boolean),
+  };
 }
 
 // ---- Read API — one wrapper per route -----------------------------------------------
@@ -436,8 +572,7 @@ export async function fees(signal) {
 
 /**
  * POST /broadcast — body = raw signed tx hex (text/plain) → txid text.
- * 400 + reason on node rejection. `meta` is only used by mock mode (to
- * attribute the simulated mine to the connected address).
+ * 400 + reason on node rejection. `meta` is only used by mock mode.
  */
 export async function broadcast(rawHex, meta, signal) {
   if (typeof rawHex !== "string" || !/^[0-9a-f]+$/i.test(rawHex) || rawHex.length % 2 !== 0) {
@@ -446,4 +581,61 @@ export async function broadcast(rawHex, meta, signal) {
   const txid = await _httpPostText("/broadcast", rawHex, signal, meta);
   if (!_TXID_RE.test(txid)) throw new Error(`broadcast: unexpected response "${String(txid).slice(0, 80)}"`);
   return txid.toLowerCase();
+}
+
+// ---- Trading (§7) --------------------------------------------------------------------
+
+/** GET /orders?ticker&status&limit&offset → `{ total, offset, limit, items: OrderView[] }` (psbt omitted) */
+export async function orders(opts = {}, signal) {
+  const env = await _httpGet(`/orders${_pageQuery(opts)}`, signal);
+  return _page(env, 1e9, _sanitizeOrderRow);
+}
+
+/** GET /orders/:id → OrderView incl. `psbt` | null (404). id = "txid:vout". */
+export async function order(id, signal) {
+  if (!_ORDER_ID_RE.test(String(id || ""))) throw new Error(`order: invalid id "${id}"`);
+  try {
+    const row = await _httpGet(`/orders/${encodeURIComponent(String(id).toLowerCase())}`, signal);
+    return _sanitizeOrderRow(row);
+  } catch (e) {
+    if (_is404(e)) return null;
+    throw e;
+  }
+}
+
+/** GET /orders/by-address/:addr → OrderView[] (every status, newest first, psbt omitted) */
+export async function ordersByAddress(address, signal) {
+  const env = await _httpGet(`/orders/by-address/${encodeURIComponent(address)}`, signal);
+  return ((env && env.orders) || []).map(_sanitizeOrderRow).filter(Boolean);
+}
+
+/**
+ * POST /orders — JSON `{ psbt, ticker, amount, price_sats }` → OrderView (201).
+ * 400 with a reason when the indexer rejects the listing, 409 when the
+ * outpoint is spent / has a pending spend.
+ */
+export async function postOrder({ psbt, ticker, amount, price_sats }, signal) {
+  const hexPsbt = _safeHex(psbt);
+  if (!hexPsbt) throw new Error("postOrder: psbt must be hex");
+  if (!_TICKER_RE.test(String(ticker || ""))) throw new Error("postOrder: invalid ticker");
+  const amt = _safeInt(amount, _MAX_TOKEN_AMT);
+  const price = _safeInt(price_sats, _MAX_SATS);
+  if (amt === null || amt < 1) throw new Error("postOrder: invalid amount");
+  if (price === null || price < 546) throw new Error("postOrder: price must be ≥ 546 sats");
+  const row = await _httpPostJson("/orders", { psbt: hexPsbt, ticker, amount: amt, price_sats: price }, signal);
+  const view = _sanitizeOrderRow(row);
+  if (!view) throw new Error("postOrder: indexer returned a malformed OrderView");
+  return view;
+}
+
+/** GET /trades?ticker&limit&offset → `{ total, offset, limit, items: TradeView[] }` newest first */
+export async function trades(opts = {}, signal) {
+  const env = await _httpGet(`/trades${_pageQuery(opts)}`, signal);
+  return _page(env, 1e12, _sanitizeTradeRow);
+}
+
+/** GET /trades/:addr → TradeView[] where addr is buyer or seller */
+export async function tradesByAddress(address, signal) {
+  const env = await _httpGet(`/trades/${encodeURIComponent(address)}`, signal);
+  return ((env && env.trades) || []).map(_sanitizeTradeRow).filter(Boolean);
 }

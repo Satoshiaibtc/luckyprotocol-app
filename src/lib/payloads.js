@@ -101,7 +101,9 @@ export function buildMinePayload(ticker) {
  * `LUCKYPROTOCOL|SEND|<TICKER>|<AMT>|<TO_OUT>|<CHANGE_OUT>` (§2.3).
  * `amount` is whole tokens (1 ≤ AMT ≤ 21,000,000). The residual input
  * pool routes to vout[CHANGE_OUT], so a builder must always emit that
- * output — see buildSendPsbt.
+ * output — see buildSendPsbt. `TO_OUT` and `CHANGE_OUT` MUST differ: the
+ * indexer's parser rejects equal indices, and a non-parsing payload turns
+ * the tx into a plain spend that strict-burns every token input.
  */
 export function buildSendPayload({ ticker, amount, toOutIdx, changeOutIdx }) {
   validateTicker(ticker);
@@ -116,11 +118,38 @@ export function buildSendPayload({ ticker, amount, toOutIdx, changeOutIdx }) {
   validateOutIdx("toOutIdx", toOutIdx);
   validateOutIdx("changeOutIdx", changeOutIdx);
   if (toOutIdx === changeOutIdx) {
-    throw new Error("SEND toOutIdx === changeOutIdx is ambiguous; use distinct indices");
+    throw new Error("SEND toOutIdx === changeOutIdx does not parse (§2.3) — the indexer would burn the input pool; use distinct indices");
   }
   return capPayload(
     asciiBytes(`${PROTOCOL_PREFIX}|SEND|${ticker}|${amt.toString()}|${toOutIdx}|${changeOutIdx}`),
   );
+}
+
+/**
+ * Parse an OP_RETURN payload string back into its fields, or return null
+ * when it is not a LuckyProtocol payload. Mirrors the indexer's grammar:
+ * DEPLOY|T, MINE|T, SEND|T|AMT|TO|CHG — anything else is "not a protocol
+ * tx". Used by the mock indexer and by display code; never by consensus.
+ */
+export function parsePayload(str) {
+  if (typeof str !== "string") return null;
+  const f = str.split("|");
+  if (f[0] !== PROTOCOL_PREFIX || f.length < 3) return null;
+  const op = f[1];
+  const ticker = f[2];
+  if (!TICKER_RE.test(ticker)) return null;
+  if ((op === "DEPLOY" || op === "MINE") && f.length === 3) return { op, ticker };
+  if (op === "SEND" && f.length === 6) {
+    if (!/^(0|[1-9][0-9]*)$/.test(f[3]) || !/^(0|[1-9][0-9]*)$/.test(f[4]) || !/^(0|[1-9][0-9]*)$/.test(f[5])) return null;
+    const amount = Number(f[3]);
+    const toOutIdx = Number(f[4]);
+    const changeOutIdx = Number(f[5]);
+    if (amount < 1 || amount > REQUIRED_TOKEN_SUPPLY) return null;
+    if (toOutIdx > MAX_OUT_IDX || changeOutIdx > MAX_OUT_IDX) return null;
+    if (toOutIdx === changeOutIdx) return null; // equal indices do not parse (§2.3)
+    return { op, ticker, amount, toOutIdx, changeOutIdx };
+  }
+  return null;
 }
 
 /** Decode payload bytes back to the ASCII string (display / debugging). */
