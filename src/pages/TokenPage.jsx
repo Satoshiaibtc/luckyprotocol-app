@@ -9,7 +9,6 @@ import Identicon from "../components/Identicon.jsx";
 import TokenAvatar from "../components/TokenAvatar.jsx";
 import SupplyRing from "../components/SupplyRing.jsx";
 import MinePanel from "../components/MinePanel.jsx";
-import AvatarPanel from "../components/AvatarPanel.jsx";
 import YieldSpectrum from "../components/YieldSpectrum.jsx";
 import TierTable from "../components/TierTable.jsx";
 import EVReadout from "../components/EVReadout.jsx";
@@ -121,12 +120,6 @@ export default function TokenPage({ ticker, params, navigate }) {
       <MinePanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
     </Panel>
   );
-  // Deployer only (§8): the panel renders nothing for anyone else.
-  const avatarConsole = address && address === token.deployer ? (
-    <Panel title="Avatar // on-chain" led={token.avatar_txid ? "ok" : "idle"} right={<span className="label">AVATAR · §8</span>} aria-label="Token avatar">
-      <AvatarPanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
-    </Panel>
-  ) : null;
 
   if (mobile) {
     // Phone order: compact header → 2×2 stats → MINE console (primary action, within
@@ -173,7 +166,6 @@ export default function TokenPage({ ticker, params, navigate }) {
         </dl>
 
         {mineConsole}
-        {avatarConsole}
 
         <Fold title="Yield model" summary={TIER_SUMMARY} led="ok" aria-label="Yield model">
           {yieldModel}
@@ -276,7 +268,6 @@ export default function TokenPage({ ticker, params, navigate }) {
 
         <div className="col">
           {mineConsole}
-          {avatarConsole}
         </div>
       </div>
     </main>

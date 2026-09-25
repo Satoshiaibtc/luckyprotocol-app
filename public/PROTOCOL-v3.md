@@ -1,6 +1,6 @@
 # LuckyProtocol Protocol — v3 / **LUCKY-20** (cohort `genesis-v3`)
 
-**Revision 2026-09-26** (activation height 969,300, SNAPSHOT_VERSION 14 —
+**Revision 2026-09-26** (activation height 969,300, SNAPSHOT_VERSION 15 —
 see §9 for what changed).
 
 Canonical wire spec for **LuckyProtocol**, the v3 successor to LUCKYPROTOCOL v2.
@@ -39,7 +39,7 @@ tokens on a plain wallet sweep.
 |---|---|---|
 | `PROTOCOL_PREFIX` | `LUCKY-20` | The standard's name, field 0 of every payload (cf. brc-20's `p`). Distinct from v2's `LUCKYPROTOCOL`, so v2 history can never parse as LUCKY-20; the activation-height gate applies on top. |
 | `ACTIVATION_HEIGHT` | **969_300** | FINAL (re-set 2026-09-26 with the routing rules of this revision; the earlier candidate height was never activated). Txs in earlier blocks are ignored. |
-| `SNAPSHOT_VERSION` | 14 | Fresh state; v2 snapshots are refused. (12 = v3 before §7 trading, 13 = strict-burn routing under the earlier candidate height; neither was ever deployed, and a 13 snapshot must never be reused under the §4 routing rules.) |
+| `SNAPSHOT_VERSION` | 15 | Fresh state; v2 snapshots are refused. (12 = v3 before §7 trading, 13 = strict-burn routing under the earlier candidate height, 14 = §4 default routing before the avatar could ride in the DEPLOY; these earlier v3 rules were not activated on mainnet, and a 14 snapshot must never be reused under the §2.1 embedded-avatar rule.) |
 | `REQUIRED_TOKEN_SUPPLY` | 21_000_000 | Implicit on every DEPLOY, not user-settable. |
 | `DUST_SATS` | 546 | Token-carrier output value **by wallet convention** — consensus accepts any output value ≥ 1 sat as a carrier (§4). |
 | `PROJECT_FEE_ADDRESS` | `bc1pyefhtnuz2gw04fsynlsseeh847cqy20dw7yt6fnavm9fgnewcr7q88gqf3` | Same as v2. |
@@ -99,6 +99,16 @@ but with an **empty deployer**: no AVATAR can ever be applied to it.
 
 Reference layout: `vout0` 546 → deployer (proof), `vout1` 5,460 → fee,
 `vout2` OP_RETURN, `vout3+` change.
+
+**Embedded avatar:** a DEPLOY may carry the first inscription envelope
+defined in §8.2 in an input's script-path witness. If the DEPLOY applies,
+its attributed deployer is non-empty, and that envelope passes every §8.2
+limit, the registry sets the avatar in the same transaction. No AVATAR
+payload or extra 546-sat avatar fee is required. A missing or invalid
+image does not invalidate the registration. A rejected/duplicate DEPLOY
+cannot replace an existing token's avatar. When an envelope is found,
+`/avatars/:addr` records an attempt with `op:"DEPLOY"` and the attributed
+deployer as `sender`; the DEPLOY retains ownership of the tx lookup entry.
 
 DEPLOY carries no routing index. Any token inputs (a carrier spent as
 funding by mistake) route to the **default output** (§4 rule 3) — in the
@@ -298,7 +308,7 @@ All JSON. CORS open. Base: the operator's indexer origin.
 | `GET /mines/:addr?limit&offset` | `{ address, mines: [MineView], total, limit, offset }` (sender == addr, newest first; `limit` default 50, max 200 — same for every per-address list below) |
 | `GET /mines?limit&offset&ticker` | `{ total, offset, limit, items: [MineView] }` global feed |
 | `GET /mines/by-txid/:txid` | `MineView` or 404 |
-| `GET /tokens?limit&offset` | `{ total, offset, limit, items: [{ ticker, supply, minted, deployer, deploy_txid, deploy_block, avatar_txid, avatar_content_type, … }] }` |
+| `GET /tokens?limit&offset&deployer` | `{ total, offset, limit, items: [{ ticker, supply, minted, deployer, deploy_txid, deploy_block, avatar_txid, avatar_content_type, … }] }`; optional exact-address `deployer` filter applies before pagination, and `total` counts matching entries |
 | `GET /tokens/:ticker` | one registry entry (+ `holders` count) |
 | `GET /tokens/:ticker/holders?limit&offset` | `{ ticker, total, limit, offset, holders: [{ address, balance }] }` |
 | `GET /transfers/:addr?limit&offset` | `{ address, transfers: [TransferView], total, limit, offset }` |
@@ -540,12 +550,13 @@ it cannot move anyone's funds (safety).
 
 ## 8. Token avatars — `LUCKY-20|AVATAR|<TICKER>` (on-chain image)
 
-A token's avatar is an **Ordinals-style inscription** carried by an AVATAR
-tx, so it lives on Bitcoin, is verifiable by any indexer, and shows up in
-the deployer's wallet like any other inscription. Nothing is uploaded to
-a server.
+A token's avatar is an **Ordinals-style inscription** carried by its
+DEPLOY transaction at creation (§2.1), or an AVATAR transaction to replace
+it later. It lives on Bitcoin and can be reconstructed by any indexer.
+The reference layout places the inscribed sat in the deployer's wallet.
+Nothing is uploaded to a server.
 
-### 8.1 Payload and layout
+### 8.1 Replacement payload and layout
 
 Payload: `LUCKY-20|AVATAR|<TICKER>` (exactly three fields; ticker
 grammar as §1).
@@ -597,6 +608,9 @@ Limits (consensus for this protocol, checked by every indexer):
 
 ### 8.3 Validity and effect
 
+For an avatar embedded in DEPLOY, use the registration and image rules
+in §2.1. The remaining rules below apply to the AVATAR replacement opcode.
+
 An AVATAR tx is **applied** iff: the ticker is deployed with a non-empty
 `deployer` (§2.1); **some input's prevout address equals
 `tokens[ticker].deployer` AND that input's witness signed the whole
@@ -636,26 +650,47 @@ permanent on-chain; the UI must say so before inscribing.
 |---|---|
 | `GET /tokens/:ticker/avatar` | the image bytes with its `Content-Type`, `ETag: "<txid>"`, `Cache-Control: public, max-age=300`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Content-Disposition: inline; filename="avatar"`; 404 when the token has no avatar — or when the operator has denylisted it (a file named by `LUCKYPROTOCOL_AVATAR_DENYLIST`, one AVATAR txid or image SHA-256 per line, reloaded every 60 s; this affects distribution from that origin only, never consensus) |
 | `/tokens` items, `/tokens/:ticker` | gain `avatar_txid` (`string | null`) and `avatar_content_type` |
-| `GET /avatars/:addr?limit&offset` | `{ address, avatars: [AvatarView], total, limit, offset }` — AVATAR txs sent by this address (audit), newest first |
+| `GET /avatars/:addr?limit&offset` | `{ address, avatars: [AvatarView], total, limit, offset }` — avatar attempts attributed to this address (audit), newest first; `op` distinguishes `DEPLOY` from `AVATAR` |
 
-`AvatarView`: `{ txid, block_height, block_hash, sender, ticker, applied, content_type, bytes_len }`.
+`AvatarView`: `{ txid, block_height, block_hash, sender, ticker, applied, op, content_type, bytes_len }`.
+`op` is `"DEPLOY"` when the envelope was embedded in the DEPLOY tx (§2.1,
+§8.3) and `"AVATAR"` for an AVATAR tx; `txid` is that tx. Additive field:
+rows written before it existed read as `"AVATAR"`.
 
 ### 8.5 Reference client flow (web)
 
+The Create page offers an optional image; without it, DEPLOY stays a
+single transaction. With an image, step 4 below is the DEPLOY itself
+(§2.1 layout and 5,460-sat fee). Portfolio provides later image replacement
+using AVATAR (§8.1 layout and 546-sat fee).
+
 1. Pick an image → canvas resize to 256×256 → encode WebP, lowering
    quality until ≤ 10,240 bytes (reject if it cannot get under 16,384).
-2. Generate an ephemeral secp256k1 key in the browser; persist it in
-   localStorage until the reveal is confirmed (recovery on reload).
+2. Generate an ephemeral secp256k1 key in the browser; encrypt the recovery
+   record with a wallet-signature-derived AES-GCM key before paying.
+   Real wallets without repeatable message signatures cannot start.
 3. Build the commit P2TR address (internal key = ephemeral key, leaf =
    `<ephemeral-xonly> OP_CHECKSIG` + envelope). Ask the wallet to send
    `546 + reveal_fee_share` sats to it (a plain payment).
 4. Build the reveal PSBT: `input0` = commit output (script path, signed
    locally with the ephemeral key), `input1` = a deployer UTXO (fee +
-   authorization; filtered per §4), outputs per §8.1. Wallet signs
-   `input1` only (`toSignInputs: [{ index: 1, address }]`); the app
+   authorization; filtered per §4), outputs per §2.1 for creation or
+   §8.1 for replacement. Wallet signs every wallet-owned input; the app
    finalizes `input0`, extracts and broadcasts.
 
+Creation records (`lp.deploy.<TICKER>`) save the signed commit and reveal
+before each broadcast. A retry sends those exact bytes. Records are
+retained until confirmation and registry reconciliation. If a competing
+registration takes the name, the client can key-path sweep an unspent
+commit to the original wallet, less network fees; it refuses that sweep
+while its own reveal is known to the node. Replacement records remain
+under `lp.avatar.<TICKER>`.
+
 ## 9. Changelog
+
+- **2026-09-26** — avatar may be embedded in DEPLOY (§2.1 / §8), snapshot
+  version 15; additive `AvatarView.op`; `/tokens` accepts an exact
+  `deployer` filter before pagination, with `total` counting matches.
 
 - **2026-09-26** — audit fixes, all before activation (nothing on chain
   changed): activation height **969,300**, `SNAPSHOT_VERSION` 14 (§1);

@@ -3737,6 +3737,16 @@ button.wallet-addr:focus-visible {
 .phase-track.three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
+.create-avatar { margin: 20px 0; min-width: 0; }
+.create-avatar input[type="file"] { max-width: 100%; font-size: 13px; }
+.create-avatar-preview { display: flex; align-items: center; gap: 16px; margin: 12px 0; }
+.create-avatar-preview img { flex: 0 0 96px; object-fit: cover; border-radius: 4px; }
+.create-avatar-preview > div { min-width: 0; overflow-wrap: anywhere; }
+.create-avatar-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.create-avatar p { overflow-wrap: anywhere; }
+.created-token { border-bottom: 1px solid var(--border); padding: 12px 0; }
+.created-token summary { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; cursor: pointer; }
+.created-token summary > span { margin-left: auto; font-size: 13px; }
 @media (max-width: 720px) {
   .avatar-preview .frame {
     width: 200px;

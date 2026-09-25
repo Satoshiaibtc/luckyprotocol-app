@@ -69,7 +69,20 @@
 //     load (and stay plaintext until they complete).
 //   * Blob format: { v: 1, enc: "aes-gcm", ticker, iv: base64(12), ct: base64 }.
 //
-// Everything above `compressAvatar` is pure and runs in Node (test/inscribe.test.js).
+// DEPLOY WITH AVATAR (owner decision 2026-09-26, §2.1 + §8): the avatar is
+// chosen on the Create page and inscribed TOGETHER with the DEPLOY. The
+// same commit / reveal machinery is reused with a different reveal:
+//
+//   buildDeployRevealPsbt(...)        → input0 = commit (script path), inputs 1.. = the
+//                                        wallet's fee inputs (§4-filtered), vout0 546 →
+//                                        deployer, vout1 5,460 → PROJECT_FEE_ADDRESS,
+//                                        vout2 OP_RETURN LUCKY-20|DEPLOY|T, vout3 change
+//   signRevealEphemeral / finalizeReveal are payload-agnostic and shared.
+//   The recovery record is the same shape with `kind: "deploy"` (+ the wallet
+//   `address`), stored under 'lp.deploy.<TICKER>' with the same encryption.
+//
+// Everything above `compressAvatar` is pure and runs in Node
+// (test/inscribe.test.js, test/deploy.inscribe.test.js).
 
 import * as btc from "@scure/btc-signer";
 import { hex, base64 } from "@scure/base";
@@ -78,7 +91,9 @@ import {
   DUST_SATS,
   PROJECT_FEE_ADDRESS,
   AVATAR_PROTOCOL_FEE_SATS,
+  DEPLOY_PROTOCOL_FEE_SATS,
   buildAvatarPayload,
+  buildDeployPayload,
   validateTicker,
 } from "./payloads.js";
 import {
@@ -415,6 +430,28 @@ export function maxCommitAmountFor(leafScriptLen) {
  * → { psbtHex, walletInputIndexes, feeSats, changeSats, changeOmitted, estimatedVsize, inputs }
  */
 export function buildRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAddress, deployerPubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats = 0 }) {
+  return buildImageRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAddress, deployerPubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats }, false);
+}
+
+export function buildDeployRevealPsbt(options) {
+  return buildImageRevealPsbt(options, true);
+}
+
+/** A wallet signs the requested transaction; it must not replace its inputs or outputs. */
+export function assertRevealWalletResult(unsignedHex, signedHex) {
+  const before = btc.Transaction.fromPSBT(hex.decode(unsignedHex), PSBT_OPTS);
+  const after = btc.Transaction.fromPSBT(hex.decode(signedHex), PSBT_OPTS);
+  if (before.id !== after.id) throw new Error("Wallet changed the transaction while signing; broadcast cancelled.");
+  for (let i = 0; i < before.inputsLength; i++) {
+    const expected = before.getInput(i).witnessUtxo;
+    const actual = after.getInput(i).witnessUtxo;
+    if (!expected || !actual || expected.amount !== actual.amount || hex.encode(expected.script) !== hex.encode(actual.script)) {
+      throw new Error("Wallet changed an input value or script; broadcast cancelled.");
+    }
+  }
+}
+
+function buildImageRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAddress, deployerPubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats = 0 }, deploy) {
   validateTicker(ticker);
   if (!commit || typeof commit.txid !== "string" || !/^[0-9a-f]{64}$/i.test(commit.txid) || !Number.isInteger(commit.vout) || !Number.isInteger(Number(commit.sats)) || Number(commit.sats) < DUST_SATS) {
     throw new Error("reveal: commit outpoint { txid, vout, sats } is required");
@@ -433,9 +470,9 @@ export function buildRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAdd
 
   const outputs = [
     { address: deployerAddress, value: DUST_SATS },                       // vout0 inscribed sat
-    { address: PROJECT_FEE_ADDRESS, value: AVATAR_PROTOCOL_FEE_SATS },    // vout1 protocol fee
+    { address: PROJECT_FEE_ADDRESS, value: deploy ? DEPLOY_PROTOCOL_FEE_SATS : AVATAR_PROTOCOL_FEE_SATS },
   ];
-  const opReturnScript = makeOpReturnScript(buildAvatarPayload(ticker));   // vout2
+  const opReturnScript = makeOpReturnScript(deploy ? buildDeployPayload(ticker) : buildAvatarPayload(ticker));
   const fixedOutValue = outputs.reduce((s, o) => s + o.value, 0);
   const input0Vsize = revealInput0Vsize(leafScript.length);
 
@@ -452,7 +489,7 @@ export function buildRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAdd
       const need = fixedOutValue + fee + (withChange ? DUST_SATS : 0) - commitSats;
       // target ≥ 1 sat so selectInputs always picks at least one deployer UTXO (authorization)
       ({ selected, total } = selectInputs({ utxos: spendable, target: Math.max(1, need), excludeKeys: [] }));
-      const newFee = Math.ceil(vsizeFor(selected.length, withChange) * satVb);
+      const newFee = Math.ceil(vsizeFor(selected.length, withChange)) * satVb;
       if (newFee === fee) break;
       fee = newFee;
     }
@@ -582,6 +619,10 @@ export function parseAvatarRecord(raw) {
     }
   }
   if (!r || typeof r !== "object") return null;
+  if (r.kind != null && r.kind !== "deploy") return null;
+  if (r.kind === "deploy") {
+    try { decodeAddress(r.address); } catch { return null; }
+  }
   const ticker = String(r.ticker || "");
   try {
     validateTicker(ticker);
@@ -605,6 +646,7 @@ export function parseAvatarRecord(raw) {
   const txidOrNull = (v) => (TXID_RE.test(String(v || "").toLowerCase()) ? String(v).toLowerCase() : null);
   const commitSats = Number.isInteger(r.commitSats) && r.commitSats >= DUST_SATS && r.commitSats <= MAX_COMMIT_SATS ? r.commitSats : null;
   const rec = {
+    ...(r.kind === "deploy" ? { kind: "deploy", address: r.address } : {}),
     ticker,
     ephemeralPrivHex: String(r.ephemeralPrivHex).toLowerCase(),
     leafScriptHex: String(r.leafScriptHex).toLowerCase(),
@@ -643,6 +685,41 @@ export function parseAvatarRecord(raw) {
   }
   // Upper bound from the verified leaf: more than the fee cap could ever ask for is corrupt.
   if (commitAmount > maxCommitAmountFor(leafLen)) return null;
+  if (commitPayment(hex.decode(rec.ephemeralPrivHex), hex.decode(rec.leafScriptHex)).address !== rec.commitAddress) return null;
+  if (r.kind === "deploy") {
+    const stages = {};
+    for (const stage of ["commit", "reveal", "reclaim"]) {
+      const rawHex = r[`${stage}RawHex`];
+      if (!!rawHex !== !!r[`${stage}Txid`]) return null;
+      if (rawHex != null) {
+        if (typeof rawHex !== "string" || !/^(?:[0-9a-f]{2})+$/i.test(rawHex) || rawHex.length > 100_000) return null;
+        try {
+          const tx = btc.Transaction.fromRaw(hex.decode(rawHex), PSBT_OPTS);
+          if (tx.id !== r[`${stage}Txid`]) return null;
+          stages[stage] = tx;
+        } catch { return null; }
+        rec[`${stage}RawHex`] = rawHex;
+      }
+    }
+    try {
+      if (stages.commit) {
+        const output = stages.commit.getOutput(rec.commitVout);
+        if (rec.commitVout !== 0 || output.amount !== BigInt(rec.commitSats) || rec.commitSats !== rec.commitAmount || hex.encode(output.script) !== hex.encode(decodeAddress(rec.commitAddress).script)) return null;
+        const inputs = Array.from({ length: stages.commit.inputsLength }, (_, i) => stages.commit.getInput(i));
+        if (rec.commitInputs.length !== inputs.length || inputs.some((input, i) => hex.encode(input.txid) !== rec.commitInputs[i].txid || input.index !== rec.commitInputs[i].vout)) return null;
+        if (r.commitChange) {
+          const change = stages.commit.getOutput(rec.commitChange?.vout);
+          if (rec.commitChange?.vout !== 1 || change.amount !== BigInt(rec.commitChange.sats) || hex.encode(change.script) !== hex.encode(decodeAddress(rec.address).script)) return null;
+        }
+      }
+      for (const stage of ["reveal", "reclaim"]) {
+        if (!stages[stage]) continue;
+        const input = stages[stage].getInput(0);
+        if (!stages.commit || hex.encode(input.txid) !== rec.commitTxid || input.index !== rec.commitVout) return null;
+      }
+    } catch { return null; }
+    rec.reclaimTxid = txidOrNull(r.reclaimTxid);
+  }
   return rec;
 }
 
@@ -803,6 +880,49 @@ export function clearAvatarRecord(ticker) {
   } catch {
     /* ignore */
   }
+}
+
+export const deployRecordKey = (ticker) => `lp.deploy.${validateTicker(ticker)}`;
+
+export function savedDeployTickers() {
+  try {
+    const s = storage();
+    const tickers = [];
+    for (let i = 0; i < (s?.length || 0); i++) {
+      const match = /^lp\.deploy\.([A-Z0-9]{1,8})$/.exec(s.key(i));
+      if (match) tickers.push(match[1]);
+    }
+    return tickers.sort();
+  } catch { return []; }
+}
+
+export function loadDeployRecord(ticker) {
+  let raw;
+  try { raw = storage()?.getItem(deployRecordKey(ticker)); } catch { return { status: "corrupt" }; }
+  if (!raw) return { status: "absent" };
+  if (isEncryptedRecord(raw)) return { status: "encrypted", raw };
+  const record = parseAvatarRecord(raw);
+  return record?.kind === "deploy" && record.ticker === ticker ? { status: "ok", record } : { status: "corrupt" };
+}
+
+export async function unlockDeployRecord(ticker, key) {
+  const stored = loadDeployRecord(ticker);
+  const result = stored.status === "encrypted" ? await decryptAvatarRecord(stored.raw, key) : stored;
+  if (result.status === "ok" && (result.record.kind !== "deploy" || result.record.ticker !== ticker)) return { status: "corrupt" };
+  return result;
+}
+
+export async function writeDeployRecord(record, key) {
+  if (record.kind !== "deploy" || !parseAvatarRecord(record)) throw new Error("Invalid creation recovery record");
+  const s = storage();
+  if (!s) throw new Error("Browser storage is unavailable; creation stopped before the next payment.");
+  const raw = key ? await encryptAvatarRecord(record, key) : serializeAvatarRecord(record);
+  s.setItem(deployRecordKey(record.ticker), raw);
+  if (s.getItem(deployRecordKey(record.ticker)) !== raw) throw new Error("Recovery record could not be saved");
+}
+
+export function clearDeployRecord(ticker) {
+  storage()?.removeItem(deployRecordKey(ticker));
 }
 
 /** `data:<ct>;base64,…` for a preview or the mock's avatar URL. */

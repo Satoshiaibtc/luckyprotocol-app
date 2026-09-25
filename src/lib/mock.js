@@ -29,7 +29,7 @@ import { hex, base64, bech32, bech32m } from "@scure/base";
 import * as btc from "@scure/btc-signer";
 import { pubECDSA, pubSchnorr } from "@scure/btc-signer/utils.js";
 import { EXPECTED_YIELD, bucketOfYield, mineYield } from "./yield.js";
-import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, AVATAR_PROTOCOL_FEE_SATS } from "./payloads.js";
+import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, AVATAR_PROTOCOL_FEE_SATS, DEPLOY_PROTOCOL_FEE_SATS } from "./payloads.js";
 import { buildListingPsbt, verifyListing, parseListing, decodeRawTx, LISTING_SIGHASH } from "./swap.js";
 import { parseEnvelopeFromWitness, checkEnvelopeLimits, bytesToDataUrl } from "./inscribe.js";
 
@@ -522,7 +522,9 @@ function applyTx(txid, e) {
     // default route (first non-OP_RETURN output).
     routeRest(chg && chg.address ? p.changeOutIdx : null);
   } else if (p && p.op === "DEPLOY") {
-    if (!w.tokens.has(p.ticker) && d.outputs[0] && d.outputs[0].address) {
+    const feeOk = d.outputs.some((o) => o.address === PROJECT_FEE_ADDRESS && o.sats === DEPLOY_PROTOCOL_FEE_SATS);
+    const applied = !w.tokens.has(p.ticker) && feeOk && !!d.outputs[0]?.address;
+    if (applied) {
       w.tokens.set(p.ticker, {
         ticker: p.ticker,
         supply: REQUIRED_TOKEN_SUPPLY,
@@ -537,6 +539,17 @@ function applyTx(txid, e) {
         avatar_txid: null,
         avatar_content_type: null,
       });
+    }
+    const env = parseEnvelopeFromWitness(e.witness0 || []);
+    if (env) {
+      const avatarApplied = applied && checkEnvelopeLimits(env);
+      if (avatarApplied) {
+        const tok = w.tokens.get(p.ticker);
+        tok.avatar_txid = txid;
+        tok.avatar_content_type = env.contentType;
+        w.avatars.set(p.ticker, { bytes: env.bytes, contentType: env.contentType });
+      }
+      w.avatarViews.unshift({ txid, block_height: height, block_hash: hash, sender: d.outputs[0]?.address || "", ticker: p.ticker, op: "DEPLOY", applied: avatarApplied, content_type: env.contentType, bytes_len: env.bytes.length });
     }
     routeRest(null); // DEPLOY routes nothing → default route
   } else if (p && p.op === "AVATAR") {
@@ -699,8 +712,9 @@ export async function mockGet(path) {
     return page(all, q, 20);
   }
   if (p === "/tokens") {
-    const items = [...w.tokens.values()].map(tokenView);
-    return { total: items.length, offset: 0, limit: items.length, items };
+    const deployer = q.get("deployer");
+    const items = [...w.tokens.values()].filter((t) => !deployer || t.deployer === deployer).map(tokenView);
+    return page(items, q, 10);
   }
   if ((m = p.match(/^\/tokens\/([^/]+)\/holders$/))) {
     const t = w.tokens.get(decodeURIComponent(m[1]));

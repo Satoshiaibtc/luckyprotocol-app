@@ -18,7 +18,7 @@
     "test:psbt": "node test/psbt.build.test.js",
     "test:swap": "node test/swap.test.js",
     "test:wallet": "node test/wallet.test.js",
-    "test:inscribe": "node test/inscribe.test.js",
+    "test:inscribe": "node test/inscribe.test.js && node test/deploy.inscribe.test.js",
     "test:pending": "node test/pending.test.js",
     "check": "npm run lint && npm run test:vocab && npm run test && npm run test:psbt && npm run test:swap && npm run test:wallet && npm run test:inscribe && npm run test:pending && npm run build"
   },

@@ -387,6 +387,7 @@ function _sanitizeTokenRow(t) {
 // AvatarView (§8.4).
 function _sanitizeAvatarRow(a) {
   if (!a || typeof a !== "object") return null;
+  if (a.op != null && !["DEPLOY", "AVATAR"].includes(a.op)) return null;
   const txid = _safeTxidOrNull(a.txid);
   if (!txid) return null;
   if (!_TICKER_RE.test(String(a.ticker || ""))) return null;
@@ -399,6 +400,7 @@ function _sanitizeAvatarRow(a) {
     block_hash: _safeHash(a.block_hash),
     sender,
     ticker: a.ticker,
+    op: a.op || "AVATAR",
     applied: a.applied === true,
     content_type: _safeAvatarCt(a.content_type),
     bytes_len: _safeInt(a.bytes_len, 1e6) ?? 0,
@@ -459,6 +461,7 @@ function _pageQuery(opts = {}) {
   if (opts.limit != null) params.set("limit", String(opts.limit));
   if (opts.offset != null) params.set("offset", String(opts.offset));
   if (opts.ticker) params.set("ticker", String(opts.ticker));
+  if (opts.deployer) params.set("deployer", String(opts.deployer));
   if (opts.status) params.set("status", String(opts.status));
   const q = params.toString();
   return q ? `?${q}` : "";

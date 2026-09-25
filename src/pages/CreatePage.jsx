@@ -17,6 +17,9 @@ import FeeSelector from "../components/FeeSelector.jsx";
 import UtxoSafetyNotice from "../components/UtxoSafetyNotice.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
+import CreateAvatarFields from "../components/CreateAvatarFields.jsx";
+import { useDeployAvatar } from "../hooks/useDeployAvatar.js";
+import { savedDeployTickers } from "../lib/inscribe.js";
 
 const IDLE = { phase: "idle" };
 const AVAIL_LED = { idle: "idle", checking: "busy", free: "ok", taken: "err", error: "err" };
@@ -57,6 +60,8 @@ export default function CreatePage({ params, navigate }) {
   }, [ticker, valid]);
 
   const feeRate = fee.satVb;
+  const creation = useDeployAvatar({ wallet: walletState, ticker, feeRateSatVb: feeRate, onSettled: refreshAll });
+  const avatarFlow = creation.flow;
   const feeEstimate = useMemo(() => {
     if (!feeRate || !valid) return null;
     try {
@@ -76,7 +81,7 @@ export default function CreatePage({ params, navigate }) {
       refreshAll();
     },
   });
-  const busy = ["building", "signing", "broadcasting", "pending"].includes(flow.phase);
+  const busy = creation.busy || ["pending", "reclaim-pending"].includes(avatarFlow.phase) || ["building", "signing", "broadcasting", "pending"].includes(flow.phase);
 
   // Confirmed → hop to the token page once the indexer lists it (it polls anyway).
   useEffect(() => {
@@ -86,7 +91,8 @@ export default function CreatePage({ params, navigate }) {
   }, [flow.phase, flow.ticker, navigate]);
 
   const create = async () => {
-    if (!connected || !valid || avail.state !== "free") return;
+    if (!connected || !valid || avail.ticker !== ticker || avail.state !== "free" || busy || !indexerOk || preActivation || creation.hasSaved) return;
+    if (avatarFlow.preview) { await creation.start(); return; }
     const t = ticker;
     setFlow({ phase: "building", ticker: t });
     try {
@@ -143,6 +149,10 @@ export default function CreatePage({ params, navigate }) {
     <main className="page create-page">
       <div className="create-layout">
         <Panel title="Deploy // new ticker" led={ledFor(avail.state)} right={<span className="label">DEPLOY · §2.1</span>} aria-label="Deploy a new ticker">
+          {savedDeployTickers().length > 0 && <div className="notice">
+            <span className="label">Saved creations</span>
+            <div className="actions create-avatar-actions">{savedDeployTickers().map((saved) => <button key={saved} type="button" className="btn btn-sm" disabled={busy} onClick={() => setTicker(saved)}>Resume {saved}</button>)}</div>
+          </div>}
           <label className="field">
             <span className="label">Ticker</span>
             <span className="ticker-field">
@@ -154,7 +164,7 @@ export default function CreatePage({ params, navigate }) {
                 maxLength={8}
                 autoComplete="off"
                 spellCheck={false}
-                disabled={busy}
+                disabled={busy || creation.hasSaved}
                 aria-describedby="ticker-help"
               />
               <Led state={ledFor(avail.state)} />
@@ -180,6 +190,8 @@ export default function CreatePage({ params, navigate }) {
             </span>
           </label>
 
+          <CreateAvatarFields creation={creation} ticker={ticker} address={address} feeRate={feeRate} disabled={!valid || !connected || busy} />
+
           <dl className="facts">
             <div>
               <dt>Supply</dt>
@@ -204,7 +216,7 @@ export default function CreatePage({ params, navigate }) {
             <div>
               <dt>Network fee</dt>
               <dd>
-                {feeEstimate ? `≈ ${fmtSats(feeEstimate.feeSats)}` : "—"}
+                {avatarFlow.preview ? "See avatar transaction estimate above" : feeEstimate ? `≈ ${fmtSats(feeEstimate.feeSats)}` : "—"}
                 {feeRate ? <span className="muted"> @ {feeRate} sat/vB</span> : null}
               </dd>
             </div>
@@ -230,8 +242,8 @@ export default function CreatePage({ params, navigate }) {
           {!connected ? (
             <ConnectPrompt action="create a token" />
           ) : (
-            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.state !== "free" || busy || !indexerOk || preActivation || !feeRate || flow.phase === "confirmed"}>
-              {flow.phase === "confirmed" ? `Created ${flow.ticker}` : busy ? "Working…" : `Create ${valid ? ticker : "token"}`}
+            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.ticker !== ticker || avail.state !== "free" || busy || creation.hasSaved || !indexerOk || preActivation || !feeRate || flow.phase === "confirmed" || avatarFlow.phase === "confirmed"}>
+              {flow.phase === "confirmed" || avatarFlow.phase === "confirmed" ? `Created ${ticker}` : busy ? "Working…" : `Create ${valid ? ticker : "token"}`}
             </button>
           )}
           <TxProgress
@@ -246,20 +258,13 @@ export default function CreatePage({ params, navigate }) {
               confirmed: `${flow.ticker} is deployed. Opening its page…`,
             }}
           />
-          {flow.phase === "confirmed" && (
-            <p className="fineprint">
-              Optional: add an on-chain avatar for {flow.ticker} from its page — <a href={tokenHref(flow.ticker)}>open {flow.ticker}</a>. The image is inscribed
-              on Bitcoin (deployer only, two signatures).
-            </p>
-          )}
         </Panel>
 
         <aside className="create-preview">
           <span className="label">Preview</span>
-          <TokenCard token={preview} preview />
+          <TokenCard token={preview} preview avatarPreview={avatarFlow.preview?.dataUrl} />
           <p className="fineprint">
-            The identicon is derived from the ticker&apos;s hash — no image upload, nothing to host. After the deploy confirms you can replace it with
-            an image inscribed on Bitcoin from the token page.
+            {avatarFlow.preview ? "Your image will be included in the token creation transaction." : "Without an image, your token uses an identicon derived from its ticker."}
           </p>
         </aside>
       </div>

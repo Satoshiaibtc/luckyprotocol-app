@@ -2,6 +2,8 @@ import { useMemo } from "react";
 import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
+import { usePaged } from "../hooks/usePaged.js";
+import AvatarPanel from "../components/AvatarPanel.jsx";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import TokenAvatar from "../components/TokenAvatar.jsx";
@@ -25,6 +27,7 @@ export default function PortfolioPage() {
 
   const balances = usePoll(address ? (s) => indexer.balances(address, s) : null, POLL_MS, [address]);
   const mines = usePoll(address ? (s) => indexer.minesByAddress(address, s) : null, POLL_MS, [address]);
+  const created = usePaged(address ? (offset, limit, s) => indexer.tokens({ deployer: address, offset, limit }, s) : null, { limit: 10, deps: [address], refreshMs: 30_000 });
 
   const tokenByTicker = useMemo(() => {
     const m = new Map();
@@ -99,6 +102,17 @@ export default function PortfolioPage() {
 
         <Panel title="My mines" led={ledFromPoll(mines)} className="span-2" aria-label="My mines">
           <MinesTable q={asQ(mines)} self={address} showTicker compact={mobile} empty="No mines from this address yet." />
+        </Panel>
+        <Panel title="My created tokens" className="span-2" aria-label="My created tokens">
+          {created.error && <p className="err">Could not load created tokens: {String(created.error.message)}</p>}
+          {!created.rows.length && <p className="muted">{created.loading ? "Loading..." : "No tokens created by this address."}</p>}
+          {created.rows.filter((t) => t.deployer === address).map((t) => (
+            <details className="created-token" key={`${address}:${t.ticker}`}>
+              <summary><TokenAvatar ticker={t.ticker} avatarTxid={t.avatar_txid} size={28} /><strong>{t.ticker}</strong><span>Change avatar</span></summary>
+              <AvatarPanel ticker={t.ticker} tokenInfo={t} onSettled={created.refresh} />
+            </details>
+          ))}
+          {created.hasMore && <button type="button" className="btn btn-sm" disabled={created.loading} onClick={created.loadMore}>Load more</button>}
         </Panel>
       </div>
     </main>

@@ -4,7 +4,7 @@ import { fmtCompact, fmtInt, fmtPct, shortAddr } from "../lib/format.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 
-export default function TokenCard({ token, preview = false }) {
+export default function TokenCard({ token, preview = false, avatarPreview = null }) {
   const t = token;
   const mobile = useIsMobile();
   const href = preview ? undefined : tokenHref(t.ticker);
@@ -17,7 +17,7 @@ export default function TokenCard({ token, preview = false }) {
         <a className="token-card-head" href={href} aria-label={`${t.ticker} token page`}>
           <span className="ch chamfer identicon-wrap">
             <span className="ch-in chamfer">
-              <TokenAvatar ticker={t.ticker} avatarTxid={t.avatar_txid} size={44} />
+              {preview && avatarPreview ? <img src={avatarPreview} alt={`${t.ticker} avatar preview`} width={44} height={44} /> : <TokenAvatar ticker={t.ticker} avatarTxid={t.avatar_txid} size={44} />}
             </span>
           </span>
           <div className="token-card-title">
@@ -68,7 +68,7 @@ export default function TokenCard({ token, preview = false }) {
       <a className="token-card-head" href={href} aria-label={`${t.ticker} token page`}>
         <span className="ch chamfer identicon-wrap">
           <span className="ch-in chamfer">
-            <TokenAvatar ticker={t.ticker} avatarTxid={t.avatar_txid} size={48} />
+            {preview && avatarPreview ? <img src={avatarPreview} alt={`${t.ticker} avatar preview`} width={48} height={48} /> : <TokenAvatar ticker={t.ticker} avatarTxid={t.avatar_txid} size={48} />}
           </span>
         </span>
         <div className="token-card-title">
