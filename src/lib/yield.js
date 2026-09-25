@@ -29,10 +29,11 @@ export const DIGIT_SPACE = 16;
  * derives from this table.
  */
 export const BUCKETS = [
+  // Probabilities climb in a 1 / 3 / 5 / 7 staircase as the tier drops.
   { id: "high", label: "f", digits: "f", count: 1, yield: YIELD_HIGH },
-  { id: "mid", label: "a–e", digits: "abcde", count: 5, yield: YIELD_MID },
-  { id: "low", label: "5–9", digits: "56789", count: 5, yield: YIELD_LOW },
-  { id: "base", label: "0–4", digits: "01234", count: 5, yield: YIELD_BASE },
+  { id: "mid", label: "c–e", digits: "cde", count: 3, yield: YIELD_MID },
+  { id: "low", label: "7–b", digits: "789ab", count: 5, yield: YIELD_LOW },
+  { id: "base", label: "0–6", digits: "0123456", count: 7, yield: YIELD_BASE },
 ];
 
 /** Probability helpers — the ONLY place percentages are formed. */

@@ -88,17 +88,19 @@ must never drop it as sub-dust.
 yield(block_hash) :=
   let d = last hex char of lowercase(block_hash)
   d == 'f'        → 1000   (1 of 16)
-  d in 'a'..='e'  → 500    (5 of 16)
-  d in '5'..='9'  → 200    (5 of 16)
-  d in '0'..='4'  → 100    (5 of 16)
+  d in 'c'..='e'  → 500    (3 of 16)
+  d in '7'..='b'  → 200    (5 of 16)
+  d in '0'..='6'  → 100    (7 of 16)
 ```
 
 `block_hash` is the hash of the block that **confirms the MINE tx**.
 Credit = `min(yield, remaining_supply)`; when remaining supply is 0 the
 MINE records `cap_exhausted:true` and credits 0.
 
-Expected yield per MINE = (1000 + 5·500 + 5·200 + 5·100) / 16 = **312.5**;
-21,000,000 / 312.5 = **67,200** MINEs exhaust a ticker exactly. Every tier and the
+The probabilities climb in a 1 / 3 / 5 / 7 staircase as the tier drops
+(6.25% / 18.75% / 31.25% / 43.75%). Expected yield per MINE =
+(1000 + 3·500 + 5·200 + 7·100) / 16 = **262.5**; 21,000,000 / 262.5 =
+**80,000** MINEs exhaust a ticker exactly. Every tier and the
 supply are multiples of 100, so the MINE that crosses the cap is credited a
 multiple of 100 (`min(tier, remaining)`); later MINEs in that block credit 0.
 
@@ -107,9 +109,9 @@ suites assert them):
 
 | last hex char | yield |
 |---|---|
-| `0` `4` | 100 |
-| `5` `9` | 200 |
-| `a` `e` | 500 |
+| `0` `6` | 100 |
+| `7` `b` | 200 |
+| `c` `e` | 500 |
 | `f` | 1000 |
 | `F` (uppercase input) | 1000 |
 
