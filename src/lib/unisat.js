@@ -28,6 +28,24 @@ import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
 import { extractRawTxHex } from "./psbt.js";
 
 export const INSTALL_URL = "https://unisat.io";
+export const DOWNLOAD_URL = "https://unisat.io/download";
+
+/**
+ * True on phone / tablet browsers, where no extension can be installed and
+ * the way in is the UniSat app's built-in browser. UA sniff first (Android,
+ * iOS, iPadOS-as-Mac with touch), then `pointer: coarse` as the fallback.
+ */
+export function isMobileBrowser() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  if (/Android|iPhone|iPad|iPod|Windows Phone|Mobile/i.test(ua)) return true;
+  if (/Macintosh/.test(ua) && Number(navigator.maxTouchPoints) > 1) return true;
+  try {
+    return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  } catch {
+    return false;
+  }
+}
 
 let provider = null;
 let providerIsMock = false;

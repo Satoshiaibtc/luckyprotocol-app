@@ -1,5 +1,7 @@
 import { fmtInt, txUrl, shortTxid, UNISAT_INSTALL_URL } from "../lib/format.js";
+import { isMobileBrowser } from "../lib/unisat.js";
 import { useApp } from "../context.js";
+import UniSatMobileGuide from "./UniSatMobileGuide.jsx";
 
 /**
  * One status line for every sign-and-broadcast flow (buy / sell / split /
@@ -95,6 +97,25 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
 /** "Connect UniSat to …" block with the install / simulated-wallet affordances. */
 export function ConnectPrompt({ action = "continue" }) {
   const { wallet, mock, connect, useMock } = useApp();
+  // No provider on a phone: the extension link is useless there — point at the
+  // UniSat app's built-in browser instead (simulated wallet stays in mock mode).
+  if (wallet.status === "absent" && isMobileBrowser()) {
+    return (
+      <>
+        <UniSatMobileGuide
+          action={action}
+          extra={
+            mock ? (
+              <button className="btn btn-sm" type="button" onClick={useMock}>
+                Use simulated wallet
+              </button>
+            ) : null
+          }
+        />
+        {wallet.error && <div className="err">{wallet.error}</div>}
+      </>
+    );
+  }
   return (
     <div className="cta">
       <div>
