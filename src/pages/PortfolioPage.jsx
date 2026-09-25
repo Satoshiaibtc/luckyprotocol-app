@@ -3,6 +3,7 @@ import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
+import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Identicon from "../components/Identicon.jsx";
 import { ConnectPrompt } from "../components/TxProgress.jsx";
 import { MinesTable } from "../components/Tables.jsx";
@@ -17,8 +18,9 @@ const POLL_MS = 15_000;
 const asQ = (poll) => ({ rows: poll.data || [], total: (poll.data || []).length, loading: poll.loading, error: poll.error, hasMore: false, loadMore: () => {} });
 
 export default function PortfolioPage() {
-  const { wallet, address, tokens } = useApp();
+  const { wallet, address, tokens, disconnect } = useApp();
   const connected = wallet.status === "connected";
+  const mobile = useIsMobile();
 
   const balances = usePoll(address ? (s) => indexer.balances(address, s) : null, POLL_MS, [address]);
   const mines = usePoll(address ? (s) => indexer.minesByAddress(address, s) : null, POLL_MS, [address]);
@@ -61,6 +63,12 @@ export default function PortfolioPage() {
             <span className="muted">{wallet.balance !== null ? `${fmtBtc(wallet.balance)} BTC` : ""}</span>
           </div>
         </div>
+        {mobile && (
+          // The phone header has no Disconnect control — it lives here.
+          <button className="btn btn-ghost btn-sm" onClick={disconnect} type="button" aria-label="Disconnect wallet">
+            Disconnect
+          </button>
+        )}
       </header>
 
       <div className="portfolio-grid">
@@ -93,7 +101,7 @@ export default function PortfolioPage() {
         </Panel>
 
         <Panel title="My mines" led={ledFromPoll(mines)} className="span-2" aria-label="My mines">
-          <MinesTable q={asQ(mines)} self={address} showTicker empty="No mines from this address yet." />
+          <MinesTable q={asQ(mines)} self={address} showTicker compact={mobile} empty="No mines from this address yet." />
         </Panel>
       </div>
     </main>

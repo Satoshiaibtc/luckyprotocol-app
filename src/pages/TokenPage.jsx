@@ -4,6 +4,7 @@ import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { usePaged } from "../hooks/usePaged.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
+import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Identicon from "../components/Identicon.jsx";
 import SupplyRing from "../components/SupplyRing.jsx";
 import MinePanel from "../components/MinePanel.jsx";
@@ -12,10 +13,11 @@ import TierTable from "../components/TierTable.jsx";
 import EVReadout from "../components/EVReadout.jsx";
 import ObservedMix from "../components/ObservedMix.jsx";
 import Panel from "../components/hud/Panel.jsx";
+import Fold from "../components/hud/Fold.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
 import { MinesTable, HoldersTable, AddrLink, TxLink } from "../components/Tables.jsx";
 import { summarizeMix } from "../lib/mix.js";
-import { yieldDigit } from "../lib/yield.js";
+import { BUCKETS, probabilityPct, yieldDigit } from "../lib/yield.js";
 import { fmtAgo, fmtCompact, fmtDec, fmtInt, fmtPct, blockUrl } from "../lib/format.js";
 
 const POLL_MS = 15_000;
@@ -26,8 +28,12 @@ const DATA_TABS = [
   { id: "holders", label: "Holders" },
 ];
 
+/** "f 6.25% → 1000 · a–e 31.25% → 500 · 0–9 62.5% → 100" — from BUCKETS only. */
+const TIER_SUMMARY = BUCKETS.map((b) => `${b.label} ${probabilityPct(b)}% → ${b.yield}`).join(" · ");
+
 export default function TokenPage({ ticker, params, navigate }) {
   const { address, health, tipBlock } = useApp();
+  const mobile = useIsMobile();
   const tokenQ = usePoll((s) => indexer.token(ticker, s), POLL_MS, [ticker]);
   const token = tokenQ.data;
   // A 404 resolves to `null` data with an updatedAt stamp; a still-loading
@@ -94,6 +100,91 @@ export default function TokenPage({ ticker, params, navigate }) {
 
   const activeQ = dataTab === "mines" ? minesPaged : holdersPaged;
   const activeLed = activeQ.error ? "err" : activeQ.loading && activeQ.rows.length === 0 ? "busy" : "ok";
+  const age = deployBlock.data?.time ? fmtAgo(deployBlock.data.time) : tip ? `${fmtInt(Math.max(0, tip - token.deploy_block))} blocks ago` : null;
+
+  const yieldModel = (
+    <>
+      <YieldSpectrum tipDigit={yieldDigit(tipBlock.data?.hash)} />
+      <TierTable ticker={token.ticker} />
+      <EVReadout size="lg" ticker={token.ticker} />
+    </>
+  );
+  const observedMix = (
+    <Panel title={`Observed mix · last ${MIX_LIMIT} mines`} led={ledFromPoll(mixQ)} aria-label="Observed mix">
+      <ObservedMix rows={mixQ.data?.items} loading={mixQ.loading} error={mixQ.error} meanLabel="Observed mean" ticker={token.ticker} />
+    </Panel>
+  );
+  const mineConsole = (
+    <Panel title="Mine // console" led={ledFromPoll(tokenQ)} aria-label="Mine console">
+      <MinePanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
+    </Panel>
+  );
+
+  if (mobile) {
+    // Phone order: compact header → 2×2 stats → MINE console (primary action, within
+    // the first 1.5 screens) → folded yield model → observed mix → segmented activity.
+    return (
+      <main className="page token-page token-page-m">
+        <header className="token-head token-head-m">
+          <span className="ch chamfer identicon-wrap">
+            <span className="ch-in chamfer">
+              <Identicon ticker={token.ticker} size={56} />
+            </span>
+          </span>
+          <div className="token-head-main">
+            <h1 className="ticker">{token.ticker}</h1>
+            <div className="meta">
+              by <AddrLink address={token.deployer} self={address} head={4} tail={4} /> · tx <TxLink txid={token.deploy_txid} head={4} tail={3} /> ·{" "}
+              <a className="mono" href={blockUrl(token.deploy_block)} target="_blank" rel="noopener noreferrer">
+                #{fmtInt(token.deploy_block)}
+              </a>
+              {age ? ` · ${age}` : ""}
+            </div>
+          </div>
+          <SupplyRing ticker={token.ticker} minted={token.minted} supply={token.supply} size={64} />
+        </header>
+
+        <dl className="stats stats-4">
+          <div>
+            <dt>Minted</dt>
+            <dd>{fmtPct(token.minted, token.supply, 2)}</dd>
+          </div>
+          <div>
+            <dt>Remaining</dt>
+            <dd>{fmtCompact(Math.max(0, token.supply - token.minted))}</dd>
+          </div>
+          <div>
+            <dt>Holders</dt>
+            <dd>{fmtCompact(token.holders ?? 0)}</dd>
+          </div>
+          <div>
+            <dt>Mines</dt>
+            <dd>{fmtCompact(token.mine_count)}</dd>
+          </div>
+        </dl>
+
+        {mineConsole}
+
+        <Fold title="Yield model" summary={TIER_SUMMARY} led="ok" aria-label="Yield model">
+          {yieldModel}
+        </Fold>
+
+        {observedMix}
+
+        <Panel led={activeLed} title="Activity" right={<span className="label">{fmtInt(activeQ.total)} total</span>} aria-label="Token activity">
+          <div className="seg" role="tablist" aria-label="Token activity">
+            {DATA_TABS.map((t) => (
+              <button key={t.id} className="seg-btn" role="tab" aria-selected={dataTab === t.id} onClick={() => setDataTab(t.id)} type="button">
+                {t.label}
+              </button>
+            ))}
+          </div>
+          {dataTab === "mines" && <MinesTable q={minesPaged} self={address} compact empty={`No ${token.ticker} mines yet.`} />}
+          {dataTab === "holders" && <HoldersTable q={holdersPaged} minted={token.minted} self={address} compact />}
+        </Panel>
+      </main>
+    );
+  }
 
   return (
     <main className="page token-page">
@@ -117,7 +208,7 @@ export default function TokenPage({ ticker, params, navigate }) {
               <a className="mono" href={blockUrl(token.deploy_block)} target="_blank" rel="noopener noreferrer">
                 #{fmtInt(token.deploy_block)}
               </a>
-              {deployBlock.data?.time ? <span className="muted"> · {fmtAgo(deployBlock.data.time)}</span> : tip ? <span className="muted"> · {fmtInt(Math.max(0, tip - token.deploy_block))} blocks ago</span> : null}
+              {age ? <span className="muted"> · {age}</span> : null}
             </span>
           </div>
           <SupplyRing ticker={token.ticker} minted={token.minted} supply={token.supply} size={96} showText />
@@ -150,14 +241,10 @@ export default function TokenPage({ ticker, params, navigate }) {
       <div className="token-layout">
         <div className="col">
           <Panel title="Yield model" led="ok" aria-label="Yield model">
-            <YieldSpectrum tipDigit={yieldDigit(tipBlock.data?.hash)} />
-            <TierTable ticker={token.ticker} />
-            <EVReadout size="lg" ticker={token.ticker} />
+            {yieldModel}
           </Panel>
 
-          <Panel title={`Observed mix · last ${MIX_LIMIT} mines`} led={ledFromPoll(mixQ)} aria-label="Observed mix">
-            <ObservedMix rows={mixQ.data?.items} loading={mixQ.loading} error={mixQ.error} meanLabel="Observed mean" ticker={token.ticker} />
-          </Panel>
+          {observedMix}
 
           <Panel
             led={activeLed}
@@ -177,11 +264,7 @@ export default function TokenPage({ ticker, params, navigate }) {
           </Panel>
         </div>
 
-        <div className="col">
-          <Panel title="Mine // console" led={ledFromPoll(tokenQ)} aria-label="Mine console">
-            <MinePanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
-          </Panel>
-        </div>
+        <div className="col">{mineConsole}</div>
       </div>
     </main>
   );

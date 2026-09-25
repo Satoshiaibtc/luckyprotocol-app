@@ -114,7 +114,39 @@ function YieldCell({ r }) {
   );
 }
 
-export function MinesTable({ q, self, showTicker = false, empty = "No mines yet.", connectedGate }) {
+/**
+ * `compact` (phones): block · digit chip + yield · short txid — the miner
+ * column is dropped (the row still highlights your own mines).
+ */
+export function MinesTable({ q, self, showTicker = false, empty = "No mines yet.", connectedGate, compact = false }) {
+  if (compact) {
+    return (
+      <Frame label="Mines" cols={showTicker ? "cols-mines-ct" : "cols-mines-c"} q={q} empty={empty} connectedGate={connectedGate}>
+        {{
+          head: (
+            <div className="tr th" role="row">
+              <span>Block</span>
+              {showTicker && <span>Token</span>}
+              <span>Yield</span>
+              <span className="right">Tx</span>
+            </div>
+          ),
+          body: q.rows.map((r) => (
+            <div className={`tr${self && r.sender === self ? " me" : ""}`} key={r.txid} role="row">
+              <span className="num">{fmtInt(r.block_height)}</span>
+              {showTicker && (
+                <a href={tokenHref(r.ticker)} className="mono strong">{r.ticker}</a>
+              )}
+              <YieldCell r={r} />
+              <span className="right">
+                <TxLink txid={r.txid} head={4} tail={3} />
+              </span>
+            </div>
+          )),
+        }}
+      </Frame>
+    );
+  }
   return (
     <Frame label="Mines" cols="cols-mines" q={q} empty={empty} connectedGate={connectedGate}>
       {{
@@ -147,7 +179,30 @@ export function MinesTable({ q, self, showTicker = false, empty = "No mines yet.
   );
 }
 
-export function HoldersTable({ q, minted, self }) {
+/** `compact` (phones): address · balance. */
+export function HoldersTable({ q, minted, self, compact = false }) {
+  if (compact) {
+    return (
+      <Frame label="Holders" cols="cols-holders-c" q={q} empty="No holders yet.">
+        {{
+          head: (
+            <div className="tr th" role="row">
+              <span>Address</span>
+              <span className="right">Balance</span>
+            </div>
+          ),
+          body: q.rows.map((h) => (
+            <div className={`tr${self && h.address === self ? " me" : ""}`} key={h.address} role="row">
+              <span>
+                <AddrLink address={h.address} self={self} head={6} tail={5} />
+              </span>
+              <span className="num right">{fmtInt(h.balance)}</span>
+            </div>
+          )),
+        }}
+      </Frame>
+    );
+  }
   return (
     <Frame label="Holders" cols="cols-holders" q={q} empty="No holders yet.">
       {{
