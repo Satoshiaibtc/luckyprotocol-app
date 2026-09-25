@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { buildHeaders, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
 import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHost.js";
+import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/specUrl.js";
 
 // ---- L-14: _headers generated from VITE_INDEXER_URL ----------------------------------------------------
 {
@@ -48,4 +49,24 @@ import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHos
   assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", mock: true }), null, "mock builds never redirect");
 }
 
-console.log("web: headers, canonical host ok");
+// ---- L-16: VITE_SPEC_URL validated like VITE_INDEXER_URL ---------------------------------------------------
+{
+  assert.equal(DEFAULT_SPEC_URL, "/PROTOCOL-v3.md");
+  assert.equal(isAllowedSpecUrl("/PROTOCOL-v3.md"), true, "same-origin path");
+  assert.equal(isAllowedSpecUrl("/docs/spec.md?v=3#s7"), true);
+  assert.equal(isAllowedSpecUrl("https://docs.luckyprotocolai.com/PROTOCOL-v3.md"), true, "https");
+  assert.equal(isAllowedSpecUrl("http://docs.example/spec.md"), false, "plain http is not allowed");
+  assert.equal(isAllowedSpecUrl("//evil.example/spec.md"), false, "protocol-relative is not a same-origin path");
+  assert.equal(isAllowedSpecUrl("javascript:alert(1)"), false);
+  assert.equal(isAllowedSpecUrl("data:text/html,hi"), false);
+  assert.equal(isAllowedSpecUrl("PROTOCOL-v3.md"), false, "relative paths are not accepted");
+  assert.equal(isAllowedSpecUrl("/a b"), false, "no whitespace");
+  assert.equal(isAllowedSpecUrl(""), false);
+  assert.equal(isAllowedSpecUrl(undefined), false);
+  assert.equal(resolveSpecUrl("https://docs.luckyprotocolai.com/x.md"), "https://docs.luckyprotocolai.com/x.md");
+  assert.equal(resolveSpecUrl("javascript:alert(1)"), DEFAULT_SPEC_URL, "invalid → default");
+  assert.equal(resolveSpecUrl(""), DEFAULT_SPEC_URL);
+  assert.equal(resolveSpecUrl(undefined), DEFAULT_SPEC_URL);
+}
+
+console.log("web: headers, canonical host, spec URL ok");
