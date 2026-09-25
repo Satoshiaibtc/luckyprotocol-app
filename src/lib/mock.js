@@ -634,6 +634,13 @@ export async function mockGet(path) {
     }
     return { txid, confirmed: false, block_height: null, block_hash: null, block_time: null };
   }
+  if (p === "/blocks/recent") {
+    const tip = tipHeight();
+    const limit = Math.min(32, Math.max(1, Number(q.get("limit") || 16)));
+    const blocks = [];
+    for (let h = tip; h > tip - limit && h >= 0; h--) blocks.push({ height: h, hash: blockHashAt(h) });
+    return { tip_height: tip, blocks };
+  }
   if ((m = p.match(/^\/block-info\/(\d+)$/))) {
     const height = Number(m[1]);
     const tip = tipHeight();

@@ -549,6 +549,31 @@ export async function txStatus(txid, signal) {
 }
 
 /** GET /block-info/:height → `{ height, hash, time }` | null (past tip) */
+/**
+ * GET /blocks/recent?limit=N → `{ tip_height, blocks: [{ height, hash }] }`
+ * newest first (spec §5). One request replaces N /block-info reads for the
+ * block tape. Returns null when the indexer predates the route (404).
+ */
+export async function recentBlocks(limit = 16, signal) {
+  const n = Math.min(32, Math.max(1, Number(limit) || 16));
+  let env;
+  try {
+    env = await _httpGet(`/blocks/recent?limit=${n}`, signal);
+  } catch (e) {
+    if (_is404(e)) return null;
+    throw e;
+  }
+  const rows = Array.isArray(env && env.blocks) ? env.blocks : [];
+  const blocks = [];
+  for (const r of rows.slice(0, n)) {
+    const height = _safeInt(r && r.height, 1e9);
+    const hash = _safeHash(r && r.hash);
+    if (height === null || !hash) continue;
+    blocks.push({ height, hash });
+  }
+  return { tip_height: _safeInt(env && env.tip_height, 1e9), blocks };
+}
+
 export async function blockInfo(height, signal) {
   try {
     const env = await _httpGet(`/block-info/${Number(height)}`, signal);

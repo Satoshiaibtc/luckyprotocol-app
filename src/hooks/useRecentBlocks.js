@@ -26,12 +26,37 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
     let alive = true;
     const cache = cacheRef.current;
 
+    // One /blocks/recent read covers the whole window; heights it does not
+    // return (indexer predates the route, or lags the tip) fall back to
+    // per-height /block-info reads.
     const fetchHeights = async (heights) => {
-      const results = await Promise.allSettled(heights.map((h) => indexer.blockInfo(h, ctrl.signal)));
-      if (!alive || ctrl.signal.aborted) return false;
+      if (heights.length === 0) return false;
       let reorg = false;
+      const byHeight = new Map();
+      try {
+        const res = await indexer.recentBlocks(Math.min(32, count + 8), ctrl.signal);
+        if (res) for (const b of res.blocks) byHeight.set(b.height, b.hash);
+      } catch (e) {
+        if (e && e.name === "AbortError") return false;
+        /* fall through to per-height reads */
+      }
+      if (!alive || ctrl.signal.aborted) return false;
+      const rest = [];
+      for (const h of heights) {
+        const hash = byHeight.get(h);
+        if (hash) {
+          const prev = cache.get(h);
+          if (prev && prev.hash && prev.hash !== hash) reorg = true;
+          cache.set(h, { hash, time: cache.get(h)?.time ?? null });
+        } else {
+          rest.push(h);
+        }
+      }
+      if (rest.length === 0) return reorg;
+      const results = await Promise.allSettled(rest.map((h) => indexer.blockInfo(h, ctrl.signal)));
+      if (!alive || ctrl.signal.aborted) return false;
       results.forEach((r, i) => {
-        const h = heights[i];
+        const h = rest[i];
         if (r.status === "fulfilled" && r.value && r.value.hash) {
           const prev = cache.get(h);
           if (prev && prev.hash && prev.hash !== r.value.hash) reorg = true;

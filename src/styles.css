@@ -125,7 +125,7 @@ body {
 body {
   min-width: 320px;
   overflow-x: hidden;
-  background: radial-gradient(1200px 600px at 50% -10%, #0b1a26 0%, #05080d 60%) fixed, var(--bg);
+  background: radial-gradient(1200px 600px at 50% -10%, #0b1a26 0%, #05080d 60%), var(--bg);
 }
 
 /* ambient grid + vignette (no scanlines) */
@@ -2578,4 +2578,24 @@ input[type="search"]::-webkit-search-decoration {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* ---- narrow-screen fixes (verified at 375px) ------------------------------------------------ */
+
+@media (max-width: 480px) {
+  /* The tape tally overflowed the panel head (nowrap) — let it wrap and drop the model suffix. */
+  .tally {
+    white-space: normal;
+    line-height: 1.5;
+  }
+  .tally .model {
+    display: none;
+  }
+}
+@media (max-width: 720px) {
+  /* Four stacked rows pinned to the top ate ~28% of a phone viewport — scroll with the page. */
+  .topbar {
+    position: static;
+    background: var(--bg);
+  }
 }
