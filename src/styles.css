@@ -2395,6 +2395,12 @@ input[type="search"]::-webkit-search-decoration {
   gap: 8px;
   flex-wrap: wrap;
 }
+.status .actions .sweep-row {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
 .status .pending {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

@@ -413,17 +413,26 @@ function _sanitizeHolderRow(h) {
   return { address, balance };
 }
 
-// `seen:false` only for a 404 (the indexer has never met the txid); an
-// unconfirmed-but-known tx answers 200 with confirmed:false and seen:true.
-function _sanitizeTxStatus(txid, s, seen = true) {
+// `seen` — has the indexer met this txid at all? True when confirmed, or
+// when the server says so (`seen:true` / `in_mempool:true`, a mempool-aware
+// /tx-status). A server that answers 200 `confirmed:false` for ANY txid
+// (no mempool lookup) proves nothing, so without those fields an
+// unconfirmed tx is `seen:false` (audit M-7 — the old "every 200 is seen"
+// reading made the avatar flow's "unseen" recovery dead code). A 404 is
+// `seen:false` as before. `in_mempool` is the server's own flag, or null
+// when it does not provide one.
+function _sanitizeTxStatus(txid, s, known = true) {
   if (!s || typeof s !== "object") {
-    return { txid, confirmed: false, seen, block_height: null, block_hash: null, block_time: null };
+    return { txid, confirmed: false, seen: false, in_mempool: known ? null : false, block_height: null, block_hash: null, block_time: null };
   }
   const confirmed = s.confirmed === true;
+  const inMempool = typeof s.in_mempool === "boolean" ? s.in_mempool : null;
+  const seen = confirmed || s.seen === true || inMempool === true;
   return {
     txid,
     confirmed,
     seen,
+    in_mempool: confirmed ? false : inMempool,
     block_height: confirmed ? _safeInt(s.block_height, 1e9) : null,
     block_hash: confirmed ? _safeHash(s.block_hash) : null,
     block_time: confirmed ? _safeInt(s.block_time, 1e12) : null,
@@ -580,8 +589,10 @@ export async function transfers(address, signal) {
 }
 
 /**
- * GET /tx-status/:txid → `{ txid, confirmed, seen, block_height, block_hash, block_time }`.
- * A 404 means "never seen" and is returned as `confirmed:false, seen:false`.
+ * GET /tx-status/:txid → `{ txid, confirmed, seen, in_mempool, block_height, block_hash, block_time }`.
+ * A 404 means "never seen" and is returned as `confirmed:false, seen:false`;
+ * `seen` is true only when confirmed or when the server reports the tx
+ * (`seen` / `in_mempool`) — see _sanitizeTxStatus.
  */
 export async function txStatus(txid, signal) {
   try {

@@ -54,6 +54,10 @@ import {
   REVEAL_UNSEEN_GRACE_MS,
   isSeedingError,
   retryOn503,
+  buildSweepPsbt,
+  signSweep,
+  sweepVsize,
+  classifyCommitState,
 } from "../src/lib/inscribe.js";
 import { buildPayPsbt, estimatePayFeeSats, extractRawTxHex, MAX_FEE_RATE_SAT_VB } from "../src/lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, buildAvatarPayload, parsePayload, payloadToString } from "../src/lib/payloads.js";
@@ -317,6 +321,58 @@ let commitTx;
   assert.equal(hex.encode(fin.envelope.bytes), hex.encode(BODY));
 }
 
+// ---- abandoned-commit sweep (key path, M-7) ------------------------------------------------------------------
+{
+  const commit = { txid: commitTx.txid, vout: 0, sats: commitAmount };
+  const r = buildSweepPsbt({ commit, ephemeralPriv: PRIV, leafScript: leaf, toAddress: MOCK_WALLET.address, feeRateSatVb: 2 });
+  assert.equal(r.commitAddress, commitAddr);
+  assert.equal(r.feeSats, Math.ceil(sweepVsize(MOCK_WALLET.address) * 2));
+  assert.equal(r.outSats, commitAmount - r.feeSats);
+  const { ins, outs } = parsePsbt(r.psbtHex);
+  assert.equal(ins.length, 1);
+  assert.equal(hex.encode(ins[0].txid), commitTx.txid, "input0 = the commit output");
+  assert.ok(ins[0].tapInternalKey && ins[0].tapMerkleRoot, "key-path fields present");
+  assert.equal(ins[0].tapLeafScript, undefined, "no leaf script: the envelope is not revealed");
+  assert.equal(outs.length, 1);
+  assert.equal(addrOf(outs[0].script), MOCK_WALLET.address, "vout0 → deployer");
+  assert.equal(outs[0].amount, BigInt(r.outSats));
+  const signed = signSweep(r.psbtHex, PRIV);
+  const d = decodeRawTx(signed.rawHex);
+  assert.equal(d.txid, signed.txid);
+  assert.equal(d.opReturnCount, 0, "a sweep carries no OP_RETURN");
+  assert.deepEqual(d.inputs, [{ txid: commitTx.txid, vout: 0 }]);
+  assert.equal(d.outputs.length, 1);
+  assert.equal(d.outputs[0].address, MOCK_WALLET.address);
+  assert.equal(commitAmount - d.outputs[0].sats, r.feeSats, "fee == input − output");
+  const w = btc.RawTx.decode(hex.decode(signed.rawHex)).witnesses[0];
+  assert.equal(w.length, 1, "key-path witness: one item");
+  assert.equal(w[0].length, 64, "64-byte Schnorr signature (SIGHASH_DEFAULT)");
+  assert.ok(Math.abs(btc.Transaction.fromRaw(hex.decode(signed.rawHex), { allowUnknownInputs: true, allowUnknownOutputs: true, disableScriptCheck: true }).vsize - r.vsize) <= 2, "estimated vsize ≈ real");
+  // the wrong key cannot sign it, and a commit too small for the fee is refused
+  assert.throws(() => signSweep(r.psbtHex, generateEphemeralKey()), /No taproot scripts signed|does not start|key/i);
+  assert.throws(() => buildSweepPsbt({ commit: { ...commit, sats: 600 }, ephemeralPriv: PRIV, leafScript: leaf, toAddress: MOCK_WALLET.address, feeRateSatVb: 8 }), /cannot pay/);
+  assert.throws(() => buildSweepPsbt({ commit, ephemeralPriv: PRIV, leafScript: leaf, toAddress: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT", feeRateSatVb: 2 }), /unsupported address type/);
+  assert.throws(() => buildSweepPsbt({ commit, ephemeralPriv: PRIV, leafScript: leaf, toAddress: MOCK_WALLET.address, feeRateSatVb: 5_000 }), /safety cap/);
+  console.log("sweep: key-path spend of an abandoned commit back to the deployer, no envelope, no OP_RETURN");
+}
+
+// ---- commit-state classifier (M-7) -----------------------------------------------------------------------------
+{
+  const unconfirmed = { confirmed: false, seen: false };
+  const confirmed = { confirmed: true, seen: true };
+  // test: listed unspent → the reveal's failure was a stale WALLET input, never the commit
+  assert.equal(classifyCommitState({ listingOk: true, listed: true, commitStatus: null }), "listed");
+  assert.equal(classifyCommitState({ listingOk: true, listed: true, commitStatus: confirmed }), "listed");
+  // test: absent from the listing but the commit is NOT confirmed → an unconfirmed commit is simply
+  //       invisible to the confirmed-UTXO listing: unverified, never "spent"
+  assert.equal(classifyCommitState({ listingOk: true, listed: false, commitStatus: unconfirmed }), "unverified");
+  assert.equal(classifyCommitState({ listingOk: true, listed: false, commitStatus: null }), "unverified", "no tx-status → unverified");
+  // test: the listing failed (503 / network) → nothing can be concluded
+  assert.equal(classifyCommitState({ listingOk: false, listed: false, commitStatus: confirmed }), "unverified");
+  // test: listing succeeded, outpoint absent, commit confirmed → the block-apply pass saw it spent
+  assert.equal(classifyCommitState({ listingOk: true, listed: false, commitStatus: confirmed }), "spent");
+}
+
 // ---- recovery record --------------------------------------------------------------------------------------
 const rec = {
   ticker: "LUCKY",
@@ -336,9 +392,16 @@ const rec = {
   revealBroadcastAt: null,
   feeRateSatVb: 8,
   createdAt: 1_700_000_000_000,
+  priorCommits: [],
 };
 {
   assert.equal(avatarRecordKey("lucky"), "lp.avatar.LUCKY");
+  // priorCommits round-trip; malformed / sub-dust entries are dropped, a missing field → []
+  const withPrior = { ...rec, priorCommits: [{ txid: T(21), vout: 0, sats: 4_000 }, { txid: "zz", vout: 0, sats: 4_000 }, { txid: T(22), vout: 1, sats: 100 }] };
+  assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(withPrior)).priorCommits, [{ txid: T(21), vout: 0, sats: 4_000 }]);
+  const noPrior = { ...rec };
+  delete noPrior.priorCommits;
+  assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(noPrior)).priorCommits, []);
   assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(rec)), rec, "round-trip");
   const withCommit = { ...rec, commitTxid: commitTx.txid, commitVout: 0, commitSats: commitAmount, commitChange: { vout: 1, sats: 1234 }, commitInputs: [{ txid: T(2), vout: 1 }], commitAttemptedAt: 1_700_000_001_000, revealTxid: T(5), revealBroadcastAt: 1_700_000_002_000 };
   assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(withCommit)), withCommit, "round-trip with commit + reveal + timestamps");

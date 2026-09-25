@@ -707,14 +707,14 @@ export async function mockGet(path) {
     const txid = decodeURIComponent(m[1]).toLowerCase();
     const e = w.sim.get(txid);
     if (e) {
-      if (!simConfirmed(e)) return { txid, confirmed: false, block_height: null, block_hash: null, block_time: null };
+      if (!simConfirmed(e)) return { txid, confirmed: false, seen: true, in_mempool: true, block_height: null, block_hash: null, block_time: null };
       return { txid, confirmed: true, block_height: e.height, block_hash: blockHashAt(e.height), block_time: Math.floor((e.at + CONFIRM_AFTER_MS) / 1000) };
     }
     const row = w.feed.find((r) => r.txid === txid) || w.trades.find((r) => r.txid === txid);
     if (row) {
       return { txid, confirmed: true, block_height: row.block_height, block_hash: row.block_hash, block_time: row.block_time ?? blockTimeAt(row.block_height) };
     }
-    return { txid, confirmed: false, block_height: null, block_hash: null, block_time: null };
+    return { txid, confirmed: false, seen: false, in_mempool: false, block_height: null, block_hash: null, block_time: null };
   }
   if (p === "/blocks/recent") {
     const tip = tipHeight();

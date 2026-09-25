@@ -70,6 +70,7 @@ import {
   decodeAddress,
   filterSpendable,
   inputVsize,
+  isOpReturnScript,
   isP2tr,
   makeOpReturnScript,
   outputVsize,
@@ -600,6 +601,15 @@ export function parseAvatarRecord(raw) {
     revealBroadcastAt: posIntOrNull(r.revealBroadcastAt, 1e13),
     feeRateSatVb: Number.isInteger(r.feeRateSatVb) ? r.feeRateSatVb : null,
     createdAt: Number.isInteger(r.createdAt) ? r.createdAt : Date.now(),
+    // Commit outputs paid earlier for this record that were never proven
+    // spent (a "Pay commit again" after an unverifiable rejection). They are
+    // spendable with the same ephemeral key — see buildSweepPsbt — so the
+    // record must outlive the reveal while any of them remains.
+    priorCommits: Array.isArray(r.priorCommits)
+      ? r.priorCommits
+        .filter((o) => o && TXID_RE.test(String(o.txid || "").toLowerCase()) && Number.isInteger(o.vout) && Number.isInteger(o.sats) && o.sats >= DUST_SATS && o.sats <= MAX_COMMIT_SATS)
+        .map((o) => ({ txid: String(o.txid).toLowerCase(), vout: o.vout, sats: o.sats }))
+      : [],
   };
   // The stored leaf must be the envelope for the stored key + image.
   let leafLen;
@@ -676,6 +686,93 @@ export function clearAvatarRecord(ticker) {
 /** `data:<ct>;base64,…` for a preview or the mock's avatar URL. */
 export function bytesToDataUrl(bytes, contentType) {
   return `data:${contentType};base64,${base64.encode(bytes)}`;
+}
+
+// ---- abandoned-commit sweep (§8.5 key path) --------------------------------------------------------
+//
+// The commit output is P2TR with internal key == the ephemeral key (§8.5),
+// so it can be spent on the KEY PATH — a 64-byte signature with the
+// merkle-root tweak — without revealing the envelope. That is the only way
+// to recover a commit that was paid but never revealed: the commit funds
+// exactly its own envelope's weight once, so a script-path spend that
+// carried the leaf again would cost more than the output holds.
+
+/** vB of a sweep: overhead + one key-path P2TR input + one address output. */
+export function sweepVsize(toAddress) {
+  return VSIZE_TX_OVERHEAD + inputVsize("tr") + outputVsize(toAddress);
+}
+
+/**
+ * Unsigned sweep of one commit output back to `toAddress` (the deployer):
+ * input0 = the commit (key-path fields only: tapInternalKey +
+ * tapMerkleRoot, NO tapLeafScript), vout0 = commit sats − fee. No
+ * OP_RETURN — a plain spend the indexer ignores (the commit carries no
+ * tokens). Throws when the output would be sub-dust at this fee rate.
+ * → { psbtHex, feeSats, outSats, vsize, feeRateSatVb }
+ */
+export function buildSweepPsbt({ commit, ephemeralPriv, leafScript, toAddress, feeRateSatVb }) {
+  if (!commit || typeof commit.txid !== "string" || !TXID_RE.test(commit.txid.toLowerCase()) || !Number.isInteger(commit.vout) || !Number.isInteger(Number(commit.sats)) || Number(commit.sats) < DUST_SATS) {
+    throw new Error("sweep: commit outpoint { txid, vout, sats } is required");
+  }
+  decodeAddress(toAddress);
+  const pay = commitPayment(ephemeralPriv, leafScript);
+  const rate = checkedFeeRate(feeRateSatVb);
+  const sats = Number(commit.sats);
+  const vsize = sweepVsize(toAddress);
+  const feeSats = Math.ceil(vsize * rate);
+  const outSats = sats - feeSats;
+  if (outSats < DUST_SATS) {
+    throw new Error(
+      `sweep: the commit output (${sats.toLocaleString("en-US")} sats) cannot pay a ${feeSats.toLocaleString("en-US")}-sat fee ` +
+      `and still leave ≥ ${DUST_SATS} sats — lower the fee rate or leave it`,
+    );
+  }
+  const tx = new btc.Transaction({ allowUnknownInputs: true, allowUnknownOutputs: false });
+  tx.addInput({
+    txid: commit.txid.toLowerCase(),
+    index: commit.vout,
+    witnessUtxo: { script: pay.script, amount: BigInt(sats) },
+    tapInternalKey: pay.tapInternalKey,
+    tapMerkleRoot: pay.tapMerkleRoot,
+  });
+  tx.addOutputAddress(toAddress, BigInt(outSats), NETWORK);
+  return { psbtHex: hex.encode(tx.toPSBT()), feeSats, outSats, vsize: Math.ceil(vsize), feeRateSatVb: rate, commitAddress: pay.address };
+}
+
+/**
+ * Key-path-sign input0 of a sweep with the ephemeral key, finalize and
+ * extract. Asserts the witness is a single 64-byte Schnorr signature (a
+ * key-path spend — the envelope stays private). → { rawHex, txid }
+ */
+export function signSweep(psbtHex, ephemeralPriv) {
+  const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), PSBT_OPTS);
+  if (tx.inputsLength !== 1 || tx.outputsLength !== 1) throw new Error("sweep: expected exactly one input and one output");
+  const in0 = tx.getInput(0);
+  if (in0.finalScriptWitness) throw new Error("sweep: input0 is already finalized");
+  if (in0.tapLeafScript && in0.tapLeafScript.length) throw new Error("sweep: input0 must not carry tapLeafScript (key path only)");
+  if (isOpReturnScript(tx.getOutput(0).script)) throw new Error("sweep: output must be an address, not OP_RETURN");
+  tx.signIdx(ephemeralPriv, 0);
+  tx.finalizeIdx(0);
+  const w = tx.getInput(0).finalScriptWitness;
+  if (!w || w.length !== 1 || w[0].length !== 64) throw new Error("sweep: input0 did not finalize as a key-path spend");
+  return { rawHex: hex.encode(tx.extract()), txid: tx.id };
+}
+
+/**
+ * What a `/btc-utxos/:commitAddress` listing plus `/tx-status/:commitTxid`
+ * say about a commit output after the node refused the reveal for an
+ * input reason (audit M-7):
+ *   'listed'     — the outpoint is listed unspent: the commit is fine, a WALLET input was stale
+ *   'spent'      — the listing succeeded, lacks the outpoint, AND the commit tx is confirmed
+ *                  (the block-apply pass saw it spent)
+ *   'unverified' — anything else: the listing failed (503 / network), or it succeeded but
+ *                  the commit is not confirmed, so "not listed" means only "not seen yet"
+ *                  (an unconfirmed commit is invisible to the confirmed-UTXO listing)
+ */
+export function classifyCommitState({ listingOk, listed, commitStatus }) {
+  if (listingOk && listed) return "listed";
+  if (listingOk && !listed && commitStatus && commitStatus.confirmed === true) return "spent";
+  return "unverified";
 }
 
 // ---- recovery decisions (pure; used by useAvatar, tested in test/inscribe.test.js) -----------------

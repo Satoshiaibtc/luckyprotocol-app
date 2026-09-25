@@ -24,6 +24,7 @@ function litCount(av) {
     case "reveal-building":
     case "reveal-signing":
     case "reveal-broadcast":
+    case "commit-unverified":
     case "commit-spent":
       return 2;
     case "pending":
@@ -64,10 +65,65 @@ function buttonLabel(phase) {
 function discardWarning(rec) {
   if (!rec) return null;
   const sats = fmtInt(rec.commitAmount);
-  if (rec.revealTxid) return `Discarding forgets the key: if the reveal never confirms, the ${sats} sats at the commit address become unspendable.`;
-  if (rec.commitTxid) return `Discarding forgets the key: the ${sats} sats at the commit address become unspendable.`;
-  if (rec.commitAttemptedAt) return `Discarding forgets the key: if the earlier commit payment did go out, its ${sats} sats become unspendable.`;
-  return null;
+  const prior = rec.priorCommits && rec.priorCommits.length ? ` It also forgets ${rec.priorCommits.length} earlier commit output(s) (${fmtInt(rec.priorCommits.reduce((a, o) => a + o.sats, 0))} sats) that could still be swept back.` : "";
+  if (rec.revealTxid) return `Discarding forgets the key: if the reveal never confirms, the ${sats} sats at the commit address become unspendable.${prior}`;
+  if (rec.commitTxid) return `Discarding forgets the key: the ${sats} sats at the commit address become unspendable.${prior}`;
+  if (rec.commitAttemptedAt) return `Discarding forgets the key: if the earlier commit payment did go out, its ${sats} sats become unspendable.${prior}`;
+  return prior ? `Discarding forgets the key.${prior}` : null;
+}
+
+/** Two-step action (click → confirm / cancel) with an explanation shown only on the confirm step. */
+function ConfirmControl({ label, confirmLabel, warning, onConfirm, disabled = false, className = "btn btn-sm" }) {
+  const [confirm, setConfirm] = useState(false);
+  if (!confirm) {
+    return (
+      <button className={className} type="button" onClick={() => setConfirm(true)} disabled={disabled}>
+        {label}
+      </button>
+    );
+  }
+  return (
+    <>
+      <button className="btn btn-danger btn-sm" type="button" onClick={() => { setConfirm(false); onConfirm(); }} disabled={disabled}>
+        {confirmLabel || label}
+      </button>
+      <button className="btn btn-ghost btn-sm" type="button" onClick={() => setConfirm(false)}>
+        Cancel
+      </button>
+      {warning && <span className="err">{warning}</span>}
+    </>
+  );
+}
+
+/** "Sweep abandoned commit" rows for every prior commit output the record still holds. */
+function SweepControls({ av, onSweep, canAct }) {
+  const list = av.sweepable || av.record?.priorCommits || [];
+  if (!list.length) return null;
+  const sw = av.sweep || null;
+  return (
+    <>
+      {list.map((o) => {
+        const key = `${o.txid}:${o.vout}`;
+        const mine = sw && sw.outpoint === key ? sw : null;
+        const busy = mine && (mine.phase === "building" || mine.phase === "broadcast");
+        return (
+          <span key={key} className="sweep-row">
+            <button className="btn btn-sm" type="button" onClick={() => onSweep(key)} disabled={!canAct || busy} title={`Key-path spend of ${key} back to your address with the throw-away key — no image, no OP_RETURN`}>
+              {busy ? "Sweeping…" : `Sweep abandoned commit ${shortTxid(o.txid, 6, 4)}:${o.vout} (${fmtInt(o.sats)} sats)`}
+            </button>
+            {mine && mine.phase === "error" ? <span className="err">{mine.error}</span> : null}
+          </span>
+        );
+      })}
+      {sw && sw.phase === "done" && sw.txid ? (
+        <span>
+          Swept — <TxA txid={sw.txid} label="tx" />
+          {sw.outSats ? ` · ${fmtInt(sw.outSats)} sats back to you` : ""}
+        </span>
+      ) : null}
+      {sw && sw.phase === "gone" ? <span className="muted">The node says {shortTxid(sw.outpoint.split(":")[0], 6, 4)} was already spent — dropped from the record.</span> : null}
+    </>
+  );
 }
 
 /** Two-step Discard (click → confirm / keep) with the record-specific warning. */
@@ -103,7 +159,7 @@ function DiscardControl({ label = "Discard", confirmLabel, warning, onDiscard })
  */
 export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
   const { wallet, fee, indexerOk } = useApp();
-  const { avatar: av, isDeployer, pickFile, start, resume, payCommit, rebuildReveal, discard, reset, busy } = useAvatar({
+  const { avatar: av, isDeployer, pickFile, start, resume, payCommit, retryReveal, checkCommit, sweepCommit, rebuildReveal, discard, reset, busy } = useAvatar({
     wallet,
     ticker,
     tokenInfo,
@@ -293,7 +349,7 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
       <div className="phase-track three" aria-hidden="true">
         {PHASES.map((p, i) => {
           let cls = "";
-          if (i < lit) cls = av.phase === "error" || av.phase === "commit-spent" ? "fail" : av.phase === "pending" && i === 2 ? "pulse" : "on";
+          if (i < lit) cls = av.phase === "error" || av.phase === "commit-spent" || av.phase === "commit-unverified" ? "fail" : av.phase === "pending" && i === 2 ? "pulse" : "on";
           return (
             <div key={p} className={cls}>
               <span className="seg" />
@@ -310,6 +366,9 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
         onReset={reset}
         onResume={resume}
         onPayCommit={payCommit}
+        onRetryReveal={retryReveal}
+        onCheckCommit={checkCommit}
+        onSweep={sweepCommit}
         onRebuild={rebuildReveal}
         onDiscard={discard}
         indexerOk={indexerOk}
@@ -343,18 +402,32 @@ function commitSpentText(av) {
   const lead =
     av.spendKind === "mempool"
       ? `An unconfirmed transaction already spends the commit output ${outpoint} — most likely an earlier reveal from this browser whose txid was not recorded.`
-      : `The node does not know the commit output ${outpoint} — either an earlier reveal already spent it, or the commit never made it into the mempool.`;
-  const cs = av.commitStatus;
-  let status = "";
-  if (cs) {
-    if (cs.confirmed) status = ` The commit confirmed in block ${fmtInt(cs.blockHeight)}, so its output was spent by another transaction.`;
-    else if (!cs.seen) status = " The indexer has never seen the commit tx either — it was most likely dropped before confirming, so its sats never left your wallet.";
-    else status = " The commit is still unconfirmed in the indexer's view.";
-  }
-  return `${lead}${status} Watching the token for its avatar to change (every 15 s).`;
+      : `The commit output ${outpoint} is spent: the commit tx is confirmed${av.commitStatus?.blockHeight ? ` (block ${fmtInt(av.commitStatus.blockHeight)})` : ""} and the confirmed UTXO set no longer lists its output — an earlier reveal must have used it.`;
+  return `${lead} Watching the token for its avatar to change (every 15 s).`;
 }
 
-function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, onRebuild, onDiscard, indexerOk, fee, feeRate }) {
+function commitUnverifiedText(av) {
+  const outpoint = av.commitTxid ? `${shortTxid(av.commitTxid, 6, 6)}:${av.record?.commitVout ?? 0}` : "the commit output";
+  const cs = av.commitStatus;
+  let status;
+  if (!cs) status = "the indexer could not report the commit tx's status";
+  else if (cs.confirmed) status = `the commit tx is confirmed (block ${fmtInt(cs.blockHeight)})`;
+  else if (cs.inMempool || cs.seen) status = "the indexer sees the commit tx unconfirmed in the mempool";
+  else status = "the indexer has not seen the commit tx yet";
+  const listing =
+    av.listing === "unavailable"
+      ? "the commit address could not be listed (the indexer was still scanning or unreachable)"
+      : av.listing === "listed"
+        ? "the commit output IS listed unspent"
+        : "the commit output is not in the confirmed UTXO listing";
+  return (
+    `The node refused the reveal because its commit input ${outpoint} was missing or already spent, but nothing proves the commit is gone: ${listing}, and ${status}. ` +
+    "An unconfirmed commit is invisible to the listing until it confirms (~10 min) unless the indexer watched it arrive. " +
+    "Retry the reveal or check again — do not pay a second commit unless you accept that the first one may confirm later (it is kept and can be swept back)."
+  );
+}
+
+function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, onRetryReveal, onCheckCommit, onSweep, onRebuild, onDiscard, indexerOk, fee, feeRate }) {
   let led = "idle";
   let text;
   let detail = null;
@@ -396,7 +469,7 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
       break;
     case "commit-unpaid":
       led = "idle";
-      text = `A commit payment was started in an earlier session, but the indexer lists nothing at the commit address. If ${providerName} shows that payment as sent, give the indexer a moment and check again; otherwise pay the commit again.`;
+      text = `A commit payment was started in an earlier session, but the indexer lists nothing at the commit address. The indexer lists an unconfirmed commit only if it watched it arrive; otherwise it appears once it confirms (~10 min). If ${providerName} shows that payment as sent, wait for it and check again; pay again only if it was never sent.`;
       detail = av.record ? (
         <>
           {fmtInt(av.record.commitAmount)} sats to <span className="mono">{shortAddr(av.record.commitAddress, 8, 6)}</span>
@@ -405,16 +478,52 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
       ) : null;
       actions = (
         <>
-          <button className="btn btn-primary btn-sm" type="button" onClick={onPayCommit} disabled={!canAct}>
-            Pay commit again
-          </button>
-          <button className="btn btn-sm" type="button" onClick={onResume} disabled={!indexerOk}>
+          <button className="btn btn-primary btn-sm" type="button" onClick={onResume} disabled={!indexerOk}>
             Check again
           </button>
+          <ConfirmControl
+            label="Pay commit again"
+            confirmLabel={`Pay ${fmtInt(av.record?.commitAmount)} sats again`}
+            warning="Only if the earlier payment was never sent — a payment that is still confirming would be a second commit to the same address (an unspent one found there is adopted instead of paying)."
+            onConfirm={onPayCommit}
+            disabled={!canAct}
+          />
           <DiscardControl warning={discardWarning(av.record)} onDiscard={onDiscard} />
         </>
       );
       break;
+    case "commit-unverified": {
+      led = "err";
+      text = commitUnverifiedText(av);
+      detail = (
+        <>
+          {links}
+          {av.nodeMessage ? ` · node: ${av.nodeMessage}` : ""}
+          {av.checkedAt ? ` · checked ${fmtTime(av.checkedAt / 1000)}` : ""}
+        </>
+      );
+      const outpoint = av.commitTxid ? `${shortTxid(av.commitTxid, 6, 4)}:${av.record?.commitVout ?? 0}` : "the earlier commit";
+      const sats = av.record?.commitSats ?? av.record?.commitAmount;
+      actions = (
+        <>
+          <button className="btn btn-primary btn-sm" type="button" onClick={onRetryReveal} disabled={!canAct}>
+            Retry reveal
+          </button>
+          <button className="btn btn-sm" type="button" onClick={onCheckCommit} disabled={!indexerOk}>
+            Check again
+          </button>
+          <ConfirmControl
+            label="Pay commit again"
+            confirmLabel={`Pay a new commit (${fmtInt(av.record?.commitAmount)} sats)`}
+            warning={`The earlier commit ${outpoint}${sats ? ` (${fmtInt(sats)} sats)` : ""} stays in the record: if it turns out unspent you can sweep it back with the throw-away key. If it is found unspent at the commit address it is adopted instead of paying.`}
+            onConfirm={onPayCommit}
+            disabled={!canAct}
+          />
+          <DiscardControl warning={discardWarning(av.record)} onDiscard={onDiscard} />
+        </>
+      );
+      break;
+    }
     case "commit-building":
       led = "busy";
       text = "Building the commit — a plain payment to the commit address.";
@@ -496,13 +605,14 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
           <button className="btn btn-primary btn-sm" type="button" onClick={onPayCommit} disabled={!canAct} title="Pays a new commit to the same address (an unspent payment already there is adopted instead), then reveals">
             Pay commit again
           </button>
-          <DiscardControl onDiscard={onDiscard} />
+          <DiscardControl warning={discardWarning(av.record)} onDiscard={onDiscard} />
         </>
       );
       break;
-    case "confirmed":
+    case "confirmed": {
       led = "ok";
       text = `${ticker} avatar inscribed.`;
+      const prior = av.sweepable || [];
       detail = (
         <>
           {links}
@@ -512,9 +622,19 @@ function StatusLine({ av, ticker, providerName, onReset, onResume, onPayCommit, 
             : av.reconcile === "timeout"
               ? "indexer has not applied this avatar yet — the recovery record stays until it does"
               : "reconciling with indexer…"}
+          {av.reconcile === "done" && prior.length ? ` · the record is kept: ${prior.length} earlier commit output(s) may still be unspent — sweep them back or discard.` : ""}
         </>
       );
+      if (av.reconcile === "done" && (prior.length || av.sweep)) {
+        actions = (
+          <>
+            <SweepControls av={av} onSweep={onSweep} canAct={canAct} />
+            {prior.length ? <DiscardControl label="Forget them" confirmLabel="Forget the earlier commits" warning={discardWarning(av.record)} onDiscard={onDiscard} /> : null}
+          </>
+        );
+      }
       break;
+    }
     case "error":
       led = "err";
       text = av.error || "Failed.";
