@@ -1008,13 +1008,13 @@ input[type="search"]::-webkit-search-decoration {
   font-family: var(--mono);
   font-size: 12px;
 }
-.y-500 {
+.y-high {
   color: var(--accent);
 }
-.y-100 {
+.y-mid {
   color: var(--text);
 }
-.y-21 {
+.y-base {
   color: var(--muted);
 }
 .y-invalid {

@@ -1,12 +1,12 @@
 {
-  "note": "Golden yield vectors for LuckyProtocol v3 (PROTOCOL-v3.md §3). Shared byte-identical by the Rust indexer and luckyprotocol-app; both test suites assert them. Only the last hex char of `hash` matters: 'f' → 500, 'a'..'e' → 100, '0'..'9' → 21. Input is lowercased first, so an uppercase 'F' also yields 500. One row per entry in the spec's golden table.",
+  "note": "Golden yield vectors for LuckyProtocol v3 (PROTOCOL-v3.md §3). Shared byte-identical by the Rust indexer and luckyprotocol-app; both test suites assert them. Only the last hex char of `hash` matters: 'f' → 1000, 'a'..'e' → 500, '0'..'9' → 100. Input is lowercased first, so an uppercase 'F' also yields 1000. One row per entry in the spec's golden table.",
   "vectors": [
-    { "hash": "0000000000000000000000000000000000000000000000000000000000000000", "yield": 21 },
-    { "hash": "0000000000000000000000000000000000000000000000000000000000000005", "yield": 21 },
-    { "hash": "0000000000000000000000000000000000000000000000000000000000000009", "yield": 21 },
-    { "hash": "000000000000000000000000000000000000000000000000000000000000000a", "yield": 100 },
-    { "hash": "000000000000000000000000000000000000000000000000000000000000000e", "yield": 100 },
-    { "hash": "000000000000000000000000000000000000000000000000000000000000000f", "yield": 500 },
-    { "hash": "000000000000000000000000000000000000000000000000000000000000000F", "yield": 500 }
+    { "hash": "0000000000000000000000000000000000000000000000000000000000000000", "yield": 100 },
+    { "hash": "0000000000000000000000000000000000000000000000000000000000000005", "yield": 100 },
+    { "hash": "0000000000000000000000000000000000000000000000000000000000000009", "yield": 100 },
+    { "hash": "000000000000000000000000000000000000000000000000000000000000000a", "yield": 500 },
+    { "hash": "000000000000000000000000000000000000000000000000000000000000000e", "yield": 500 },
+    { "hash": "000000000000000000000000000000000000000000000000000000000000000f", "yield": 1000 },
+    { "hash": "000000000000000000000000000000000000000000000000000000000000000F", "yield": 1000 }
   ]
 }

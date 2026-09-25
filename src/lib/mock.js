@@ -115,7 +115,7 @@ function blockHashAt(height) {
 function forceYield(height, y) {
   const raw = h256(`block:${height}`);
   const pick = parseInt(raw[40], 16);
-  FORCED_DIGITS.set(height, y === 500 ? "f" : y === 100 ? "abcde"[pick % 5] : String(pick % 10));
+  FORCED_DIGITS.set(height, y === 1000 ? "f" : y === 500 ? "abcde"[pick % 5] : String(pick % 10));
 }
 function blockTimeAt(height) {
   return LOAD_TS - (BASE_TIP - height) * 600 - 240;
@@ -134,7 +134,7 @@ const TOKEN_SEEDS = [
   { ticker: "VOLT", minted: 0, deploy_block: 969_799, holders: 0, base: 0, deployerType: "tr" }, // brand-new: no mines, no trades, no asks
 ];
 
-const YIELD_PATTERN = [21, 100, 21, 500, 21, 21, 100, 21, 100, 21, 21, 500, 21, 100, 21, 21, 100, 21, 21, 21];
+const YIELD_PATTERN = [100, 500, 100, 1000, 100, 100, 500, 100, 500, 100, 100, 1000, 100, 500, 100, 100, 500, 100, 100, 100];
 const FEED_TICKERS = ["LUCKY", "SATS", "LUCKY", "BLOK", "LUCKY", "NODE", "LUCKY", "SATS", "BLOK", "LUCKY", "ORE", "LUCKY", "GRID", "SATS", "LUCKY", "BLOK", "NODE", "LUCKY", "SATS", "BLOK"];
 const SENDERS = Array.from({ length: 7 }, (_, i) =>
   i % 3 === 2 ? fakeP2wpkh(`miner-${i}`) : fakeP2tr(`miner-${i}`),
@@ -159,7 +159,7 @@ function world() {
       deploy_txid: fakeTxid(`deploy-${s.ticker}`),
       deploy_block: s.deploy_block,
       holders: s.holders,
-      mine_count: Math.round(s.minted / 75.625),
+      mine_count: Math.round(s.minted / 281.25),
       trade_count: 0,
       volume_sats: 0,
     });
@@ -298,7 +298,7 @@ function ensureSeeded(addr) {
 }
 
 const MY_SEEDED_MINES = (addr) =>
-  [500, 21, 100].map((y, i) => {
+  [1000, 100, 500].map((y, i) => {
     const height = BASE_TIP - 30 - i * 7;
     forceYield(height, y);
     return {

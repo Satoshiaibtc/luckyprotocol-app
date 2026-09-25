@@ -87,27 +87,27 @@ must never drop it as sub-dust.
 ```
 yield(block_hash) :=
   let d = last hex char of lowercase(block_hash)
-  d == 'f'        → 500
-  d in 'a'..='e'  → 100
-  d in '0'..='9'  → 21
+  d == 'f'        → 1000
+  d in 'a'..='e'  → 500
+  d in '0'..='9'  → 100
 ```
 
 `block_hash` is the hash of the block that **confirms the MINE tx**.
 Credit = `min(yield, remaining_supply)`; when remaining supply is 0 the
 MINE records `cap_exhausted:true` and credits 0.
 
-Expected yield per MINE = (500 + 5·100 + 10·21) / 16 = **75.625**;
-21,000,000 / 75.625 ≈ 277,700 MINEs to exhaust a ticker.
+Expected yield per MINE = (1000 + 5·500 + 10·100) / 16 = **281.25**;
+21,000,000 / 281.25 ≈ 74,700 MINEs to exhaust a ticker.
 
 Golden vectors (shared byte-identical by indexer and web; both test
 suites assert them):
 
 | last hex char | yield |
 |---|---|
-| `0` `5` `9` | 21 |
-| `a` `e` | 100 |
-| `f` | 500 |
-| `F` (uppercase input) | 500 |
+| `0` `5` `9` | 100 |
+| `a` `e` | 500 |
+| `f` | 1000 |
+| `F` (uppercase input) | 1000 |
 
 ## 4. Token routing rules (unchanged from v2)
 

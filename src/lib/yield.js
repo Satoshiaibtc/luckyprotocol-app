@@ -7,17 +7,17 @@
 //
 //   yield(block_hash) :=
 //     let d = last hex char of lowercase(block_hash)
-//     d == 'f'        → 500
-//     d in 'a'..='e'  → 100
-//     d in '0'..='9'  → 21
+//     d == 'f'        → 1000
+//     d in 'a'..='e'  → 500
+//     d in '0'..='9'  → 100
 //
 // `block_hash` is the hash of the block that CONFIRMS the MINE tx.
 
-export const YIELD_HIGH = 500; // last digit 'f'
-export const YIELD_MID = 100;  // last digit 'a'..'e'
-export const YIELD_BASE = 21;  // last digit '0'..'9'
+export const YIELD_HIGH = 1000; // last digit 'f'
+export const YIELD_MID = 500;   // last digit 'a'..'e'
+export const YIELD_BASE = 100;  // last digit '0'..'9'
 
-/** Expected yield per MINE: (500 + 5·100 + 10·21) / 16. */
+/** Expected yield per MINE: (1000 + 5·500 + 10·100) / 16 = 281.25. */
 export const EXPECTED_YIELD = (YIELD_HIGH + 5 * YIELD_MID + 10 * YIELD_BASE) / 16;
 
 const HEX_RE = /^[0-9a-f]+$/;
@@ -34,8 +34,8 @@ export function yieldDigit(blockHash) {
 }
 
 /**
- * mineYield(blockHash) → 21 | 100 | 500, or null when the input is empty
- * or not a hex string. Case-insensitive (uppercase 'F' → 500).
+ * mineYield(blockHash) → 100 | 500 | 1000, or null when the input is empty
+ * or not a hex string. Case-insensitive (uppercase 'F' → 1000).
  */
 export function mineYield(blockHash) {
   const d = yieldDigit(blockHash);

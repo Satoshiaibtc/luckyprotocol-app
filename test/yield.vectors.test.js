@@ -16,10 +16,10 @@ const { vectors } = JSON.parse(
 // The spec table has exactly these last-digit rows; guard against the
 // vectors file drifting away from it.
 const EXPECTED_ROWS = [
-  ["0", 21], ["5", 21], ["9", 21],
-  ["a", 100], ["e", 100],
-  ["f", 500],
-  ["F", 500],
+  ["0", 100], ["5", 100], ["9", 100],
+  ["a", 500], ["e", 500],
+  ["f", 1000],
+  ["F", 1000],
 ];
 assert.equal(vectors.length, EXPECTED_ROWS.length, "vector count must match spec §3 table");
 vectors.forEach((v, i) => {
@@ -48,11 +48,11 @@ for (const bad of ["", "   ", "xyz", "00g", null, undefined, 42, {}]) {
 // Every hex digit maps into exactly one bucket.
 for (const d of "0123456789abcdef") {
   const y = mineYield(`${"0".repeat(63)}${d}`);
-  const want = d === "f" ? 500 : d >= "a" ? 100 : 21;
+  const want = d === "f" ? 1000 : d >= "a" ? 500 : 100;
   assert.strictEqual(y, want, `digit ${d}`);
   assert.strictEqual(mineYield(`${"0".repeat(63)}${d.toUpperCase()}`), want, `digit ${d} upper`);
 }
 
-assert.strictEqual(EXPECTED_YIELD, 75.625, "expected yield per MINE (spec §3)");
+assert.strictEqual(EXPECTED_YIELD, 281.25, "expected yield per MINE (spec §3)");
 
 console.log(`yield vectors: ${passed}/${vectors.length} passed; degenerate + full-digit sweeps ok`);

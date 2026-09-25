@@ -3,7 +3,7 @@ import { useApp } from "../context.js";
 import { useMine } from "../hooks/useMine.js";
 import { estimateMineFeeSats } from "../lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
-import { YIELD_BASE, YIELD_MID, YIELD_HIGH, mineYield } from "../lib/yield.js";
+import { YIELD_BASE, YIELD_MID, YIELD_HIGH, EXPECTED_YIELD, mineYield } from "../lib/yield.js";
 import { fmtInt, txUrl, shortTxid, blockUrl, fmtAgo } from "../lib/format.js";
 import { ConnectPrompt } from "./TxProgress.jsx";
 
@@ -62,23 +62,23 @@ export default function MinePanel({ ticker, tokenInfo }) {
       <div className="yield-table" role="table" aria-label="Yield by last hash digit">
         <div className="yr" role="row">
           <span className="d mono">f</span>
-          <span className="y y-500">{YIELD_HIGH} {ticker}</span>
+          <span className="y y-high">{YIELD_HIGH} {ticker}</span>
           <span className="p muted">1 in 16</span>
         </div>
         <div className="yr" role="row">
           <span className="d mono">a–e</span>
-          <span className="y y-100">{YIELD_MID} {ticker}</span>
+          <span className="y y-mid">{YIELD_MID} {ticker}</span>
           <span className="p muted">5 in 16</span>
         </div>
         <div className="yr" role="row">
           <span className="d mono">0–9</span>
-          <span className="y y-21">{YIELD_BASE} {ticker}</span>
+          <span className="y y-base">{YIELD_BASE} {ticker}</span>
           <span className="p muted">10 in 16</span>
         </div>
       </div>
       <p className="rule">
         Every valid mine yields. The amount is the last hex digit of the block that confirms your transaction — public,
-        deterministic, and nothing is chosen by the miner. Expected yield ≈ 75.6 {ticker} per mine.
+        deterministic, and nothing is chosen by the miner. Expected yield ≈ {EXPECTED_YIELD} {ticker} per mine.
       </p>
 
       {tipHash && (

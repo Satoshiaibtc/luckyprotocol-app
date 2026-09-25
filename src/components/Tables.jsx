@@ -87,9 +87,9 @@ export function TradesTable({ q, self, showTicker = false, empty = "No trades ye
 
 function yieldClass(row) {
   if (row.status === "invalid") return "yield y-invalid";
-  if (row.yield_smallest >= 500) return "yield y-500";
-  if (row.yield_smallest >= 100) return "yield y-100";
-  return "yield y-21";
+  if (row.yield_smallest >= 1000) return "yield y-high";
+  if (row.yield_smallest >= 500) return "yield y-mid";
+  return "yield y-base";
 }
 
 export function MinesTable({ q, self, showTicker = false, empty = "No mines yet.", connectedGate }) {
