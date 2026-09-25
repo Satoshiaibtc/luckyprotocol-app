@@ -119,6 +119,17 @@ export function buildListingPsbt({ address, pubkeyHex, tokenUtxo, priceSats, amo
     throw new Error(`price must be a whole number of sats ≥ ${MIN_PRICE_SATS}`);
   }
   if (price > MAX_PRICE_SATS) throw new Error("price exceeds the 21e14-sat cap");
+  // A fill hands the WHOLE carrier to the buyer and pays the seller only
+  // output0 (= price). Any BTC on the carrier above the price is a gift to
+  // the buyer, so a listing must never price a UTXO below its own value
+  // (audit H-3). A fat SEND change output has to be split first.
+  if (price < sats) {
+    throw new Error(
+      `price ${price.toLocaleString("en-US")} sats is below the UTXO's own BTC value ` +
+      `(${sats.toLocaleString("en-US")} sats) — the surplus would go to the buyer; ` +
+      `list at ≥ ${sats.toLocaleString("en-US")} sats or split the tokens onto a 546-sat carrier first`,
+    );
+  }
   if (amount !== undefined) {
     const amt = Number(amount);
     if (!Number.isInteger(amt) || amt < 1 || amt > REQUIRED_TOKEN_SUPPLY) {
@@ -252,24 +263,31 @@ export function verifyListing({ psbtHex, order }) {
   }
   push("signature", "Seller signed input 0 with SINGLE|ANYONECANPAY (0x83)", sigOk, sigDetail);
 
-  // 4. output0.value == price_sats and output0.script == input0.script (== seller)
+  // 4. output0.value == price_sats, output0.value ≥ input0.witnessUtxo.value
+  //    (the carrier's BTC above the price would otherwise flow to the buyer's
+  //    change — a listing under the old rule is refused on this side too,
+  //    audit H-3) and output0.script == input0.script (== seller).
+  //    Fails closed: no witnessUtxo → no verdict → not ok.
   let outOk = false;
   let outDetail = "no output";
   if (L.output0 && L.input0?.witnessUtxo) {
     const price = BigInt(Math.max(0, Math.floor(Number(order.price_sats) || 0)));
     const valueOk = L.output0.amount === price;
+    const coversCarrier = typeof L.input0.witnessUtxo.amount === "bigint" && L.output0.amount >= L.input0.witnessUtxo.amount;
     const scriptOk = equalBytes(L.output0.script, L.input0.witnessUtxo.script);
     const sellerOk = !order.seller || L.output0.address === order.seller;
-    outOk = valueOk && scriptOk && sellerOk;
+    outOk = valueOk && coversCarrier && scriptOk && sellerOk;
     outDetail = !valueOk
       ? `output pays ${L.output0.amount} sats, order says ${price}`
-      : !scriptOk
-        ? "output script differs from the listed UTXO's script"
-        : !sellerOk
-          ? `output pays ${L.output0.address}, order seller is ${order.seller}`
-          : `${price} sats → ${L.output0.address}`;
+      : !coversCarrier
+        ? `output pays ${L.output0.amount} sats but the listed UTXO itself holds ${L.input0.witnessUtxo.amount} sats — price must be ≥ carrier value`
+        : !scriptOk
+          ? "output script differs from the listed UTXO's script"
+          : !sellerOk
+            ? `output pays ${L.output0.address}, order seller is ${order.seller}`
+            : `${price} sats → ${L.output0.address}`;
   }
-  push("output", "Output 0 pays exactly price_sats back to the seller's script", outOk, outDetail);
+  push("output", "Output 0 pays exactly price_sats (≥ the UTXO's own value) back to the seller's script", outOk, outDetail);
 
   // 5. witnessUtxo.amount == carrier_sats
   let carOk = false;

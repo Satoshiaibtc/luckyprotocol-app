@@ -55,7 +55,10 @@ export default function SellPanel({ ticker, token, onSettled }) {
           listing: open.get(k) || null,
         };
       })
-      .sort((a, b) => b.amount - a.amount);
+      // 546-sat carriers first (they are the ones meant to be listed); fat
+      // SEND change outputs sink to the bottom — listing one hands its BTC
+      // surplus to the buyer (audit H-3), so they are tagged "split first".
+      .sort((a, b) => (a.sats === DUST_SATS ? 0 : 1) - (b.sats === DUST_SATS ? 0 : 1) || b.amount - a.amount);
   }, [tokenUtxos.data, btcUtxos.data, myOrders.data, ticker]);
 
   const ordersHere = useMemo(
@@ -86,10 +89,15 @@ export default function SellPanel({ ticker, token, onSettled }) {
     const { sel: s, token: t } = seedRef.current;
     if (!s) return;
     const ref = t?.floor_unit_price ?? t?.last_trade?.unit_price ?? null;
+    // Floor of the prefill: never below the carrier's own BTC value (H-3).
+    const floorSats = Math.max(MIN_PRICE_SATS, Number.isInteger(s.sats) ? s.sats : 0);
     if (ref) {
-      const total = Math.max(MIN_PRICE_SATS, Math.round(ref * s.amount));
+      const total = Math.max(floorSats, Math.round(ref * s.amount));
       setTotalStr(String(total));
       setUnitStr(fmtUnitInput(total / s.amount));
+    } else if (floorSats > MIN_PRICE_SATS) {
+      setTotalStr(String(floorSats));
+      setUnitStr(fmtUnitInput(floorSats / s.amount));
     } else {
       setUnitStr("");
       setTotalStr("");
@@ -107,7 +115,12 @@ export default function SellPanel({ ticker, token, onSettled }) {
     if (sel && Number.isFinite(n) && n > 0) setUnitStr(fmtUnitInput(n / sel.amount));
   };
   const priceSats = Number(totalStr);
-  const priceOk = Number.isInteger(priceSats) && priceSats >= MIN_PRICE_SATS;
+  // The listing must pay the seller at least what the carrier already holds
+  // in BTC: a fill gives the buyer the whole UTXO and the seller only
+  // output0, so anything below `sel.sats` is a gift to the buyer (H-3).
+  const minPriceSats = Math.max(MIN_PRICE_SATS, sel && Number.isInteger(sel.sats) ? sel.sats : 0);
+  const priceOk = Number.isInteger(priceSats) && priceSats >= minPriceSats;
+  const fatCarrier = !!sel && Number.isInteger(sel.sats) && sel.sats > DUST_SATS;
 
   const signListing = async () => {
     if (!connected || !sel || !priceOk || sel.sats === null) return;
@@ -237,6 +250,10 @@ export default function SellPanel({ ticker, token, onSettled }) {
                       </span>
                     ) : r.listing ? (
                       <span className="status-tag s-open">listed @ {fmtUnit(r.listing.unit_price)}</span>
+                    ) : r.sats !== null && r.sats > DUST_SATS ? (
+                      <span className="status-tag s-cancelled" title={`This UTXO also holds ${fmtInt(r.sats)} sats of BTC that would go to the buyer — split the tokens onto a 546-sat carrier first.`}>
+                        split first
+                      </span>
                     ) : (
                       <span className="status-tag">listable</span>
                     )}
@@ -275,7 +292,13 @@ export default function SellPanel({ ticker, token, onSettled }) {
               {token?.last_trade ? ` · last ${fmtUnit(token.last_trade.unit_price)}` : ""}
             </span>
           </div>
-          {!priceOk && totalStr !== "" && <div className="err">Price must be a whole number of sats ≥ {MIN_PRICE_SATS}.</div>}
+          {!priceOk && totalStr !== "" && <div className="err">Price must be a whole number of sats ≥ {fmtInt(minPriceSats)}.</div>}
+          {fatCarrier && (
+            <div className="err">
+              This UTXO also carries {fmtInt(sel.sats)} sats of BTC, which go to the buyer together with the tokens — the minimum price is {fmtInt(sel.sats)} sats.
+              To list the tokens only, split them onto a 546-sat carrier first (below) and list that.
+            </div>
+          )}
           {sel.sats === null && <div className="err">The BTC value of this UTXO is unknown — refresh and try again (the listing must commit the exact carrier value).</div>}
           {sel.listing && <div className="notice">Already listed at {fmtUnit(sel.listing.unit_price)} sats. {RELIST_WARNING}</div>}
 

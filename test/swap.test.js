@@ -138,6 +138,43 @@ function runScenario(label, sellerType, buyerType) {
     const r = verifyListing({ psbtHex: signedListing, order: { ...order, id: `${T(9)}:0` } });
     assert.equal(r.checks.find((c) => c.id === "shape").ok, false);
   }
+  // H-3: a carrier worth more than the price hands its surplus to the buyer.
+  {
+    const fat = { txid: T(6), vout: 3, sats: 12_345 };
+    assert.throws(
+      () => buildListingPsbt({ address: seller.address, pubkeyHex: seller.pubkeyHex, tokenUtxo: fat, priceSats: 2_000, amount: 700 }),
+      /below the UTXO's own BTC value/,
+      `${label}: seller side refuses price < carrier sats`,
+    );
+    // price == carrier is the floor and builds
+    const atFloor = buildListingPsbt({ address: seller.address, pubkeyHex: seller.pubkeyHex, tokenUtxo: fat, priceSats: 12_345, amount: 700 });
+    assert.equal(parse(atFloor.psbtHex).getOutput(0).amount, 12_345n);
+    // buyer side: a listing built under the old rule (output0 < witnessUtxo) fails check 4, even when the order agrees with it
+    const tx = new btc.Transaction({ lockTime: 0 });
+    const input = { txid: T(6), index: 3, witnessUtxo: { script: seller.script, amount: 12_345n }, sighashType: 0x83 };
+    if (sellerType === "tr") input.tapInternalKey = pubSchnorr(seller.priv);
+    tx.addInput(input);
+    tx.addOutput({ script: seller.script, amount: 2_000n });
+    tx.signIdx(seller.priv, 0, [btc.SigHash.SINGLE_ANYONECANPAY]);
+    const under = hex.encode(tx.toPSBT());
+    const fatOrder = { ...order, id: `${T(6)}:3`, amount: 700, price_sats: 2_000, carrier_sats: 12_345 };
+    const r = verifyListing({ psbtHex: under, order: fatOrder });
+    assert.equal(r.ok, false, `${label}: under-priced fat carrier is refused`);
+    assert.equal(r.checks.find((c) => c.id === "output").ok, false);
+    assert.match(r.checks.find((c) => c.id === "output").detail, /price must be ≥ carrier value/);
+    assert.equal(r.checks.find((c) => c.id === "carrier").ok, true, "carrier check itself still agrees with the indexer");
+    assert.throws(
+      () => buildFillPsbt({ listingPsbtHex: under, order: fatOrder, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: 5_000_000 }], tokenOutpoints: [], feeRateSatVb: 8 }),
+      /failed verification/,
+      `${label}: fill refuses the under-priced listing`,
+    );
+    // …and the same carrier priced at its value verifies (missing witnessUtxo fails closed)
+    tx.updateOutput(0, { amount: 12_345n }, true);
+    tx.updateInput(0, { tapKeySig: undefined, partialSig: undefined }, true);
+    tx.signIdx(seller.priv, 0, [btc.SigHash.SINGLE_ANYONECANPAY]);
+    const ok = verifyListing({ psbtHex: hex.encode(tx.toPSBT()), order: { ...fatOrder, price_sats: 12_345 } });
+    assert.equal(ok.ok, true, `${label}: fat carrier priced at its value verifies: ${JSON.stringify(ok.checks)}`);
+  }
   // DEFAULT-signed listing (no 0x83) → signature
   {
     const tx = new btc.Transaction({ lockTime: 0 });

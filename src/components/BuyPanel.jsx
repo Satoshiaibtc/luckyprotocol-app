@@ -21,7 +21,7 @@ const CHECK_ORDER = [
   { id: "shape", n: 1, label: "Listing has exactly 1 input and 1 output" },
   { id: "signature", n: 2, label: "Seller signed input 0 with SINGLE|ANYONECANPAY (0x83)" },
   { id: "live", n: 3, label: "Order is still open and the seller still holds the UTXO" },
-  { id: "output", n: 4, label: "Output 0 pays exactly price_sats back to the seller" },
+  { id: "output", n: 4, label: "Output 0 pays exactly price_sats (≥ the UTXO's own value) back to the seller" },
   { id: "carrier", n: 5, label: "witnessUtxo value matches the indexer's carrier_sats" },
 ];
 
