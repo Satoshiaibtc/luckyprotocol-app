@@ -48,9 +48,17 @@ import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/s
   assert.deepEqual(JSON.parse(buildRoutes()), { version: 1, include: ["/"], exclude: [] }, "only the document invokes the Function (Pages 308-redirects /index.html to / before routing); assets keep the static _headers");
   assert.throws(() => buildMiddleware({ indexerUrl: "", mode: "production", strict: true }), /must name the real indexer/);
   const mod = await import(`data:text/javascript,${encodeURIComponent(src)}`);
-  const html = async () => new Response("<!doctype html><title>x</title>", { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=10, must-revalidate", "x-upstream": "kept" } });
-  const a = await mod.onRequest({ next: html });
-  const b = await mod.onRequest({ next: html });
+  const seen = [];
+  const html = async (req) => { seen.push(req); return new Response("<!doctype html><title>x</title>", { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=10, must-revalidate", "x-upstream": "kept" } }); };
+  const conditional = () => new Request("https://app.luckyprotocolai.com/", { headers: { "if-none-match": '"etag"', "if-modified-since": "Fri, 26 Sep 2026 00:00:00 GMT", "accept": "text/html" } });
+  const a = await mod.onRequest({ request: conditional(), next: html });
+  const b = await mod.onRequest({ request: conditional(), next: html });
+  assert.equal(seen.length, 2);
+  for (const req of seen) {
+    assert.equal(req.headers.get("if-none-match"), null, "conditional headers are stripped so a revalidating cache never gets a 304 with a stale nonce");
+    assert.equal(req.headers.get("if-modified-since"), null);
+    assert.equal(req.headers.get("accept"), "text/html", "other request headers survive");
+  }
   const cspA = a.headers.get("content-security-policy");
   const nonceA = /script-src 'self' 'nonce-([A-Za-z0-9+/=]+)'/.exec(cspA)?.[1];
   const nonceB = /script-src 'self' 'nonce-([A-Za-z0-9+/=]+)'/.exec(b.headers.get("content-security-policy"))?.[1];
@@ -65,11 +73,11 @@ import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/s
   assert.equal(a.status, 200);
   assert.equal(await a.text(), "<!doctype html><title>x</title>", "body passes through");
   const asset = new Response("body{}", { headers: { "content-type": "text/css" } });
-  assert.equal(await mod.onRequest({ next: async () => asset }), asset, "non-HTML responses are returned untouched");
+  assert.equal(await mod.onRequest({ request: conditional(), next: async () => asset }), asset, "non-HTML responses are returned untouched");
   const redirect = new Response(null, { status: 301, headers: { location: "/" } });
-  assert.equal(await mod.onRequest({ next: async () => redirect }), redirect, "redirects too");
+  assert.equal(await mod.onRequest({ request: conditional(), next: async () => redirect }), redirect, "redirects too");
   const notModified = new Response(null, { status: 304, headers: { "content-type": "text/html; charset=utf-8", etag: '"x"' } });
-  assert.equal(await mod.onRequest({ next: async () => notModified }), notModified, "a 304 keeps the browser's stored nonce pair (body + CSP) intact");
+  assert.equal(await mod.onRequest({ request: conditional(), next: async () => notModified }), notModified, "a 304 keeps the browser's stored nonce pair (body + CSP) intact");
   console.log("middleware: the document gets the static header set plus a per-response script-src nonce; assets untouched");
 }
 
