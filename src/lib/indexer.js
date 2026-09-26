@@ -2,8 +2,10 @@
 //
 // Every chain-derived read goes through the indexer. There is NO
 // third-party fallback: if the indexer is unreachable, reads throw and the
-// UI shows the offline state. mempool.space is only ever an explorer LINK
-// target — it is never fetched.
+// UI shows the offline state. mempool.space is an explorer LINK target
+// and — only for the buyer-side second check of a listing's outpoint
+// (audit M-12, src/lib/secondSource.js) — a read-only second source; this
+// module never talks to it.
 //
 // Base URL: `VITE_INDEXER_URL` at build time (default http://127.0.0.1:8765),
 // validated by `_isAllowedIndexerUrl` (https, or http to loopback).
@@ -19,17 +21,23 @@
 //   GET  /mines/:addr               minesByAddress
 //   GET  /mines?limit&offset&ticker minesFeed
 //   GET  /mines/by-txid/:txid       mineByTxid
-//   GET  /tokens?limit&offset       tokens
+//   GET  /tokens?limit&offset       tokens            (rows carry market_24h)
 //   GET  /tokens/:ticker            token
 //   GET  /tokens/:ticker/holders    tokenHolders
+//   GET  /tokens/:ticker/market     market            (?window=24h|7d)
+//   GET  /tokens/:ticker/candles    candles           (?interval=1h|1d&limit)
 //   GET  /transfers/:addr           transfers
+//   GET  /activity?kind&address…    activity          (deploy / mine / send / trade ledger)
+//   GET  /activity/daily?days       activityDaily
+//   GET  /price                     price             (usd_per_btc | null)
 //   GET  /tx-status/:txid           txStatus
 //   GET  /block-info/:height        blockInfo
-//   GET  /fees                      fees
+//   GET  /fees                      fees              (+ incrementalrelayfee)
 //   POST /broadcast                 broadcast         (text/plain raw hex)
 //   POST /orders                    postOrder         (JSON, §7.4)
-//   GET  /orders?ticker&status…     orders            (psbt omitted)
+//   GET  /orders?ticker&status…     orders            (psbt omitted; status open|filling|all…)
 //   GET  /orders/:id                order             (incl. psbt)
+//   GET  /orders/:id → POST /orders renewOrder        (re-POST the same PSBT, §7.4 TTL)
 //   GET  /orders/by-address/:addr   ordersByAddress
 //   GET  /trades?ticker&limit…      trades
 //   GET  /trades/:addr              tradesByAddress
@@ -40,7 +48,9 @@ import { mockGet, mockPostText, mockPostJson, mockAvatarDataUrl } from "./mock.j
 import { blockStats } from "./blocks.js";
 
 export const DEFAULT_INDEXER_URL = "http://127.0.0.1:8765";
-const MOCK = import.meta.env.VITE_MOCK === "1";
+// `import.meta.env` is Vite's; plain Node (the sanitizer tests) has none.
+const ENV = import.meta.env || {};
+const MOCK = ENV.VITE_MOCK === "1";
 
 /**
  * Validate an indexer base URL before we trust it. A poisoned value could
@@ -58,7 +68,7 @@ export function _isAllowedIndexerUrl(url) {
   return u.protocol === "http:" && loopback;
 }
 
-const _configured = String(import.meta.env.VITE_INDEXER_URL || "").trim();
+const _configured = String(ENV.VITE_INDEXER_URL || "").trim();
 export const INDEXER_URL = (
   _configured && _isAllowedIndexerUrl(_configured) ? _configured : DEFAULT_INDEXER_URL
 ).replace(/\/+$/, "");
@@ -196,7 +206,10 @@ const _HEX_RE = /^[0-9a-f]+$/i;
 const _MAX_TOKEN_AMT = 21_000_000;
 const _MAX_SATS = 21_000_000 * 100_000_000;
 
+// Unknown (null / undefined) is null — never 0: `Number(null)` is 0, which
+// would turn "no expiry" into 1970 and "no pending fee" into a free fill.
 const _safeInt = (v, max) => {
+  if (v === null || v === undefined) return null;
   const n = Number(v);
   return Number.isInteger(n) && n >= 0 && n <= max ? n : null;
 };
@@ -213,6 +226,20 @@ const _safeFloat = (v, max = 1e18) => {
   if (v === null || v === undefined) return null;
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 && n <= max ? n : null;
+};
+
+// A unix-seconds block time. Rows written before the indexer learned block
+// times carry 0, which is "unknown" — never 1970.
+const _safeTime = (v) => {
+  const t = _safeInt(v, 1e12);
+  return t === null || t === 0 ? null : t;
+};
+
+// Finite float of either sign (percentage changes). |x| ≤ max, else null.
+const _safeSignedFloat = (v, max = 1e9) => {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) && Math.abs(n) <= max ? n : null;
 };
 
 const _safeHex = (v, maxLen = 200_000) =>
@@ -267,6 +294,7 @@ function _sanitizeMineRow(m) {
     ticker: m.ticker,
     block_height: height,
     block_hash: _safeHash(m.block_hash),
+    block_time: _safeTime(m.block_time),
     sender,
     status: m.status === "invalid" ? "invalid" : "settled",
     yield_smallest: y,
@@ -281,7 +309,7 @@ function _sanitizeTransferRow(t) {
   const height = _safeInt(t.block_height, 1e9);
   const amount = _safeInt(t.amount, _MAX_TOKEN_AMT);
   if (height === null || amount === null || !_safeStr(t.sender, 128)) return null;
-  return { ...t, txid: String(t.txid).toLowerCase(), block_height: height, amount };
+  return { ...t, txid: String(t.txid).toLowerCase(), block_height: height, block_time: _safeTime(t.block_time), amount };
 }
 
 // TradeView (§7.5). Chain-derived; every field is checked.
@@ -308,11 +336,16 @@ function _sanitizeTradeRow(t) {
     seller,
     buyer,
     order_id: _ORDER_ID_RE.test(String(t.order_id || "")) ? String(t.order_id).toLowerCase() : null,
+    // §7.5: buyer script == seller script. Only an explicit true counts.
+    self_trade: t.self_trade === true,
   };
 }
 
 // OrderView (§7.4). `psbt` is hex-only and only present on GET /orders/:id.
-const _ORDER_STATUS = new Set(["open", "filled", "cancelled"]);
+// `filling` (audit M-9): the indexer sees a spend of the listed outpoint in
+// the mempool; the pending_* fields describe that spend and are null for
+// every other status.
+const _ORDER_STATUS = new Set(["open", "filling", "filled", "cancelled"]);
 function _sanitizeOrderRow(o) {
   if (!o || typeof o !== "object") return null;
   if (!_ORDER_ID_RE.test(String(o.id || ""))) return null;
@@ -327,6 +360,7 @@ function _sanitizeOrderRow(o) {
   const unit = _safeFloat(o.unit_price);
   const psbt = o.psbt !== undefined && o.psbt !== null ? _safeHex(o.psbt) : null;
   const spentTxid = _TXID_RE.test(String(o.spent_txid || "")) ? String(o.spent_txid).toLowerCase() : null;
+  const filling = status === "filling";
   return {
     id: String(o.id).toLowerCase(),
     ticker: o.ticker,
@@ -338,11 +372,140 @@ function _sanitizeOrderRow(o) {
     status,
     created_at: _safeInt(o.created_at, 1e12),
     updated_at: _safeInt(o.updated_at, 1e12),
+    expires_at: _safeInt(o.expires_at, 1e12),
     spent_txid: spentTxid,
     spent_block: _safeInt(o.spent_block, 1e9),
     buyer: _safeAddr(o.buyer),
+    pending_spend_txid: filling ? _safeTxidOrNull(o.pending_spend_txid) : null,
+    pending_fee_sats: filling ? _safeInt(o.pending_fee_sats, _MAX_SATS) : null,
+    pending_vsize: filling ? _safeInt(o.pending_vsize, 4_000_000) : null,
+    pending_feerate: filling ? _safeFloat(o.pending_feerate, 1_000_000) : null,
     ...(psbt ? { psbt } : {}),
     ...(o.replaced === true ? { replaced: true } : {}),
+  };
+}
+
+// `/tokens` rows' 24 h market summary. Absent or malformed → null (the
+// board then shows "—", never a made-up zero).
+function _sanitizeMarket24h(m) {
+  if (!m || typeof m !== "object") return null;
+  return {
+    volume_sats: _safeInt(m.volume_sats, _MAX_SATS),
+    trades: _safeInt(m.trades, 1e9),
+    change_pct: _safeSignedFloat(m.change_pct),
+    buyers: _safeInt(m.buyers, 1e9),
+  };
+}
+
+// GET /tokens/:ticker/market?window=24h|7d
+const _WINDOWS = new Set(["24h", "7d"]);
+function _sanitizeMarket(m) {
+  if (!m || typeof m !== "object") return null;
+  if (!_TICKER_RE.test(String(m.ticker || ""))) return null;
+  const excluded = m.self_trades_excluded;
+  return {
+    ticker: m.ticker,
+    window: _WINDOWS.has(m.window) ? m.window : null,
+    as_of: _safeInt(m.as_of, 1e12),
+    tip_height: _safeInt(m.tip_height, 1e9),
+    floor_unit_price: _safeFloat(m.floor_unit_price),
+    open_orders: _safeInt(m.open_orders, 1e9),
+    listed_amount: _safeInt(m.listed_amount, _MAX_TOKEN_AMT),
+    last_trade: m.last_trade ? _sanitizeTradeRow(m.last_trade) : null,
+    trades: _safeInt(m.trades, 1e9),
+    volume_sats: _safeInt(m.volume_sats, _MAX_SATS),
+    buyers: _safeInt(m.buyers, 1e9),
+    sellers: _safeInt(m.sellers, 1e9),
+    high_unit_price: _safeFloat(m.high_unit_price),
+    low_unit_price: _safeFloat(m.low_unit_price),
+    first_unit_price: _safeFloat(m.first_unit_price),
+    change_pct: _safeSignedFloat(m.change_pct),
+    // a count, or a plain flag — either shape is shown as "self-trades excluded"
+    self_trades_excluded: typeof excluded === "boolean" ? excluded : _safeInt(excluded, 1e9),
+  };
+}
+
+// One OHLC bucket. Prices are sats per whole token; a bucket whose extremes
+// do not bracket its open/close is malformed and dropped.
+function _sanitizeCandle(c) {
+  if (!c || typeof c !== "object") return null;
+  const t = _safeInt(c.t, 1e12);
+  const o = _safeFloat(c.o);
+  const h = _safeFloat(c.h);
+  const l = _safeFloat(c.l);
+  const cl = _safeFloat(c.c);
+  if (t === null || o === null || h === null || l === null || cl === null) return null;
+  if (l > Math.min(o, cl) || h < Math.max(o, cl)) return null;
+  return {
+    t,
+    o,
+    h,
+    l,
+    c: cl,
+    v_sats: _safeInt(c.v_sats, _MAX_SATS) ?? 0,
+    v_amount: _safeInt(c.v_amount, 1e12) ?? 0,
+    n: _safeInt(c.n, 1e9) ?? 0,
+  };
+}
+
+// GET /activity item. Every address-like field must be a mainnet address
+// shape or it is null; the row survives on its identity (kind, txid, height).
+const _ACTIVITY_KINDS = new Set(["deploy", "mine", "send", "trade"]);
+function _sanitizeActivityItem(a) {
+  if (!a || typeof a !== "object") return null;
+  if (!_ACTIVITY_KINDS.has(a.kind)) return null;
+  if (!_TXID_RE.test(String(a.txid || ""))) return null;
+  if (!_TICKER_RE.test(String(a.ticker || ""))) return null;
+  const height = _safeInt(a.block_height, 1e9);
+  if (height === null) return null;
+  return {
+    kind: a.kind,
+    txid: String(a.txid).toLowerCase(),
+    block_height: height,
+    block_time: _safeTime(a.block_time),
+    ticker: a.ticker,
+    // false = a SEND the indexer did not apply or an invalid MINE (amount is
+    // then the requested amount / a 0 yield); anything but an explicit false is applied.
+    applied: a.applied !== false,
+    amount: _safeInt(a.amount, _MAX_TOKEN_AMT),
+    from: _safeAddr(a.from),
+    to: _safeAddr(a.to),
+    sender: _safeAddr(a.sender),
+    deployer: _safeAddr(a.deployer),
+    buyer: _safeAddr(a.buyer),
+    seller: _safeAddr(a.seller),
+    price_sats: _safeInt(a.price_sats, _MAX_SATS),
+    unit_price: _safeFloat(a.unit_price),
+    self_trade: a.self_trade === true,
+  };
+}
+
+// GET /activity/daily row: one UTC day. Counts default to 0 like the
+// per-ticker stats do; a row without a well-formed date is dropped.
+const _DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+function _sanitizeDailyRow(d) {
+  if (!d || typeof d !== "object" || !_DATE_RE.test(String(d.date || ""))) return null;
+  const n = (k, max = 1e12) => _safeInt(d[k], max) ?? 0;
+  return {
+    date: String(d.date),
+    events: n("events"),
+    deploys: n("deploys"),
+    mines: n("mines"),
+    sends: n("sends"),
+    trades: n("trades"),
+    active_addresses: n("active_addresses"),
+    token_amount: n("token_amount", 1e15),
+    volume_sats: n("volume_sats", _MAX_SATS),
+  };
+}
+
+// GET /price → `usd_per_btc` is a finite positive number or null (= unavailable).
+function _sanitizePrice(p) {
+  const v = p && typeof p === "object" ? Number(p.usd_per_btc) : NaN;
+  return {
+    usd_per_btc: Number.isFinite(v) && v > 0 && v <= 1e9 ? v : null,
+    as_of: _safeInt(p && p.as_of, 1e12),
+    source: _safeStr(p && p.source, 64),
   };
 }
 
@@ -380,6 +543,7 @@ function _sanitizeTokenRow(t) {
     open_orders: _safeInt(t.open_orders, 1e9) ?? 0,
     floor_unit_price: _safeFloat(t.floor_unit_price),
     last_trade: lastTrade,
+    market_24h: _sanitizeMarket24h(t.market_24h),
     avatar_txid: avatarTxid && avatarCt ? avatarTxid : null,
     avatar_content_type: avatarTxid && avatarCt ? avatarCt : null,
   };
@@ -454,6 +618,9 @@ function _sanitizeFees(f) {
     hourFee: pick("hourFee"),
     economyFee: pick("economyFee"),
     minimumFee: pick("minimumFee"),
+    // The node's BIP125 increment (sat/vB), used by the M-9 cancel rule;
+    // null when the indexer does not report it (the rule then assumes 1).
+    incrementalrelayfee: pick("incrementalrelayfee"),
   };
 }
 
@@ -464,6 +631,8 @@ function _pageQuery(opts = {}) {
   if (opts.ticker) params.set("ticker", String(opts.ticker));
   if (opts.deployer) params.set("deployer", String(opts.deployer));
   if (opts.status) params.set("status", String(opts.status));
+  if (opts.kind) params.set("kind", String(opts.kind));
+  if (opts.address) params.set("address", String(opts.address));
   const q = params.toString();
   return q ? `?${q}` : "";
 }
@@ -497,6 +666,8 @@ export async function health(signal) {
     tip_height: _safeInt(env && env.tip_height, 1e9),
     token_count: _safeInt(env && env.token_count, 1e9) ?? 0,
     mine_count: _safeInt(env && env.mine_count, 1e12) ?? 0,
+    // open orders with a spend already in the mempool (audit M-9); 0 when the indexer predates it
+    filling_order_count: _safeInt(env && env.filling_order_count, 1e9) ?? 0,
     last_progress_at: _safeInt(env && env.last_progress_at, 1e12),
     stalled: !!(env && env.stalled),
     mock: !!(env && env.mock),
@@ -729,6 +900,97 @@ export async function tradesByAddress(address, signal) {
   const env = await _httpGet(`/trades/${encodeURIComponent(address)}`, signal);
   return ((env && env.trades) || []).map(_sanitizeTradeRow).filter(Boolean);
 }
+
+/**
+ * Renew a listing (§7.4 TTL): GET /orders/:id for the stored PSBT, then
+ * POST /orders with exactly the same body. The seller signs nothing — the
+ * PSBT is the same bearer instrument, the indexer just refreshes
+ * `updated_at` / `expires_at`. Throws when the order is gone or closed.
+ */
+export async function renewOrder(id, signal) {
+  const o = await order(id, signal);
+  if (!o) throw new Error("listing not found on the indexer — it expired or was evicted; sign a new listing");
+  if (o.status === "filling") throw new Error("a fill of this listing is pending in the mempool — it is exempt from expiry and cannot be re-published until that spend confirms or drops (§7.3)");
+  if (o.status !== "open") throw new Error(`listing is ${o.status} — nothing to renew`);
+  if (!o.psbt) throw new Error("the indexer returned the order without its PSBT");
+  return postOrder({ psbt: o.psbt, ticker: o.ticker, amount: o.amount, price_sats: o.price_sats }, signal);
+}
+
+// ---- Market data ----------------------------------------------------------------------
+
+/** GET /tokens/:ticker/market?window=24h|7d → market summary | null (404). */
+export async function market(ticker, window = "24h", signal) {
+  const w = _WINDOWS.has(window) ? window : "24h";
+  try {
+    const row = await _httpGet(`/tokens/${encodeURIComponent(ticker)}/market?window=${w}`, signal);
+    return _sanitizeMarket(row);
+  } catch (e) {
+    if (_is404(e)) return null;
+    throw e;
+  }
+}
+
+const _INTERVALS = new Set(["1h", "1d"]);
+
+/** GET /tokens/:ticker/candles?interval=1h|1d&limit → `{ ticker, interval, candles }` ascending, or null (404). */
+export async function candles(ticker, { interval = "1h", limit = 168 } = {}, signal) {
+  const iv = _INTERVALS.has(interval) ? interval : "1h";
+  const n = Math.min(1000, Math.max(1, Number(limit) || 168));
+  let env;
+  try {
+    env = await _httpGet(`/tokens/${encodeURIComponent(ticker)}/candles?interval=${iv}&limit=${n}`, signal);
+  } catch (e) {
+    if (_is404(e)) return null;
+    throw e;
+  }
+  const rows = ((env && env.candles) || []).map(_sanitizeCandle).filter(Boolean);
+  // Ascending by bucket start, one bucket per timestamp — whatever the wire order.
+  rows.sort((a, b) => a.t - b.t);
+  return {
+    ticker: _TICKER_RE.test(String(env && env.ticker)) ? env.ticker : ticker,
+    interval: _INTERVALS.has(env && env.interval) ? env.interval : iv,
+    candles: rows.filter((c, i) => i === 0 || c.t !== rows[i - 1].t),
+  };
+}
+
+const _ACTIVITY_FILTER = new Set(["all", "deploy", "mine", "send", "trade"]);
+
+/** GET /activity?limit&offset&kind&address → `{ total, offset, limit, items }` newest first. */
+export async function activity(opts = {}, signal) {
+  const q = { limit: opts.limit, offset: opts.offset };
+  if (opts.kind && opts.kind !== "all" && _ACTIVITY_FILTER.has(opts.kind)) q.kind = opts.kind;
+  if (opts.address && _ADDR_RE.test(String(opts.address))) q.address = String(opts.address);
+  const env = await _httpGet(`/activity${_pageQuery(q)}`, signal);
+  return _page(env, 1e12, _sanitizeActivityItem);
+}
+
+/** GET /activity/daily?days=N → `{ days: [...] }` ascending by date, at most N rows. */
+export async function activityDaily(days = 30, signal) {
+  const n = Math.min(365, Math.max(1, Number(days) || 30));
+  const env = await _httpGet(`/activity/daily?days=${n}`, signal);
+  const rows = ((env && env.days) || []).map(_sanitizeDailyRow).filter(Boolean);
+  rows.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  return { days: rows.slice(-n) };
+}
+
+/** GET /price → `{ usd_per_btc: number|null, as_of, source }` — null means "no USD anywhere in the UI". */
+export async function price(signal) {
+  return _sanitizePrice(await _httpGet("/price", signal));
+}
+
+// Exposed for test/views.test.js (plain Node) — not part of the read API.
+export {
+  _sanitizeOrderRow,
+  _sanitizeTradeRow,
+  _sanitizeTokenRow,
+  _sanitizeFees,
+  _sanitizeMarket,
+  _sanitizeMarket24h,
+  _sanitizeCandle,
+  _sanitizeActivityItem,
+  _sanitizeDailyRow,
+  _sanitizePrice,
+};
 
 // ---- Token avatars (§8) ----------------------------------------------------------------
 

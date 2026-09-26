@@ -14,6 +14,8 @@ const SORTS = [
   { id: "new", label: "New" },
   { id: "minted", label: "Most minted" },
   { id: "open", label: "Open supply" },
+  { id: "volume", label: "Top volume (24h)" },
+  { id: "floor", label: "Lowest floor" },
 ];
 
 export function sortTokens(items, sort) {
@@ -25,6 +27,12 @@ export function sortTokens(items, sort) {
       return rows.sort((a, b) => b.minted - a.minted || a.ticker.localeCompare(b.ticker));
     case "open":
       return rows.sort((a, b) => b.supply - b.minted - (a.supply - a.minted) || a.ticker.localeCompare(b.ticker));
+    case "volume":
+      // 24 h fill volume (self-trades excluded by the indexer); tokens without a market row sink.
+      return rows.sort((a, b) => (b.market_24h?.volume_sats ?? -1) - (a.market_24h?.volume_sats ?? -1) || (b.market_24h?.trades ?? 0) - (a.market_24h?.trades ?? 0) || a.ticker.localeCompare(b.ticker));
+    case "floor":
+      // cheapest open ask first; tokens with no asks last
+      return rows.sort((a, b) => (a.floor_unit_price ?? Infinity) - (b.floor_unit_price ?? Infinity) || a.ticker.localeCompare(b.ticker));
     default:
       return rows.sort((a, b) => (b.mine_count || 0) - (a.mine_count || 0) || b.deploy_block - a.deploy_block);
   }

@@ -371,7 +371,7 @@ export function checkFillLayout(tx) {
   if (n !== 5 && n !== 6) throw new Error(`fill has ${n} outputs — expected 5 (no BTC change) or 6`);
   const scripts = outputScripts(tx);
   if (!isOpReturnScript(scripts[3])) throw new Error("fill: vout3 is not the OP_RETURN output");
-  for (const [vout, what] of [[FILL_TO_OUT, "token slot"], [FILL_CHANGE_OUT, "residual slot"]]) {
+  for (const [vout, what] of [[FILL_TO_OUT, "token carrier"], [FILL_CHANGE_OUT, "residual carrier"]]) {
     const o = tx.getOutput(vout);
     if (isOpReturnScript(o.script)) throw new Error(`fill: vout${vout} (${what}) must not be an OP_RETURN`);
     if (o.amount !== BigInt(DUST_SATS)) throw new Error(`fill: vout${vout} (${what}) is ${o.amount} sats — a token carrier is exactly ${DUST_SATS}`);

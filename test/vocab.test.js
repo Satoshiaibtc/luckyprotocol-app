@@ -1,10 +1,9 @@
 // HARD RULE gate: zero gambling vocabulary anywhere in rendered source.
 //
 // Walks src/**/*.{js,jsx} plus src/styles.css, strips comments and the
-// brand tokens, and fails on any denied word. Plain Node, no deps.
-// The three unrendered trading components and src/lib/swap.js are skipped
-// (kept in the codebase, never imported by a page); src/lib/mock.js is NOT
-// skipped — its strings can surface in the UI.
+// brand tokens, and fails on any denied word. Plain Node, no deps. Nothing
+// is skipped: the trading components render again (Market tab), and
+// src/lib/mock.js strings can surface in the UI.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
@@ -13,12 +12,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(here, "..");
 const SRC = join(ROOT, "src");
 
-const SKIP = new Set([
-  "src/components/BuyPanel.jsx",
-  "src/components/SellPanel.jsx",
-  "src/components/PriceChart.jsx",
-  "src/lib/swap.js",
-]);
+const SKIP = new Set();
 
 const DENY =
   /\b(bet|bets|betting|wager|wagers|win|wins|winner|winning|won|lose|loses|losing|loss|lost|jackpot|casino|slots?|dice|roulette|wheel|lottery|raffle|draws?|confetti|odds|payout|spin|spins|roll|rolls|prize|prizes|reward|rewards|chance|chances|gamble|gambling|lucky|luck)\b/i;

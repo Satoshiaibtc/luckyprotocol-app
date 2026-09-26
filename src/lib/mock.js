@@ -32,6 +32,8 @@ import { EXPECTED_YIELD, bucketOfYield, mineYield } from "./yield.js";
 import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, AVATAR_PROTOCOL_FEE_SATS, DEPLOY_PROTOCOL_FEE_SATS } from "./payloads.js";
 import { buildListingPsbt, verifyListing, parseListing, decodeRawTx, LISTING_SIGHASH } from "./swap.js";
 import { parseEnvelopeFromWitness, checkEnvelopeLimits, bytesToDataUrl } from "./inscribe.js";
+import { aggregateDaily } from "./activity.js";
+import { decodeAddress } from "./psbt.js";
 
 // A 16×16 PNG (141 bytes, a cyan diamond) — the seeded avatar of LUCKY, so
 // the board shows one inscribed token before any AVATAR tx is simulated.
@@ -42,6 +44,10 @@ const BASE_TIP = 969_800;
 const CONFIRM_AFTER_MS = 20_000;
 const LATENCY_MS = 120;
 const LOAD_TS = Math.floor(Date.now() / 1000);
+const ORDER_TTL_SEC = 14 * 86400;      // §7.4: an open order expires 14 days after updated_at
+const USD_PER_BTC = 67_250;            // /price — a fixed number so USD sub-labels can be previewed
+const INCREMENTAL_RELAY_FEE = 0.1;     // /fees.incrementalrelayfee — Bitcoin Core's default (sat/vB)
+const DAY_BLOCKS = 144;
 
 const enc = (s) => new TextEncoder().encode(s);
 const h256 = (s) => hex.encode(sha256(enc(s)));
@@ -163,6 +169,99 @@ const SENDERS = Array.from({ length: 7 }, (_, i) =>
 
 let W = null; // the seeded world, built on first access
 
+/** An open OrderView with a REAL SINGLE|ANYONECANPAY signature from `seller` (an identity()). */
+function signedOrder({ seller, utxo, ticker, amount, price_sats, created_at }) {
+  const built = buildListingPsbt({ address: seller.address, pubkeyHex: seller.pubkeyHex, tokenUtxo: utxo, priceSats: price_sats, amount });
+  const tx = btc.Transaction.fromPSBT(hex.decode(built.psbtHex));
+  tx.signIdx(seller.priv, 0, [LISTING_SIGHASH]);
+  return {
+    id: key(utxo),
+    ticker,
+    amount,
+    price_sats,
+    unit_price: price_sats / amount,
+    seller: seller.address,
+    carrier_sats: utxo.sats,
+    status: "open",
+    created_at,
+    updated_at: created_at,
+    expires_at: created_at + ORDER_TTL_SEC,
+    spent_txid: null,
+    spent_block: null,
+    buyer: null,
+    pending_spend_txid: null,
+    pending_fee_sats: null,
+    pending_vsize: null,
+    pending_feerate: null,
+    psbt: hex.encode(tx.toPSBT()),
+  };
+}
+
+/** The `filling` overlay (audit M-9): a fill of the outpoint is in the mempool at `vsize` vB and `feerate` sat/vB. */
+function pendingFill(seed, vsize, feerate) {
+  return {
+    status: "filling",
+    pending_spend_txid: fakeTxid(seed),
+    pending_fee_sats: Math.ceil(vsize * feerate),
+    pending_vsize: vsize,
+    pending_feerate: feerate,
+  };
+}
+
+/**
+ * 30 days of older mines and sends (deterministic) so the activity ledger
+ * and its daily chart have a month of history. Mines at one height share
+ * that block's yield digit; sends move tokens between the trader pool.
+ */
+function seededHistory(traderPool) {
+  const mines = [];
+  const sends = [];
+  for (let d = 0; d < 30; d++) {
+    const k = randInt(`hist-n:${d}`, 3, 12);
+    const seenHeights = new Map();
+    for (let i = 0; i < k; i++) {
+      const height = BASE_TIP - 20 - d * DAY_BLOCKS - randInt(`hist-h:${d}:${i}`, 0, DAY_BLOCKS - 1);
+      let y = seenHeights.get(height);
+      if (y === undefined) {
+        y = YIELD_PATTERN[randInt(`hist-y:${height}`, 0, YIELD_PATTERN.length - 1)];
+        forceYield(height, y);
+        seenHeights.set(height, y);
+      }
+      mines.push({
+        txid: fakeTxid(`hist-mine:${d}:${i}`),
+        block_height: height,
+        block_hash: blockHashAt(height),
+        block_time: blockTimeAt(height),
+        sender: SENDERS[randInt(`hist-s:${d}:${i}`, 0, SENDERS.length - 1)],
+        ticker: FEED_TICKERS[randInt(`hist-t:${d}:${i}`, 0, FEED_TICKERS.length - 1)],
+        status: "settled",
+        yield_smallest: y,
+        cap_exhausted: false,
+      });
+    }
+    const s = randInt(`hist-sends:${d}`, 0, 3);
+    for (let i = 0; i < s; i++) {
+      const height = BASE_TIP - 20 - d * DAY_BLOCKS - randInt(`hist-sh:${d}:${i}`, 0, DAY_BLOCKS - 1);
+      const from = traderPool[randInt(`hist-from:${d}:${i}`, 0, traderPool.length - 1)];
+      let to = traderPool[randInt(`hist-to:${d}:${i}`, 0, traderPool.length - 1)];
+      if (to === from) to = traderPool[(traderPool.indexOf(from) + 1) % traderPool.length];
+      sends.push({
+        txid: fakeTxid(`hist-send:${d}:${i}`),
+        block_height: height,
+        block_hash: blockHashAt(height),
+        block_time: blockTimeAt(height),
+        ticker: FEED_TICKERS[randInt(`hist-st:${d}:${i}`, 0, FEED_TICKERS.length - 1)],
+        amount: randInt(`hist-sa:${d}:${i}`, 1, 90) * 10,
+        sender: from,
+        to,
+      });
+    }
+  }
+  mines.sort((a, b) => b.block_height - a.block_height);
+  sends.sort((a, b) => b.block_height - a.block_height);
+  return { mines, sends };
+}
+
 function world() {
   if (W) return W;
   const tokens = new Map();
@@ -209,39 +308,53 @@ function world() {
       });
     }
 
-    // ---- trade history: 30–60 fills over ~3 days with a bounded price walk
+    // ---- trade history: 30–60 fills with a bounded price walk. The first
+    // 40 % are spread over the 27 days before the last 3 (so 1d candles and
+    // the 7d window have content), the rest sit in the last 3 days (1h
+    // candles, the 24h window). One LUCKY fill is a self-trade (§7.5).
     if (s.base > 0) {
       const n = randInt(`trades-n:${s.ticker}`, 30, 60);
+      const early = Math.floor(n * 0.4);
       let p = s.base;
       for (let i = 0; i < n; i++) {
         const step = (rand(`walk:${s.ticker}:${i}`) - 0.47) * 0.12;
         p = Math.max(0.5, p * (1 + step));
         const amount = randInt(`amt:${s.ticker}:${i}`, 5, 300) * 10;
         const price_sats = Math.max(DUST_SATS, Math.round(p * amount));
-        const height = BASE_TIP - 1 - Math.floor(((n - 1 - i) * 430) / n) - randInt(`jit:${s.ticker}:${i}`, 0, 3);
+        const jit = randInt(`jit:${s.ticker}:${i}`, 0, 3);
+        const height =
+          i < early
+            ? BASE_TIP - 1 - 3 * DAY_BLOCKS - Math.floor(((early - 1 - i) * 27 * DAY_BLOCKS) / early) - jit
+            : BASE_TIP - 1 - Math.floor(((n - 1 - i) * 3 * DAY_BLOCKS) / (n - early)) - jit;
         const seller = traderPool[randInt(`seller:${s.ticker}:${i}`, 0, traderPool.length - 1)];
         let buyer = traderPool[randInt(`buyer:${s.ticker}:${i}`, 0, traderPool.length - 1)];
-        if (buyer === seller) buyer = traderPool[(traderPool.indexOf(seller) + 1) % traderPool.length];
+        const selfTrade = s.ticker === "LUCKY" && i === n - 2;
+        if (selfTrade) buyer = seller;
+        else if (buyer === seller) buyer = traderPool[(traderPool.indexOf(seller) + 1) % traderPool.length];
+        const h = Math.min(height, BASE_TIP - 1);
         trades.push({
           txid: fakeTxid(`trade:${s.ticker}:${i}`),
-          block_height: Math.min(height, BASE_TIP - 1),
-          block_hash: blockHashAt(Math.min(height, BASE_TIP - 1)),
-          block_time: blockTimeAt(Math.min(height, BASE_TIP - 1)),
+          block_height: h,
+          block_hash: blockHashAt(h),
+          block_time: blockTimeAt(h),
           ticker: s.ticker,
           amount,
-          price_sats,
-          unit_price: price_sats / amount,
+          price_sats: selfTrade ? Math.round(price_sats * 4) : price_sats, // a wash at 4× must not print a price
+          unit_price: selfTrade ? (price_sats * 4) / amount : price_sats / amount,
           seller,
           buyer,
           order_id: `${fakeTxid(`filled-order:${s.ticker}:${i}`)}:0`,
+          self_trade: selfTrade,
         });
       }
-      const mine = trades.filter((t) => t.ticker === s.ticker);
+      const mine = trades.filter((t) => t.ticker === s.ticker && !t.self_trade);
       const row = tokens.get(s.ticker);
       row.trade_count = mine.length;
       row.volume_sats = mine.reduce((a, t) => a + t.price_sats, 0);
 
-      // ---- open asks: 3–8 real signed listings at ascending prices
+      // ---- open asks: 3–8 real signed listings at ascending prices. The
+      // second LUCKY ask is `filling`: a low-fee fill of it sits in the
+      // mempool (audit M-9), so the book greys it out.
       const last = mine[mine.length - 1].unit_price;
       const k = randInt(`orders-n:${s.ticker}`, 3, 8);
       let unit = last * (1 + rand(`ask0:${s.ticker}`) * 0.03);
@@ -258,26 +371,11 @@ function world() {
           confirmed: true,
           block_height: BASE_TIP - 20 - j * 3,
         });
-        const built = buildListingPsbt({ address: seller.address, pubkeyHex: seller.pubkeyHex, tokenUtxo: utxo, priceSats: price_sats, amount });
-        const tx = btc.Transaction.fromPSBT(hex.decode(built.psbtHex));
-        tx.signIdx(seller.priv, 0, [LISTING_SIGHASH]);
-        const id = key(utxo);
         const created_at = LOAD_TS - randInt(`ask-age:${s.ticker}:${j}`, 600, 3 * 86400);
-        orders.set(id, {
-          id,
-          ticker: s.ticker,
-          amount,
-          price_sats,
-          unit_price: price_sats / amount,
-          seller: seller.address,
-          carrier_sats: DUST_SATS,
-          status: "open",
-          created_at,
-          updated_at: created_at,
-          spent_txid: null,
-          spent_block: null,
-          buyer: null,
-          psbt: hex.encode(tx.toPSBT()),
+        const filling = s.ticker === "LUCKY" && j === 1;
+        orders.set(key(utxo), {
+          ...signedOrder({ seller, utxo, ticker: s.ticker, amount, price_sats, created_at }),
+          ...(filling ? pendingFill(`pending-fill:${s.ticker}:${j}`, 99_000, 0.1) : {}),
         });
       }
     }
@@ -291,6 +389,7 @@ function world() {
       txid: fakeTxid(`feed-${i}`),
       block_height: height,
       block_hash: blockHashAt(height),
+      block_time: blockTimeAt(height),
       sender: SENDERS[i % SENDERS.length],
       ticker: FEED_TICKERS[i],
       status: "settled",
@@ -299,7 +398,22 @@ function world() {
     };
   });
 
-  W = { tokens, trades, orders, knownUtxos, feed, avatars, avatarViews, sim: new Map(), simMines: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set() };
+  const history = seededHistory(traderPool);
+  W = { tokens, trades, orders, knownUtxos, feed, history, avatars, avatarViews, sim: new Map(), simMines: [], simSends: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set() };
+
+  // The simulated wallet's own `filling` listing: its 1,921-LUCKY carrier
+  // (seeded UTXO #5) listed near the floor, with a 99 kvB / 0.1 sat/vB fill
+  // of it "in the mempool" — the Sell fold's Cancel then has to apply the
+  // M-9 replacement rule, which is the point of seeding it.
+  ensureSeeded(MOCK_WALLET.address);
+  const mine = seededBtcUtxos(MOCK_WALLET.address)[5];
+  const myCarrier = { txid: mine.txid, vout: mine.vout, sats: mine.sats };
+  const luckyFloor = [...orders.values()].filter((o) => o.ticker === "LUCKY").reduce((m, o) => Math.min(m, o.unit_price), Infinity);
+  const myPrice = Math.max(DUST_SATS, Math.round((Number.isFinite(luckyFloor) ? luckyFloor * 0.995 : 50) * 1_921));
+  orders.set(key(myCarrier), {
+    ...signedOrder({ seller: MOCK_ID, utxo: myCarrier, ticker: "LUCKY", amount: 1_921, price_sats: myPrice, created_at: LOAD_TS - 2 * 86400 }),
+    ...pendingFill("pending-fill:wallet", 99_000, 0.1),
+  });
   return W;
 }
 
@@ -356,6 +470,7 @@ const MY_SEEDED_MINES = (addr) =>
       txid: fakeTxid(`mine:${addr}:${i}`),
       block_height: height,
       block_hash: blockHashAt(height),
+      block_time: blockTimeAt(height),
       sender: addr,
       ticker: "LUCKY",
       status: "settled",
@@ -509,6 +624,7 @@ function applyTx(txid, e) {
       txid,
       block_height: height,
       block_hash: hash,
+      block_time: time,
       sender: senderOf(d),
       ticker: p.ticker,
       status: valid ? "settled" : "invalid",
@@ -524,6 +640,8 @@ function applyTx(txid, e) {
       credit(p.toOutIdx, p.ticker, p.amount);
       pool[p.ticker] = have - p.amount;
     }
+    // Every parsed SEND is a ledger row; a non-applied one keeps the requested amount and applied:false.
+    w.simSends.push({ txid, block_height: height, block_hash: hash, block_time: time, ticker: p.ticker, amount: p.amount, applied: sendApplied, sender: senderOf(d), to: to && to.address ? to.address : null });
     // Per-ticker routing: the residual of this ticker AND every other ticker
     // in the pool go to CHANGE_OUT; a missing CHANGE_OUT falls back to the
     // default route (first non-OP_RETURN output).
@@ -587,10 +705,11 @@ function applyTx(txid, e) {
     routeRest(null); // not a protocol tx → default route (tokens follow the first output)
   }
 
-  // §7.5 order settlement for every spent outpoint.
+  // §7.5 order settlement for every spent outpoint (an order may be `filling`
+  // — the spend that confirms is the fill itself or a replacing withdrawal).
   for (const i of d.inputs) {
     const o = w.orders.get(key(i));
-    if (!o || o.status !== "open") continue;
+    if (!o || (o.status !== "open" && o.status !== "filling")) continue;
     const v0 = d.outputs[0];
     const to = p && p.op === "SEND" ? d.outputs[p.toOutIdx] : null;
     const isFill =
@@ -598,9 +717,14 @@ function applyTx(txid, e) {
     o.updated_at = time;
     o.spent_txid = txid;
     o.spent_block = height;
+    o.pending_spend_txid = null;
+    o.pending_fee_sats = null;
+    o.pending_vsize = null;
+    o.pending_feerate = null;
     if (isFill) {
       o.status = "filled";
       o.buyer = to.address;
+      const selfTrade = to.address === o.seller;
       const trade = {
         txid,
         block_height: height,
@@ -613,10 +737,11 @@ function applyTx(txid, e) {
         seller: o.seller,
         buyer: to.address,
         order_id: o.id,
+        self_trade: selfTrade,
       };
       w.trades.push(trade);
       const tok = w.tokens.get(o.ticker);
-      if (tok) { tok.trade_count += 1; tok.volume_sats += v0.sats; }
+      if (tok && !selfTrade) { tok.trade_count += 1; tok.volume_sats += v0.sats; }
     } else {
       o.status = "cancelled";
     }
@@ -632,18 +757,144 @@ function senderOf(d) {
   return d.outputs[0]?.address || MOCK_WALLET.address;
 }
 
-function tokenView(t) {
+const WINDOW_SEC = { "24h": 86_400, "7d": 7 * 86_400 };
+const byTime = (a, b) => a.block_height - b.block_height || a.block_time - b.block_time || a.txid.localeCompare(b.txid);
+const now = () => Math.floor(Date.now() / 1000);
+
+/** Non-self trades of a ticker, oldest first. */
+function priceTrades(ticker) {
+  return world().trades.filter((x) => x.ticker === ticker && !x.self_trade).sort(byTime);
+}
+
+/** `GET /tokens/:ticker/market?window=` — derived from the trade history and the book. */
+function marketFor(ticker, windowId) {
   const w = world();
-  const open = [...w.orders.values()].filter((o) => o.ticker === t.ticker && o.status === "open");
-  const mine = w.trades.filter((x) => x.ticker === t.ticker);
-  const last = mine.length ? mine.reduce((a, b) => (b.block_height >= a.block_height ? b : a)) : null;
+  const wid = WINDOW_SEC[windowId] ? windowId : "24h";
+  const since = now() - WINDOW_SEC[wid];
+  const all = priceTrades(ticker);
+  const inWin = all.filter((x) => x.block_time >= since);
+  const selfExcluded = w.trades.filter((x) => x.ticker === ticker && x.self_trade && x.block_time >= since).length;
+  const open = [...w.orders.values()].filter((o) => o.ticker === ticker && o.status === "open");
+  const first = inWin.length ? inWin[0].unit_price : null;
+  const lastIn = inWin.length ? inWin[inWin.length - 1].unit_price : null;
   return {
-    ...t,
-    open_orders: open.length,
+    ticker,
+    window: wid,
+    as_of: now(),
+    tip_height: tipHeight(),
     floor_unit_price: open.length ? Math.min(...open.map((o) => o.unit_price)) : null,
-    last_trade: last,
+    open_orders: open.length,
+    listed_amount: open.reduce((s, o) => s + o.amount, 0),
+    last_trade: all.length ? all[all.length - 1] : null,
+    trades: inWin.length,
+    volume_sats: inWin.reduce((s, x) => s + x.price_sats, 0),
+    buyers: new Set(inWin.map((x) => x.buyer)).size,
+    sellers: new Set(inWin.map((x) => x.seller)).size,
+    high_unit_price: inWin.length ? Math.max(...inWin.map((x) => x.unit_price)) : null,
+    low_unit_price: inWin.length ? Math.min(...inWin.map((x) => x.unit_price)) : null,
+    first_unit_price: first,
+    change_pct: inWin.length >= 2 && first ? Math.round(((lastIn - first) / first) * 10000) / 100 : null, // null with fewer than two fills, two decimals
+    self_trades_excluded: selfExcluded,
   };
 }
+
+/** `GET /tokens/:ticker/candles?interval=&limit=` — OHLC buckets of non-self trades, empty buckets omitted. */
+function candlesFor(ticker, interval, limit) {
+  const size = interval === "1d" ? 86_400 : 3_600;
+  const buckets = new Map();
+  for (const x of priceTrades(ticker)) {
+    const t = Math.floor(x.block_time / size) * size;
+    const b = buckets.get(t);
+    if (!b) buckets.set(t, { t, o: x.unit_price, h: x.unit_price, l: x.unit_price, c: x.unit_price, v_sats: x.price_sats, v_amount: x.amount, n: 1 });
+    else {
+      b.h = Math.max(b.h, x.unit_price);
+      b.l = Math.min(b.l, x.unit_price);
+      b.c = x.unit_price;
+      b.v_sats += x.price_sats;
+      b.v_amount += x.amount;
+      b.n += 1;
+    }
+  }
+  const rows = [...buckets.values()].sort((a, b) => a.t - b.t);
+  return { ticker, interval: size === 86_400 ? "1d" : "1h", candles: rows.slice(-limit) };
+}
+
+function tokenView(t) {
+  const m = marketFor(t.ticker, "24h");
+  return {
+    ...t,
+    open_orders: m.open_orders,
+    floor_unit_price: m.floor_unit_price,
+    last_trade: m.last_trade,
+    market_24h: { volume_sats: m.volume_sats, trades: m.trades, change_pct: m.change_pct, buyers: m.buyers },
+  };
+}
+
+/**
+ * The whole ledger (`GET /activity` items), newest first: deploys, mines,
+ * sends, trades. Every key is present (null when not applicable), like the
+ * live indexer; `applied` is false for an invalid MINE (0 yield) or a SEND
+ * that did not apply (amount = the requested amount). A fill is TWO rows
+ * with the same txid — the SEND that moved the tokens and the trade.
+ */
+const ITEM_KEYS = { kind: null, txid: null, block_height: null, block_time: null, ticker: null, amount: null, applied: true, from: null, to: null, sender: null, deployer: null, buyer: null, seller: null, price_sats: null, unit_price: null, self_trade: false };
+const item = (fields) => ({ ...ITEM_KEYS, ...fields });
+
+function activityItems() {
+  const w = world();
+  const items = [];
+  for (const t of w.tokens.values()) {
+    const e = [...w.sim.values()].find((x) => x.decoded.txid === t.deploy_txid);
+    items.push(item({ kind: "deploy", txid: t.deploy_txid, block_height: t.deploy_block, block_time: e ? Math.floor((e.at + CONFIRM_AFTER_MS) / 1000) : blockTimeAt(t.deploy_block), ticker: t.ticker, amount: t.supply, deployer: t.deployer, sender: t.deployer }));
+  }
+  for (const r of [...w.simMines, ...w.feed, ...w.history.mines]) {
+    items.push(item({ kind: "mine", txid: r.txid, block_height: r.block_height, block_time: r.block_time, ticker: r.ticker, amount: r.yield_smallest, applied: r.status !== "invalid", sender: r.sender }));
+  }
+  for (const s of [...w.simSends, ...w.history.sends]) {
+    items.push(item({ kind: "send", txid: s.txid, block_height: s.block_height, block_time: s.block_time, ticker: s.ticker, amount: s.amount, applied: s.applied !== false, from: s.sender, sender: s.sender, to: s.to }));
+  }
+  for (const x of w.trades) {
+    items.push(item({ kind: "trade", txid: x.txid, block_height: x.block_height, block_time: x.block_time, ticker: x.ticker, amount: x.amount, buyer: x.buyer, seller: x.seller, price_sats: x.price_sats, unit_price: x.unit_price, self_trade: !!x.self_trade }));
+    if (!w.simSends.some((s) => s.txid === x.txid)) {
+      items.push(item({ kind: "send", txid: x.txid, block_height: x.block_height, block_time: x.block_time, ticker: x.ticker, amount: x.amount, from: x.seller, sender: x.seller, to: x.buyer }));
+    }
+  }
+  return items.sort((a, b) => b.block_height - a.block_height || b.block_time - a.block_time || a.txid.localeCompare(b.txid) || a.kind.localeCompare(b.kind));
+}
+
+/**
+ * Mock second source (audit M-12) for VITE_MOCK=1: answers from the mock's
+ * own UTXO set with the same verdict shape as src/lib/secondSource.js —
+ * "agree" when the outpoint is known, unspent, and its sats + script match
+ * the listing; "disagree" otherwise. Nothing leaves the browser.
+ */
+export async function mockCheckSecondSource({ txid, vout, carrierSats, scriptHex }) {
+  await sleep(LATENCY_MS * 2);
+  const w = world();
+  const k = `${String(txid).toLowerCase()}:${Number(vout)}`;
+  const u = lookupUtxo(k);
+  const reasons = [];
+  if (!u) reasons.push(`mock second source has no record of outpoint ${String(txid).slice(0, 8)}…:${vout}`);
+  else {
+    if (w.spent.has(k)) reasons.push("mock second source says the outpoint is already spent");
+    if (u.sats !== Number(carrierSats)) reasons.push(`mock second source shows ${u.sats} sats on vout ${vout}, the listing says ${carrierSats}`);
+    let script = null;
+    try {
+      script = hex.encode(decodeAddress(u.address).script);
+    } catch {
+      script = null;
+    }
+    if (script !== String(scriptHex).toLowerCase()) reasons.push("mock second source shows a different scriptPubKey than the listing's witnessUtxo");
+  }
+  return {
+    verdict: reasons.length ? "disagree" : "agree",
+    reasons,
+    detail: reasons.length ? reasons.join("; ") : `mock second source agrees: unspent, ${Number(carrierSats).toLocaleString("en-US")} sats, same script (VITE_MOCK=1 — mempool.space is not consulted)`,
+    urls: null,
+  };
+}
+
+const PARTY_KEYS = ["from", "to", "sender", "deployer", "buyer", "seller"];
 
 const publicOrder = ({ psbt: _psbt, ...rest }) => rest;
 
@@ -676,6 +927,7 @@ export async function mockGet(path) {
       tip_height: tip,
       token_count: w.tokens.size,
       mine_count: [...w.tokens.values()].reduce((s, t) => s + t.mine_count, 0),
+      filling_order_count: [...w.orders.values()].filter((o) => o.status === "filling").length,
       last_progress_at: Math.floor(Date.now() / 1000) - 12,
       stalled: false,
     };
@@ -714,7 +966,7 @@ export async function mockGet(path) {
   }
   if (p === "/mines") {
     const ticker = q.get("ticker");
-    let all = [...w.simMines].sort((a, b) => b.block_height - a.block_height).concat(w.feed);
+    let all = [...w.simMines].sort((a, b) => b.block_height - a.block_height).concat(w.feed, w.history.mines);
     if (ticker) all = all.filter((r) => r.ticker === ticker);
     return page(all, q, 20);
   }
@@ -730,13 +982,41 @@ export async function mockGet(path) {
     const pg = page(all, q, 25);
     return { ticker: t.ticker, total: Math.max(t.holders, all.length), limit: pg.limit, offset: pg.offset, holders: pg.items };
   }
+  if ((m = p.match(/^\/tokens\/([^/]+)\/market$/))) {
+    const t = w.tokens.get(decodeURIComponent(m[1]));
+    if (!t) throw notFound(p);
+    return marketFor(t.ticker, q.get("window") || "24h");
+  }
+  if ((m = p.match(/^\/tokens\/([^/]+)\/candles$/))) {
+    const t = w.tokens.get(decodeURIComponent(m[1]));
+    if (!t) throw notFound(p);
+    const limit = Math.max(1, Math.min(1000, Number(q.get("limit") || 168)));
+    return candlesFor(t.ticker, q.get("interval") === "1d" ? "1d" : "1h", limit);
+  }
   if ((m = p.match(/^\/tokens\/([^/]+)$/))) {
     const t = w.tokens.get(decodeURIComponent(m[1]));
     if (!t) throw notFound(p);
     return tokenView(t);
   }
   if ((m = p.match(/^\/transfers\/([^/]+)$/))) {
-    return { address: decodeURIComponent(m[1]), transfers: [] };
+    const addr = decodeURIComponent(m[1]);
+    const transfers = [...w.simSends, ...w.history.sends].filter((s) => s.sender === addr || s.to === addr).sort((a, b) => b.block_height - a.block_height);
+    return { address: addr, transfers, total: transfers.length, limit: transfers.length, offset: 0 };
+  }
+  if (p === "/activity/daily") {
+    const days = Math.max(1, Math.min(365, Number(q.get("days") || 30)));
+    return { days: aggregateDaily(activityItems(), { days, now: now() }) };
+  }
+  if (p === "/activity") {
+    const kind = q.get("kind") || "all";
+    const addr = q.get("address");
+    let all = activityItems();
+    if (kind !== "all") all = all.filter((it) => it.kind === kind);
+    if (addr) all = all.filter((it) => PARTY_KEYS.some((k) => it[k] === addr));
+    return page(all, q, 50);
+  }
+  if (p === "/price") {
+    return { usd_per_btc: USD_PER_BTC, as_of: now(), source: "mock" };
   }
   if ((m = p.match(/^\/tx-status\/([^/]+)$/))) {
     const txid = decodeURIComponent(m[1]).toLowerCase();
@@ -772,7 +1052,7 @@ export async function mockGet(path) {
   if (p === "/fees") {
     // Fractional like the real indexer (f64 rounded up to hundredths) so
     // mock mode exercises decimal rates end to end.
-    return { fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1 };
+    return { fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
   }
   if ((m = p.match(/^\/orders\/by-address\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);
@@ -786,11 +1066,13 @@ export async function mockGet(path) {
   }
   if (p === "/orders") {
     const ticker = q.get("ticker");
+    // `open` excludes `filling` (a spend is already in the mempool); ask for
+    // `filling` or `all` explicitly — exactly the live indexer's contract.
     const status = q.get("status") || "open";
     let all = [...w.orders.values()];
     if (ticker) all = all.filter((o) => o.ticker === ticker);
     if (status !== "all") all = all.filter((o) => o.status === status);
-    all = status === "open"
+    all = status === "open" || status === "filling"
       ? all.sort((a, b) => a.unit_price - b.unit_price || a.created_at - b.created_at)
       : all.sort((a, b) => b.updated_at - a.updated_at);
     return page(all.map(publicOrder), q, 50);
@@ -873,15 +1155,24 @@ export async function mockPostJson(path, body) {
   const perAddress = [...w.orders.values()].filter((o) => o.seller === u.address && o.status === "open" && o.id !== outpoint).length;
   if (perAddress >= 50) throw bad("per-address open-order cap (50) reached");
   const existing = w.orders.get(outpoint);
-  const now = Math.floor(Date.now() / 1000);
+  // §7.3: an outpoint the book shows as `filling` has a spend in the
+  // mempool — a buyer must not be handed it again (and it is exempt from
+  // expiry, so there is nothing to renew).
+  if (existing && existing.status === "filling") throw bad("outpoint has a pending spend in the mempool (filling)", 409);
+  const ts = now();
   const row = {
     ...order,
     status: "open",
-    created_at: existing ? existing.created_at : now,
-    updated_at: now,
+    created_at: existing ? existing.created_at : ts,
+    updated_at: ts,
+    expires_at: ts + ORDER_TTL_SEC,
     spent_txid: null,
     spent_block: null,
     buyer: null,
+    pending_spend_txid: null,
+    pending_fee_sats: null,
+    pending_vsize: null,
+    pending_feerate: null,
     psbt: String(psbt).toLowerCase(),
   };
   w.orders.set(outpoint, row);

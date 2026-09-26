@@ -9,6 +9,7 @@ import Identicon from "../components/Identicon.jsx";
 import TokenAvatar from "../components/TokenAvatar.jsx";
 import SupplyRing from "../components/SupplyRing.jsx";
 import MinePanel from "../components/MinePanel.jsx";
+import MarketPanel from "../components/MarketPanel.jsx";
 import YieldSpectrum from "../components/YieldSpectrum.jsx";
 import TierTable from "../components/TierTable.jsx";
 import Panel from "../components/hud/Panel.jsx";
@@ -20,7 +21,8 @@ import { BUCKETS, probabilityPct, yieldDigit } from "../lib/yield.js";
 import { fmtAgo, fmtCompact, fmtDec, fmtInt, fmtPct, blockUrl } from "../lib/format.js";
 
 const POLL_MS = 15_000;
-const TABS = ["mine"];
+const TABS = ["mine", "market"];
+const TAB_LABEL = { mine: "Mine", market: "Market" };
 const MIX_LIMIT = 200;
 const DATA_TABS = [
   { id: "mines", label: "Mines" },
@@ -45,10 +47,13 @@ export default function TokenPage({ ticker, params, navigate }) {
   // The observed-mix stats are desktop-only; a phone never polls the 200-row feed.
   const mixQ = usePoll(mobile ? null : (s) => indexer.minesFeed({ ticker, limit: MIX_LIMIT }, s), POLL_MS, [ticker, mobile]);
 
-  // The mine console is the only action tab; stale `?tab=…` links resolve here.
+  // Two action tabs: the mine console (default) and the market. Stale
+  // `?tab=…` links (buy / sell from the old layout) resolve to the console.
   useEffect(() => {
     if (params.tab && !TABS.includes(params.tab)) navigate(tokenHref(ticker), { replace: true });
   }, [params.tab, ticker, navigate]);
+  const tab = TABS.includes(params.tab) ? params.tab : "mine";
+  const setTab = (id) => navigate(tokenHref(ticker, id === "mine" ? undefined : id));
 
   const [dataTab, setDataTab] = useState("mines");
   const [refreshKey, setRefreshKey] = useState(0);
@@ -113,10 +118,21 @@ export default function TokenPage({ ticker, params, navigate }) {
       <MinePanel ticker={token.ticker} tokenInfo={token} onSettled={onSettled} />
     </Panel>
   );
+  const market = <MarketPanel ticker={token.ticker} token={token} onSettled={onSettled} />;
+  const actionTabs = (kind) => (
+    <div className={kind === "seg" ? "seg" : "tabs token-tabs"} role="tablist" aria-label="Token actions">
+      {TABS.map((id) => (
+        <button key={id} className={kind === "seg" ? "seg-btn" : "tab"} role="tab" aria-selected={tab === id} onClick={() => setTab(id)} type="button">
+          {TAB_LABEL[id]}
+        </button>
+      ))}
+    </div>
+  );
 
   if (mobile) {
-    // Phone order: compact header → 2×2 stats → MINE console (primary action, within
-    // the first 1.5 screens) → folded yield model → segmented activity.
+    // Phone order: compact header → 2×2 stats → Mine | Market segmented control →
+    // the chosen console (within the first 1.5 screens) → folded yield model →
+    // segmented activity.
     return (
       <main className="page token-page token-page-m">
         <header className="token-head token-head-m">
@@ -158,7 +174,8 @@ export default function TokenPage({ ticker, params, navigate }) {
           </div>
         </dl>
 
-        {mineConsole}
+        {actionTabs("seg")}
+        {tab === "market" ? market : mineConsole}
 
         <Fold title="Yield model" summary={TIER_SUMMARY} led="ok" aria-label="Yield model">
           {yieldModel}
@@ -233,34 +250,40 @@ export default function TokenPage({ ticker, params, navigate }) {
         </div>
       </dl>
 
-      <div className="token-layout">
-        <div className="col">
-          <Panel title="Yield model" led="ok" aria-label="Yield model">
-            {yieldModel}
-          </Panel>
+      {actionTabs("tabs")}
 
-          <Panel
-            led={activeLed}
-            title={
-              <div className="tabs" role="tablist" aria-label="Token activity">
-                {DATA_TABS.map((t) => (
-                  <button key={t.id} className="tab" role="tab" aria-selected={dataTab === t.id} onClick={() => setDataTab(t.id)} type="button">
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-            }
-            right={<span className="label">{fmtInt(activeQ.total)} total</span>}
-          >
-            {dataTab === "mines" && <MinesTable q={minesPaged} self={address} empty={`No ${token.ticker} mines yet.`} />}
-            {dataTab === "holders" && <HoldersTable q={holdersPaged} minted={token.minted} self={address} />}
-          </Panel>
-        </div>
+      {tab === "market" ? (
+        market
+      ) : (
+        <div className="token-layout">
+          <div className="col">
+            <Panel title="Yield model" led="ok" aria-label="Yield model">
+              {yieldModel}
+            </Panel>
 
-        <div className="col">
-          {mineConsole}
+            <Panel
+              led={activeLed}
+              title={
+                <div className="tabs" role="tablist" aria-label="Token activity">
+                  {DATA_TABS.map((t) => (
+                    <button key={t.id} className="tab" role="tab" aria-selected={dataTab === t.id} onClick={() => setDataTab(t.id)} type="button">
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              }
+              right={<span className="label">{fmtInt(activeQ.total)} total</span>}
+            >
+              {dataTab === "mines" && <MinesTable q={minesPaged} self={address} empty={`No ${token.ticker} mines yet.`} />}
+              {dataTab === "holders" && <HoldersTable q={holdersPaged} minted={token.minted} self={address} />}
+            </Panel>
+          </div>
+
+          <div className="col">
+            {mineConsole}
+          </div>
         </div>
-      </div>
+      )}
     </main>
   );
 }

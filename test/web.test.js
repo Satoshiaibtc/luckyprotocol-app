@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
-import { buildHeaders, buildMiddleware, buildRoutes, FIXED_HEADERS, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
+import { buildHeaders, buildMiddleware, buildRoutes, FIXED_HEADERS, SECOND_SOURCE_ORIGIN, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
 import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHost.js";
 import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/specUrl.js";
 
@@ -13,22 +13,23 @@ import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/s
 {
   const prod = buildHeaders({ indexerUrl: "https://luckyprotocolai.com/", mode: "production", strict: true });
   const csp = /Content-Security-Policy: (.*)/.exec(prod)[1];
-  assert.equal(/connect-src ([^;]*)/.exec(csp)[1], "'self' https://luckyprotocolai.com", "connect-src: self + the indexer, nothing else");
-  assert.equal(/img-src ([^;]*)/.exec(csp)[1], "'self' data: blob: https://luckyprotocolai.com");
+  assert.equal(/connect-src ([^;]*)/.exec(csp)[1], "'self' https://luckyprotocolai.com https://mempool.space", "connect-src: self + the indexer + the M-12 second source, nothing else");
+  assert.equal(/img-src ([^;]*)/.exec(csp)[1], "'self' data: blob: https://luckyprotocolai.com", "img-src: the indexer only — mempool.space is never an image origin");
   assert.equal(/style-src ([^;]*)/.exec(csp)[1], "'self'", "no 'unsafe-inline'");
   assert.equal(/script-src ([^;]*)/.exec(csp)[1], "'self'");
   assert.ok(!prod.includes("127.0.0.1") && !prod.includes("localhost"), "no loopback origins in a production CSP");
-  assert.ok(!prod.includes("mempool.space"), "mempool.space is a link target only — not in the CSP");
+  assert.equal(SECOND_SOURCE_ORIGIN, "https://mempool.space");
+  assert.equal((csp.match(/mempool\.space/g) || []).length, 1, "mempool.space appears in connect-src and nowhere else");
   assert.ok(!prod.includes("unsafe-inline"));
   assert.ok(prod.includes("Strict-Transport-Security") && prod.includes("frame-ancestors 'none'") && prod.includes("/assets/*"));
   // a loopback indexer is fine for a local / development build …
   const dev = buildHeaders({ indexerUrl: "http://127.0.0.1:8765", mode: "development" });
-  assert.ok(/connect-src 'self' http:\/\/127\.0\.0\.1:8765;/.test(dev));
+  assert.ok(/connect-src 'self' http:\/\/127\.0\.0\.1:8765 https:\/\/mempool\.space;/.test(dev));
   // … a warning (and loopback-only CSP) for a local production build, fatal on a deploy platform
   const warnings = [];
   const local = buildHeaders({ indexerUrl: "", mode: "production", strict: false, warn: (m) => warnings.push(m) });
   assert.equal(warnings.length, 1);
-  assert.ok(/connect-src 'self' http:\/\/127\.0\.0\.1:8765;/.test(local));
+  assert.ok(/connect-src 'self' http:\/\/127\.0\.0\.1:8765 https:\/\/mempool\.space;/.test(local));
   assert.throws(() => buildHeaders({ indexerUrl: "", mode: "production", strict: true }), /must name the real indexer/);
   assert.throws(() => buildHeaders({ indexerUrl: "http://evil.example", mode: "production", strict: true }), /must name the real indexer/, "http to a non-loopback host is rejected like the app does");
   assert.equal(isAllowedIndexerUrl("https://luckyprotocolai.com"), true);
@@ -36,7 +37,7 @@ import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/s
   assert.equal(isAllowedIndexerUrl("http://luckyprotocolai.com"), false);
   assert.equal(isAllowedIndexerUrl("javascript:alert(1)"), false);
   assert.deepEqual(parseDotenv('VITE_INDEXER_URL=https://x.example # c\nVITE_MOCK="1"\n# comment\nBAD LINE\nexport VITE_SPEC_URL=\'/spec.md\''), { VITE_INDEXER_URL: "https://x.example", VITE_MOCK: "1", VITE_SPEC_URL: "/spec.md" });
-  console.log("headers: production CSP names only the indexer origin; no loopback, no mempool.space, no 'unsafe-inline'");
+  console.log("headers: production CSP names the indexer origin (+ mempool.space in connect-src only); no loopback, no 'unsafe-inline'");
 }
 
 // ---- HTML document: the generated Pages Function = _headers + a per-response script-src nonce ------

@@ -8,6 +8,7 @@ import Led from "./hud/Led.jsx";
 
 const NAV = [
   { name: "board", href: "#/", label: "Board" },
+  { name: "activity", href: "#/activity", label: "Activity" },
   { name: "create", href: "#/create", label: "Create" },
   { name: "me", href: "#/me", label: "Portfolio" },
 ];

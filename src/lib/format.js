@@ -108,6 +108,40 @@ export function fmtTime(unixSeconds) {
   return d.toLocaleString("en-US", { hour12: false });
 }
 
+/** "2026-09-27" (UTC) for a unix-seconds timestamp. */
+export function fmtDateUtc(unixSeconds) {
+  if (!unixSeconds) return "—";
+  const d = new Date(unixSeconds * 1000);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+/**
+ * USD for an amount of sats at `usdPerBtc` (from /price). USD is always
+ * secondary: with no price this is "—" and callers hide the label.
+ */
+export function fmtUsd(sats, usdPerBtc) {
+  if (sats === null || sats === undefined || !Number.isFinite(Number(sats))) return "—";
+  if (!Number.isFinite(usdPerBtc) || usdPerBtc <= 0) return "—";
+  const usd = (Number(sats) / 1e8) * usdPerBtc;
+  const abs = Math.abs(usd);
+  if (abs === 0) return "$0";
+  if (abs < 0.01) return `$${usd.toFixed(4)}`;
+  if (abs < 1) return `$${usd.toFixed(3)}`;
+  if (abs < 1000) return `$${usd.toFixed(2)}`;
+  return `$${usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+}
+
+/** "expires in 3d" / "expires in 5h" / "expired" for an `expires_at` stamp; "" when unknown. */
+export function fmtExpires(expiresAt, nowSec = Math.floor(Date.now() / 1000)) {
+  if (!Number.isFinite(expiresAt)) return "";
+  const left = expiresAt - nowSec;
+  if (left <= 0) return "expired";
+  if (left < 3600) return `expires in ${Math.max(1, Math.floor(left / 60))}m`;
+  if (left < 86400) return `expires in ${Math.floor(left / 3600)}h`;
+  return `expires in ${Math.floor(left / 86400)}d`;
+}
+
 export function fmtAgo(unixSeconds) {
   if (!unixSeconds) return "—";
   const s = Math.max(0, Math.floor(Date.now() / 1000 - unixSeconds));

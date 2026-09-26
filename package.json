@@ -20,7 +20,8 @@
     "test:wallet": "node test/wallet.test.js",
     "test:inscribe": "node test/inscribe.test.js && node test/avatar.compression.test.js && node test/deploy.inscribe.test.js",
     "test:pending": "node test/pending.test.js",
-    "check": "npm run lint && npm run test:vocab && npm run test && npm run test:psbt && npm run test:swap && npm run test:wallet && npm run test:inscribe && npm run test:pending && npm run build"
+    "test:market": "node test/market.test.js && node test/secondsource.test.js && node test/activity.test.js && node test/views.test.js",
+    "check": "npm run lint && npm run test:vocab && npm run test && npm run test:psbt && npm run test:swap && npm run test:wallet && npm run test:inscribe && npm run test:pending && npm run test:market && npm run build"
   },
   "dependencies": {
     "@fontsource/chakra-petch": "^5.3.0",

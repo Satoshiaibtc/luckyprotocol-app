@@ -2,9 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 
 // Lightweight hash router. Routes:
 //   #/              board
-//   #/t/<TICKER>    token page   (?tab=mine|buy|sell)
+//   #/t/<TICKER>    token page   (?tab=mine|market)
 //   #/create        deploy form
 //   #/me            portfolio
+//   #/activity      network ledger
 // Anything else → "notfound" (the shell renders the board with a notice).
 
 const TICKER_RE = /^[A-Z0-9]{1,8}$/;
@@ -31,6 +32,7 @@ export function parseHash(hash) {
   }
   if (segs[0] === "create" && segs.length === 1) return { ...base, name: "create" };
   if (segs[0] === "me" && segs.length === 1) return { ...base, name: "me" };
+  if (segs[0] === "activity" && segs.length === 1) return { ...base, name: "activity" };
   return { ...base, name: "notfound" };
 }
 

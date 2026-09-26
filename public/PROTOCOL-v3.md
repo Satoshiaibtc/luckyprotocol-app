@@ -1,6 +1,6 @@
 # LuckyProtocol Protocol — v3 / **LUCKY-20** (cohort `genesis-v3`)
 
-**Revision 2026-09-26** (activation height 969,300, SNAPSHOT_VERSION 15 —
+**Revision 2026-09-27** (activation height 969,300, SNAPSHOT_VERSION 15 —
 see §9 for what changed).
 
 Canonical wire spec for **LuckyProtocol**, the v3 successor to LUCKYPROTOCOL v2.
@@ -311,14 +311,19 @@ All JSON. CORS open. Base: the operator's indexer origin.
 | `GET /tokens?limit&offset&deployer` | `{ total, offset, limit, items: [{ ticker, supply, minted, deployer, deploy_txid, deploy_block, avatar_txid, avatar_content_type, … }] }`; optional exact-address `deployer` filter applies before pagination, and `total` counts matching entries |
 | `GET /tokens/:ticker` | one registry entry (+ `holders` count) |
 | `GET /tokens/:ticker/holders?limit&offset` | `{ ticker, total, limit, offset, holders: [{ address, balance }] }` |
+| `GET /tokens/:ticker/market?window=24h\|7d` | `{ ticker, window, as_of, tip_height, floor_unit_price, open_orders, listed_amount, last_trade, trades, volume_sats, buyers, sellers, high_unit_price, low_unit_price, first_unit_price, change_pct, self_trades_excluded: true }` — see "Market data" below; JSON 404 `{ error }` for an unknown ticker, 400 for another `window` |
+| `GET /tokens/:ticker/candles?interval=1h\|1d&limit=N` | `{ ticker, interval, candles: [{ t, o, h, l, c, v_sats, v_amount, n }] }` ascending by bucket start `t` (unix secs, UTC buckets of `block_time`), empty buckets omitted, the newest `limit` buckets (`1h`: default 168, max 720; `1d`: max 365); prices are `unit_price` sats/token; `o`/`c` are the first/last fill of the bucket in chain order; self-trades excluded |
+| `GET /activity?limit&offset&kind&address` | `{ total, limit, offset, items: [ActivityItem] }` newest first (block height desc, then in-block apply order desc); `limit` default 50, max 200; `kind` = `all` (default) \| `deploy` \| `mine` \| `send` \| `trade` (400 otherwise); `address` keeps rows where the address appears in ANY role |
+| `GET /activity/daily?days=N` | `{ days: [{ date, events, deploys, mines, sends, trades, active_addresses, token_amount, volume_sats }] }` — one entry per UTC day (`YYYY-MM-DD`) that has events, ascending, over the last `N` days ending today (default 30, max 365) |
+| `GET /price` | `{ usd_per_btc: f64 \| null, as_of, source: "mempool.space" }` — BTC/USD for display only, fetched from `https://mempool.space/api/v1/prices` (`USD`) with a 5 s timeout, cached 60 s; `null` on ANY failure (a failure is remembered 10 s), never 5xx; `Cache-Control: public, max-age=60` |
 | `GET /transfers/:addr?limit&offset` | `{ address, transfers: [TransferView], total, limit, offset }` |
 | `GET /tx-status/:txid` | `{ txid, confirmed, seen, in_mempool, block_height, block_hash, block_time }`. A txid the indexer has not observed at a watched address is looked up in the node's mempool: `seen:false` = the node has never seen it, `in_mempool:true` = pending; 502 when the node cannot be asked (never a guess); 400 for a non-txid. `Cache-Control: public, max-age=31536000, immutable` once the block is ≥ 12 below `indexed_height`, else `max-age=10` |
 | `GET /block-info/:height` | `{ height, hash, time, weight, tx_count }` — `weight` / `tx_count` (Core `getblock`, cached by block hash) are served for heights within the most recent 32 blocks (the `/blocks/recent` window); an older height answers `null` (or a value that happens to remain in the hash-keyed cache) without asking the node for the block body. `null` is also returned when the block body is unavailable; missing capacity is null, never zero. Fullness is `weight / 4,000,000`. Caching as `/tx-status`, except that a height inside the 32-block window is only frozen `immutable` once its capacity is known — a transient `getblock` failure stays `max-age=10` and is retried |
 | `GET /blocks/recent?limit` | `{ tip_height, blocks: [{ height, hash, time, weight, tx_count }] }` — last N (≤ 32, default 16) blocks newest first; feeds the block tape. `time`, `weight`, `tx_count` come from Core `getblock`, cached by block hash, and are served for exactly this window — the most recent 32 blocks are the only heights whose block body the indexer ever reads. `null` when the block body is unavailable or the RPC pool is full; missing capacity is null, never zero. Fullness is `weight / 4,000,000`, not a mempool congestion estimate |
-| `GET /fees` | `{ fastestFee, halfHourFee, hourFee, economyFee, minimumFee }` sat/vB |
+| `GET /fees` | `{ fastestFee, halfHourFee, hourFee, economyFee, minimumFee, incrementalrelayfee }` sat/vB — `incrementalrelayfee` is the node's `getnetworkinfo.incrementalfee` (BTC/kvB × 1e5, three decimals), `null` when the node cannot be asked; it is what a cancel of a `filling` listing must add on top of the pending tx's feerate (§7.3). Served from a 5 s cache |
 | `POST /broadcast` | body = raw tx hex (text/plain) → txid text; 400 + reason on node rejection. A tx with an OP_RETURN output whose push starts with the retired v2 prefix `LUCKYPROTOCOL\|` is refused with 400 + JSON `{ "error": "legacy LUCKYPROTOCOL payloads are no longer relayed; withdraw at luckybtc.org" }` before reaching the node; every other tx (sweeps without an OP_RETURN, LUCKY-20 payloads, foreign OP_RETURNs) is relayed |
-| `POST /orders` | JSON `{ psbt, ticker, amount, price_sats }` → `OrderView` (201) — see §7.4 |
-| `GET /orders?ticker&status&limit&offset` | `{ total, offset, limit, items: [OrderView] }` — open orders sorted by unit price asc; `psbt` omitted |
+| `POST /orders` | JSON `{ psbt, ticker, amount, price_sats }` → `OrderView` (201) — see §7.4; 409 when the outpoint is spent, has a pending spend, or is `filling` |
+| `GET /orders?ticker&status&limit&offset` | `{ total, offset, limit, items: [OrderView] }` sorted by unit price asc; `psbt` omitted. `status` = `open` (default — **excludes** `filling`) \| `filling` \| `filled` \| `cancelled` \| `all` |
 | `GET /orders/:id` | `OrderView` incl. `psbt` (id = `txid:vout` of the listed UTXO) or 404 |
 | `GET /orders/by-address/:addr?limit&offset` | `{ address, orders: [OrderView], total, limit, offset }` — every status, newest first, `psbt` omitted |
 | `GET /trades?ticker&limit&offset` | `{ total, offset, limit, items: [TradeView] }` newest first |
@@ -333,15 +338,65 @@ off after 10 s (`408`).
 `/tokens` items (and `/tokens/:ticker`) additionally carry per-ticker stats:
 `mine_count`, `trade_count`, `volume_sats` (lifetime BTC volume of fills),
 `open_orders`, `floor_unit_price` (lowest open ask in sats per whole token,
-float, `null` when no asks) and `last_trade` (`TradeView` or `null`).
-`trade_count`, `volume_sats` and `last_trade` **exclude self-trades**
-(fills whose buyer script is the seller's, `TradeView.self_trade`).
+float, `null` when no asks), `last_trade` (`TradeView` or `null`) and
+`market_24h: { volume_sats, trades, change_pct, buyers }` — the last 24
+hours by the definitions under "Market data" below, recomputed at most
+every 60 s so the board's poll stays cheap. `trade_count`, `volume_sats`,
+`last_trade` and every `market_24h` figure **exclude self-trades** (fills
+whose buyer script is the seller's, `TradeView.self_trade`). `open_orders`
+and `floor_unit_price` count `open` orders only — never `filling` ones
+(§7.3).
 
-`MineView`:
+**Market data** (`/tokens/:ticker/market`, `market_24h`, `candles`,
+`/activity/daily`): every figure is a pure function of the in-memory
+trade log and order book at `as_of` (unix secs, at most 60 s old); nothing
+is stored. Window membership is `block_time ≥ as_of − window` (`24h` =
+86,400 s, `7d` = 604,800 s), by the confirming block's header time.
+`floor_unit_price` = lowest `open` ask (sats per whole token, `null`
+without asks); `open_orders` / `listed_amount` = count / summed `amount`
+of `open` asks; `last_trade` = the newest non-self fill, all-time;
+`trades` / `volume_sats` (sum of `price_sats`) / `buyers` / `sellers`
+(distinct addresses) / `high_unit_price` / `low_unit_price` are over the
+window; `first_unit_price` is the earliest fill in the window (chain
+order) and `change_pct` = `(last − first) / first × 100`, two decimals,
+`null` with fewer than two fills. Self-trades are excluded throughout
+(`self_trades_excluded: true`). Unknown ticker → JSON 404 `{ error }`.
+
+`ActivityItem` (`/activity`) — one row per DEPLOY, MINE, SEND and fill,
+in exact apply order; a fill yields BOTH a `send` row (the SEND itself)
+and a `trade` row for the same `txid`. Every key is always present and
+is `null` when it does not apply to the kind:
 
 ```json
-{ "txid": "...", "block_height": 969600, "block_hash": "...", "sender": "bc1...",
-  "ticker": "LUCKY", "status": "settled" | "invalid",
+{ "kind": "deploy" | "mine" | "send" | "trade", "txid": "…",
+  "block_height": 969600, "block_time": 1790000000 | null, "ticker": "LUCKY",
+  "amount": 500, "applied": true,
+  "from": null | "bc1…", "to": null | "bc1…",          // send: largest input contributor, address of vout[TO_OUT]
+  "sender": null | "bc1…",                                // mine
+  "deployer": null | "bc1…",                              // deploy (null for an empty deployer, §2.1)
+  "buyer": null | "bc1…", "seller": null | "bc1…",        // trade
+  "price_sats": null | 60000, "unit_price": null | 50.0, "self_trade": null | false }
+```
+
+`amount` is the send amount, the credited mine yield (0 when `invalid` or
+cap-exhausted), the deploy supply, or the trade amount (integer smallest
+units). `applied` is `true` for a settled MINE, an applied SEND, a
+registering DEPLOY and every trade. `/activity/daily` counts every row as
+an `event`; `trades` and `volume_sats` exclude self-trades; `token_amount`
+= credited mine yields + applied send amounts + non-self trade amounts;
+`active_addresses` = distinct addresses in any role that day. The feed is
+FIFO-bounded at 100,000 rows and is a derived projection of the audit
+logs: a snapshot written without it is restored with the rows re-derived
+(exact within a kind, ordered deploy < mine < send < trade inside one
+block). `block_time` is `null` only on rows re-derived from logs that
+predate the field.
+
+`MineView` (`TransferView` and `DeployView` carry the same additive
+`block_time`, 0 on rows written before it existed):
+
+```json
+{ "txid": "...", "block_height": 969600, "block_hash": "...", "block_time": 1790000000,
+  "sender": "bc1...", "ticker": "LUCKY", "status": "settled" | "invalid",
   "yield_smallest": 100, "cap_exhausted": false }
 ```
 
@@ -442,8 +497,15 @@ rejected by the mempool as a double-spend and that buyer loses nothing.
 1. the listing PSBT has exactly 1 input + 1 output;
 2. `input0.sighashType == 0x83` and a signature is present
    (`tapKeySig` for P2TR, `partialSig` for P2WPKH);
-3. `GET /orders/:id` is still `open` and `GET /utxos/:seller` still
-   lists the outpoint with `{ TICKER: amount }`;
+3. `GET /orders/:id` is still `open` (not `filling`, §7.3) and
+   `GET /utxos/:seller` still lists the outpoint with `{ TICKER: amount }`
+   — **and the outpoint is re-checked against a second source** the
+   indexer does not control (the creating tx from the wallet's own node
+   or an explorer: its output script and value must match `witnessUtxo`,
+   and its `OP_RETURN` re-parsed — a MINE carrier's yield recomputed from
+   the confirming block hash (§3) must equal `amount`, a SEND carrier's
+   `TO_OUT` must be this vout). The client fails closed when the two
+   disagree (§7.6);
 4. `output0.value == price_sats` and `output0.script == input0.script`;
 5. `witnessUtxo.amount == carrier_sats` reported by the indexer.
 
@@ -456,11 +518,61 @@ cancel is to **move the tokens on-chain** (a SEND-to-self of that UTXO,
 the book but does NOT invalidate the earlier signed PSBT; the UI must say
 so. The indexer records whatever actually confirms (§7.5).
 
+**`filling` — a spend is in the mempool (audit M-9).** On every poll
+tick the indexer asks the node which live listings' outpoints are spent
+by a mempool tx (`gettxspendingprevout`, batched) and, for each such tx,
+its fee and size (`getmempoolentry`). The order then shows
+`status: "filling"` with `pending_spend_txid`, `pending_fee_sats`,
+`pending_vsize` and `pending_feerate` (sat/vB, two decimals) — whether
+the pending tx is a fill or the seller's own cancel. A `filling` order:
+
+- is NOT `open`: `GET /orders?status=open`, `open_orders`,
+  `floor_unit_price` and `listed_amount` exclude it, and `POST /orders`
+  for its outpoint answers 409 (a buyer must not be handed a listing
+  that is already being taken);
+- reverts to `open` (fields cleared) when the spend leaves the mempool
+  without confirming — evicted, or replaced by a tx that no longer
+  touches the outpoint; a replacement that still spends it just refreshes
+  the fields with the new txid / fee;
+- becomes `filled` or `cancelled` through §7.5 when the spend confirms,
+  exactly as an `open` order would — the confirmed tx decides, whatever
+  the mempool said;
+- is kept past its TTL (§7.4) and is the last thing the global cap evicts,
+  so its trade record cannot be lost while the spend is pending;
+- keeps its `updated_at` / `expires_at`: mempool observations are not
+  seller actions and never refresh the TTL.
+
+A buyer's fill that pays a fee too low for the current market can sit in
+the mempool for up to two weeks (default mempool expiry), and while it
+does every other fill of that listing is a double-spend the network
+rejects — the seller's tokens are pinned. This is inherent to
+SINGLE|ANYONECANPAY listings (Ordinals markets have it too); the
+`pending_*` fields exist so the seller can get out. **Cancel fee
+guidance:** the cancel (a SEND-to-self of the outpoint, §2.3) is a BIP125
+replacement of the pending tx and is only relayed when it pays
+
+- a feerate ≥ `pending_feerate + incrementalrelayfee` (sat/vB, from
+  `/fees`), and
+- an absolute fee ≥ `pending_fee_sats + cancel_vsize × incrementalrelayfee`
+  sats (BIP125 rule 3/4 — the replacement must pay for the bandwidth of
+  what it evicts),
+
+so the reference client sizes a cancel at
+`max(halfHourFee × cancel_vsize, pending_fee_sats + cancel_vsize ×
+(pending_feerate + incrementalrelayfee))` sats and shows the number; the
+node's `insufficient fee, rejecting replacement` is the message to map
+when it is still too low. Because a pending fill's absolute fee can be
+large (a ~99 kvB tx at 1 sat/vB is ~100,000 sats), short-lived listings
+and re-listing rather than leaving asks up for the full 14 days limit the
+exposure. An attacker who pins a listing pays that same absolute fee
+either way: it is a paid option, not a free one.
+
 ### 7.4 Indexer order book
 
 `POST /orders` body `{ psbt: <hex>, ticker, amount, price_sats }`. The
 indexer accepts the listing only if ALL of the following hold, else 400
-(or 409 when the outpoint is spent / has a pending spend):
+(or 409 when the outpoint is spent / has a pending spend — including one
+the book already shows as `filling`, §7.3):
 
 - PSBT decodes; exactly 1 input, 1 output; `nLockTime == 0`;
 - `input0` outpoint is in `utxo_balances` with balances exactly
@@ -471,6 +583,12 @@ indexer accepts the listing only if ALL of the following hold, else 400
   price_sats ≥ 546`; **`price_sats ≥ witnessUtxo.value`** (BTC above
   price on the carrier goes to the buyer, §7.1); **`price_sats ≤ amount ×
   1e8`** (at most 1 BTC per whole token); `1 ≤ amount ≤ 21_000_000`;
+- **price band** (audit M-11): when the ticker has at least one other
+  `open` ask, the new ask's unit price must be **≤ 100 × the current best
+  (lowest) open ask**; a higher one is refused with a JSON error naming
+  the band and the ceiling. A re-POST of the same outpoint is measured
+  against the other asks only, and a ticker with no other open ask has
+  no band (only the absolute 1 BTC/token cap applies);
 - `input0.sighashType == 0x83`, and the signature **verifies** against
   the prevout: P2TR key-path → Schnorr over
   `taproot_key_spend_signature_hash(0, Prevouts::One, SinglePlusAnyoneCanPay)`
@@ -485,11 +603,14 @@ indexer accepts the listing only if ALL of the following hold, else 400
 - **TTL**: an open order expires **14 days after `updated_at`** and is
   dropped from the book (`expires_at` in `OrderView`). Re-POSTing the same
   PSBT refreshes it for free — it replaces the entry and counts against no
-  cap. The UI should re-POST open listings it still wants shown.
+  cap. The UI should re-POST open listings it still wants shown. A
+  `filling` order is exempt while its spend is pending (§7.3); it expires
+  on the next tick after reverting to `open`.
 - **Global cap 10,000** orders (any status): when full, the oldest closed
   (filled / cancelled) orders are evicted first, then the **open order
-  with the oldest `updated_at`**. A listing is a bearer PSBT the seller
-  can re-POST at any time, so eviction never loses anything.
+  with the oldest `updated_at`**, and only after every open one a
+  `filling` order. A listing is a bearer PSBT the seller can re-POST at
+  any time, so eviction never loses anything.
 - **Per-ticker cap 1,500 open orders**: the book keeps a ticker's 1,500
   best asks. A new ask that undercuts the worst (highest unit price)
   evicts it; one that does not is refused with the price it must beat.
@@ -497,24 +618,35 @@ indexer accepts the listing only if ALL of the following hold, else 400
 Order identity is the outpoint (`id = "txid:vout"`); a re-POST for an
 open outpoint replaces it (`replaced: true` in the response). Orders are
 runtime data persisted to `orders.json` next to the snapshot (atomic
-write on every change) — they are NOT part of the chain-derived snapshot.
+write on every change, three rotated generations `.bak` / `.bak.1` /
+`.bak.2`; a corrupt or foreign-version file is moved aside as
+`orders.json.corrupt-<unix>`, never overwritten, and the newest usable
+generation is loaded — audit L-6) — they are NOT part of the
+chain-derived snapshot. The file format stays version 1: the `filling`
+status and the `pending_*` fields are additive and optional.
 
 `OrderView`:
 
 ```json
 { "id": "txid:vout", "ticker": "LUCKY", "amount": 1200, "price_sats": 60000,
   "unit_price": 50.0, "seller": "bc1p...", "carrier_sats": 546,
-  "status": "open" | "filled" | "cancelled",
+  "status": "open" | "filling" | "filled" | "cancelled",
   "created_at": 1790000000, "updated_at": 1790000000,
   "expires_at": 1791209600,
   "spent_txid": null | "…", "spent_block": null | 969700,
-  "buyer": null | "bc1q...", "psbt": "…hex… (only on GET /orders/:id)" }
+  "buyer": null | "bc1q...",
+  "pending_spend_txid": null | "…", "pending_fee_sats": null | 12345,
+  "pending_vsize": null | 4938, "pending_feerate": null | 2.5,
+  "psbt": "…hex… (only on GET /orders/:id)" }
 ```
+
+The four `pending_*` fields are set only while `status` is `filling`
+(§7.3) and are `null` otherwise.
 
 ### 7.5 Fill detection and trade history
 
 In `apply_tx`, after the payload is applied, every spent outpoint that
-matches an order is settled:
+matches a live (`open` or `filling`) order is settled:
 
 - the tx is a SEND for the order's ticker with `applied == true`, its
   `vout0` pays **≥ `price_sats`** to the seller's script, and `TO_OUT`
@@ -538,15 +670,41 @@ listing). Such fills are recorded and listed like any other, but they do
 not count toward `trade_count` / `volume_sats` and never become
 `last_trade` — a 546-sat wash must not print a price.
 
-On `restore_from_snapshot` (reorg or restart) every non-open order whose
-outpoint is present again in `utxo_balances` reverts to `open`.
+On `restore_from_snapshot` (reorg or restart) every closed order whose
+outpoint is present again in `utxo_balances` **carrying exactly
+`{ ticker: amount }`** — the whole-UTXO balance the listing sells, not
+merely an entry under that key (audit M-12) — reverts to `open`; a live
+order whose outpoint is not present with that exact balance is
+`cancelled` (`spent_txid: null`) and re-opened only if the replay
+re-creates the outpoint with it. A `filling` order whose outpoint is
+present stays `filling` until the next tick re-checks the mempool.
 
 ### 7.6 What this is not (trading)
 
 There is no bonding curve, no pooled liquidity, no market maker and no
 custody. Prices are whatever sellers ask and buyers pay, settled by the
-Bitcoin network. The indexer can hide or lose orders (availability), but
-it cannot move anyone's funds (safety).
+Bitcoin network.
+
+What the indexer can and cannot do, precisely: **a seller's funds cannot
+be moved by the indexer.** A listing is valid only in a tx that pays
+`output0` to the seller in full, and only the seller's key can sign it;
+the indexer holds no key and can at most hide, lose or delay orders
+(availability). **A buyer, however, relies on the indexer's statement
+that `input0` still carries `{ ticker: amount }`.** A malicious or
+compromised indexer — or anyone able to alter what it serves — could show
+a buyer a listing whose outpoint no longer carries the tokens (or never
+did): the buyer's fill would then pay `price_sats` to the seller and the
+SEND would apply with an empty pool, moving nothing. Nothing in the
+signed PSBT protects against that; only an independent view of the
+outpoint does. That is why the reference client re-checks the outpoint
+against a second source before signing (§7.2 step 3: the creating tx
+from the wallet or another node / explorer, its output script and value,
+and — for a MINE carrier — the yield recomputed from the confirming
+block hash; for a SEND carrier, `TO_OUT`), and fails closed when the
+sources disagree. Loss from such an attack is bounded by the fills made
+while it lasts; every single-indexer OP_RETURN meta-protocol shares this
+property, which is also why this indexer is open source and meant to be
+run by more than one party.
 
 ## 8. Token avatars — `LUCKY-20|AVATAR|<TICKER>` (on-chain image)
 
@@ -690,6 +848,19 @@ while its own reveal is known to the node. Replacement records remain
 under `lp.avatar.<TICKER>`.
 
 ## 9. Changelog
+
+- **2026-09-27** — market backend, no consensus change (SNAPSHOT_VERSION
+  stays 15): `GET /tokens/:ticker/market`, `/tokens/:ticker/candles`,
+  `/activity`, `/activity/daily`, `/price`, `market_24h` on `/tokens`,
+  `incrementalrelayfee` on `/fees`, additive `block_time` on
+  `MineView` / `TransferView` / `DeployView` and a derived activity feed
+  in the snapshot (§5). Order book: `filling` status with `pending_*`
+  fields and cancel-fee guidance (§7.3, audit M-9); 409 on `POST /orders`
+  for a filling outpoint, relative price band ≤ 100× the best open ask
+  (§7.4, audit M-11); restore reconciliation requires the exact listed
+  balance and §7.6 states what a buyer trusts the indexer for (audit
+  M-12); `orders.json` quarantine + three rotated generations + hourly
+  off-box backup (§7.4, audit L-6).
 
 - **2026-09-26** — avatar may be embedded in DEPLOY (§2.1 / §8), snapshot
   version 15; additive `AvatarView.op`; `/tokens` accepts an exact

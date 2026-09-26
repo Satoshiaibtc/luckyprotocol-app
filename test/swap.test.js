@@ -407,10 +407,10 @@ function runScenario(label, sellerType, buyerType) {
     {
       const bad = parse(signedFill);
       bad.updateOutput(4, { amount: 1_000n }, true);
-      assert.throws(() => finalizeFill(hex.encode(bad.toPSBT())), /vout4 \(residual slot\) is 1000 sats/, `${label}: tampered residual slot refused`);
+      assert.throws(() => finalizeFill(hex.encode(bad.toPSBT())), /vout4 \(residual carrier\) is 1000 sats/, `${label}: tampered residual slot refused`);
       const badSlot = parse(signedFill);
       badSlot.updateOutput(1, { amount: 600n }, true);
-      assert.throws(() => finalizeFill(hex.encode(badSlot.toPSBT())), /vout1 \(token slot\) is 600 sats/, `${label}: tampered token slot refused`);
+      assert.throws(() => finalizeFill(hex.encode(badSlot.toPSBT())), /vout1 \(token carrier\) is 600 sats/, `${label}: tampered token slot refused`);
     }
   }
   // A tampered listing is refused before any input is added

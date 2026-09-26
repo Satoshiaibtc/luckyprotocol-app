@@ -10,12 +10,15 @@
 //                             document with the same headers plus a fresh
 //                             per-response CSP nonce (generated, gitignored)
 //
-// The Content-Security-Policy's connect-src / img-src list exactly one
-// remote origin: the indexer named by VITE_INDEXER_URL. Nothing else is
-// ever fetched or loaded (fonts are self-hosted; mempool.space is a link
-// target only and needs no CSP entry). A production build therefore
-// carries no loopback origins; a loopback VITE_INDEXER_URL (a local
-// build pointed at a local indexer) is listed as such. style-src is
+// The Content-Security-Policy's img-src lists exactly one remote origin:
+// the indexer named by VITE_INDEXER_URL. connect-src lists that origin
+// plus https://mempool.space — the read-only SECOND SOURCE the buy flow
+// consults before a fill is signed (audit M-12, src/lib/secondSource.js:
+// GET /api/tx/<txid>/outspend/<vout> and GET /api/tx/<txid>, nothing but
+// the outpoint in the URL, no headers, no credentials). Nothing else is
+// ever fetched or loaded (fonts are self-hosted). A production build
+// therefore carries no loopback origins; a loopback VITE_INDEXER_URL (a
+// local build pointed at a local indexer) is listed as such. style-src is
 // 'self' without 'unsafe-inline': React writes the few dynamic styles
 // through the CSSOM (element.style), which CSP does not restrict, and
 // there are no <style> elements or style="" attributes in the markup.
@@ -120,6 +123,9 @@ function originOf(opts) {
 /** The script-src directive; the generated middleware appends its per-response nonce to exactly this. */
 export const SCRIPT_SRC = "script-src 'self'";
 
+/** The buy flow's second source for a listing's outpoint (audit M-12) — connect-src only, never img-src. */
+export const SECOND_SOURCE_ORIGIN = "https://mempool.space";
+
 /** CSP directives for a build. Pure: (origin, nonce?) → string[]; a nonce extends script-src only. */
 export function cspDirectives(origin, nonce = null) {
   return [
@@ -128,7 +134,7 @@ export function cspDirectives(origin, nonce = null) {
     "style-src 'self'",
     `img-src 'self' data: blob: ${origin}`,
     "font-src 'self' data:",
-    `connect-src 'self' ${origin}`,
+    `connect-src 'self' ${origin} ${SECOND_SOURCE_ORIGIN}`,
     "worker-src 'self' blob:",
     "manifest-src 'self'",
     "object-src 'none'",
@@ -162,9 +168,10 @@ export function buildHeaders(opts = {}) {
     "# but a strict CSP still matters: an XSS could swap the PSBT the user is",
     "# asked to sign, or repoint indexer reads at a poisoned origin. The bundle",
     "# is fully self-contained (fonts via @fontsource, no CDNs, no inline",
-    "# scripts or styles), so script-src and style-src are 'self' only and the",
-    "# only remote origin is the indexer (connect-src for reads, img-src for",
-    "# token avatars served by it).",
+    "# scripts or styles), so script-src and style-src are 'self' only. The",
+    "# remote origins are the indexer (connect-src for reads, img-src for",
+    "# token avatars served by it) and https://mempool.space (connect-src",
+    "# only: the buy flow re-checks a listing's outpoint there before signing).",
     "#",
     "# The HTML document itself is served by functions/_middleware.js (see",
     "# _routes.json), which sets these same headers plus a per-response",

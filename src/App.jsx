@@ -16,6 +16,7 @@ import Board from "./pages/Board.jsx";
 import TokenPage from "./pages/TokenPage.jsx";
 import CreatePage from "./pages/CreatePage.jsx";
 import PortfolioPage from "./pages/PortfolioPage.jsx";
+import ActivityPage from "./pages/ActivityPage.jsx";
 
 const MOCK = indexer.isMock();
 const STATUS_POLL_MS = 15_000;
@@ -37,6 +38,9 @@ export default function App() {
   // One fee choice (preset from /fees or custom sat/vB) for every builder.
   const fee = useFeeRate(fees.error ? null : fees.data);
   const tipBlock = usePoll(tipHeight ? (s) => indexer.blockInfo(tipHeight, s) : null, 0, [tipHeight]);
+  // USD per BTC from /price — secondary and optional: null (or an error)
+  // simply hides every USD sub-label; nothing else depends on it.
+  const price = usePoll((s) => indexer.price(s), 60_000, []);
   const indexerOk = !health.error && !!health.data;
 
   // Stable "refresh everything" handle for flows that settle on-chain.
@@ -66,6 +70,7 @@ export default function App() {
       tokens,
       fees,
       fee,
+      price,
       tipBlock,
       indexerOk,
       mock: MOCK,
@@ -73,7 +78,7 @@ export default function App() {
       navigate,
       refreshAll,
     }),
-    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, walletModalOpen, openWalletModal, closeWalletModal, health, tokens, fees, fee, tipBlock, indexerOk, route, navigate, refreshAll],
+    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, walletModalOpen, openWalletModal, closeWalletModal, health, tokens, fees, fee, price, tipBlock, indexerOk, route, navigate, refreshAll],
   );
 
   let page;
@@ -86,6 +91,9 @@ export default function App() {
       break;
     case "me":
       page = <PortfolioPage />;
+      break;
+    case "activity":
+      page = <ActivityPage />;
       break;
     case "notfound":
       page = <Board notice={`Nothing at "#${route.path}" — showing the board.`} />;
