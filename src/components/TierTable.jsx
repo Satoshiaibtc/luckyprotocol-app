@@ -1,12 +1,11 @@
-import { BUCKETS, DIGIT_SPACE, EXPECTED_YIELD, contribution, probabilityPct } from "../lib/yield.js";
-import { fmtDec, fmtInt } from "../lib/format.js";
+import { BUCKETS, DIGIT_SPACE, probabilityPct } from "../lib/yield.js";
+import { fmtInt } from "../lib/format.js";
 
 /**
  * The yield buckets (one row / chip per BUCKETS entry) as a table (full) or
  * as chips with a 16-segment rail (compact). Every number derives from BUCKETS.
  */
 export default function TierTable({ ticker = "", compact = false }) {
-  const top = BUCKETS.reduce((a, b) => (contribution(b) > contribution(a) ? b : a), BUCKETS[0]);
   if (compact) {
     return (
       <div className="tier-chips">
@@ -66,19 +65,6 @@ export default function TierTable({ ticker = "", compact = false }) {
         ))}
       </div>
       <p className="tier-sub">Every valid mine yields. The miner chooses nothing; the digit is public and deterministic.</p>
-
-      <div className="contrib">
-        <span className="label">Share of expected yield</span>
-        <div className="contrib-bar" role="img" aria-label={BUCKETS.map((b) => `${b.label} contributes ${fmtDec(contribution(b))} of ${fmtDec(EXPECTED_YIELD)}`).join("; ")}>
-          {BUCKETS.map((b) => (
-            <span key={b.id} className={`tier-${b.id}`} style={{ width: `${(100 * contribution(b)) / EXPECTED_YIELD}%` }} />
-          ))}
-        </div>
-        <div className="contrib-derivation">
-          {BUCKETS.map((b) => `${b.count}×${fmtInt(b.yield)} ÷ ${DIGIT_SPACE} = ${fmtDec(contribution(b))}`).join(" · ")} · sum {fmtDec(EXPECTED_YIELD)}
-        </div>
-        <p className="help">The largest share of the expectation comes from the {top.label} tier.</p>
-      </div>
     </>
   );
 }

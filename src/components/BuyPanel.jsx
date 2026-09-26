@@ -8,6 +8,7 @@ import { useTxStatus } from "../hooks/useTxStatus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { buildFillPsbt, finalizeFill, verifyListing, estimateFillCost } from "../lib/swap.js";
 import { expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
+import { isUsableFeeRate } from "../lib/feechoice.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
 import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, shortAddr } from "../lib/format.js";
@@ -148,7 +149,8 @@ export default function BuyPanel({ ticker, token, onSettled }) {
 }
 
 function requireRate(v) {
-  if (!Number.isInteger(v) || v < 1) throw new Error("No fee estimate from the indexer — try again later.");
+  // Fractional rates are fine; the predicate also rejects anything above the safety cap.
+  if (!isUsableFeeRate(v)) throw new Error("No fee estimate from the indexer — try again later.");
   return v;
 }
 

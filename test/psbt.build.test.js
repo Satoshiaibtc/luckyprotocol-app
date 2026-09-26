@@ -104,6 +104,48 @@ assert.throws(() => decodeAddress("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"),
 const prev = estimateMineFeeSats({ address: p2trAddr, ticker: "LUCKY", feeRateSatVb: 8 });
 assert.ok(prev.vsize > 150 && prev.vsize < 250, `preview vsize plausible: ${prev.vsize}`);
 assert.equal(prev.feeSats, Math.ceil(prev.vsize * 8));
+// A node's vsize is ceil(weight / 4): the preview must pay for the whole
+// vbyte at every rate, for both input types (the estimate is fractional).
+const RATES = [1, 1.01, 1.25, 2.5, 3, 10];
+for (const feeRateSatVb of RATES) {
+  for (const address of [p2trAddr, p2wpkhAddr]) {
+    const p = estimateMineFeeSats({ address, ticker: "LUCKY", feeRateSatVb });
+    assert.ok(p.feeSats >= p.vsize * feeRateSatVb - 1e-9, `preview ${address.slice(0, 4)} @ ${feeRateSatVb}: ${p.feeSats} ≥ ${p.vsize} × ${feeRateSatVb}`);
+  }
+}
+
+// Decimal rates propagate into every ordinary transaction builder; totals
+// and change stay integer satoshis suitable for PSBT serialization, and the
+// fee is never below ceil(vsize) × rate (what the node actually charges for).
+for (const feeRateSatVb of RATES) {
+  for (const [address, pubkeyHex] of [[p2trAddr, P2TR_PUB], [p2wpkhAddr, P2WPKH_PUB]]) {
+    const args = { address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker: "LUCKY" };
+    const builds = [
+      buildMinePsbt(args),
+      buildDeployPsbt(args),
+      buildPayPsbt({ ...args, toAddress: p2wpkhAddr, amountSats: 1000 }),
+      buildSendPsbt({ ...args, tokenUtxos: [{ txid: T(3), vout: 0, sats: 20_000 }], toAddress: p2wpkhAddr, amount: 1 }),
+    ];
+    for (const built of builds) {
+      assert.equal(built.feeRateSatVb, feeRateSatVb);
+      assert.ok(Number.isInteger(built.feeSats));
+      assert.ok(Number.isInteger(built.changeSats));
+      assert.ok(Number.isInteger(built.estimatedVsize));
+      assert.ok(built.feeSats >= Math.ceil(built.estimatedVsize) * feeRateSatVb - 1e-9, `${address.slice(0, 4)} @ ${feeRateSatVb}: fee ${built.feeSats} ≥ ${built.estimatedVsize} vB × ${feeRateSatVb}`);
+      const { ins, outs } = parse(built.psbtHex);
+      assert.equal(ins.reduce((s, i) => s + i.witnessUtxo.amount, 0n) - outs.reduce((s, o) => s + o.amount, 0n), BigInt(built.feeSats));
+    }
+  }
+}
+
+// The regression: a single-input P2WPKH MINE estimates 213.5 vB (→ 214 on
+// the node). ceil(213.5 × 3) = 641 is one sat under the node's 214 × 3.
+{
+  const r = buildMinePsbt({ address: p2wpkhAddr, pubkeyHex: P2WPKH_PUB, utxos: [{ txid: T(4), vout: 2, sats: 90_000 }], tokenOutpoints: [], feeRateSatVb: 3, ticker: "LUCKY" });
+  assert.equal(r.inputIndexes.length, 1);
+  assert.equal(r.estimatedVsize, 214);
+  assert.equal(r.feeSats, 642, "fee == ceil(vsize) × rate, not ceil(vsize × rate)");
+}
 
 // ---- MINE p2tr ---------------------------------------------------------------------------
 {
@@ -263,7 +305,7 @@ assert.throws(
 {
   const prevS = estimateSendFeeSats({ address: p2trAddr, toAddress: p2wpkhAddr, ticker: "LUCKY", amount: 100, feeRateSatVb: 8 });
   assert.ok(prevS.vsize > 200 && prevS.vsize < 330, `send preview vsize plausible (2 inputs, 4 address outputs + OP_RETURN): ${prevS.vsize}`);
-  assert.ok(Math.abs(prevS.feeSats - prevS.vsize * 8) <= 8, "fee == rate × (unrounded) vsize");
+  assert.equal(prevS.feeSats, prevS.vsize * 8, "fee == rate × ceil(vsize): the node charges for whole vbytes");
   assert.equal(prevS.slotSats, 3 * 546, "recipient slot + protocol fee + residual slot");
 }
 

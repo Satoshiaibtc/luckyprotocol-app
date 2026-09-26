@@ -313,8 +313,8 @@ All JSON. CORS open. Base: the operator's indexer origin.
 | `GET /tokens/:ticker/holders?limit&offset` | `{ ticker, total, limit, offset, holders: [{ address, balance }] }` |
 | `GET /transfers/:addr?limit&offset` | `{ address, transfers: [TransferView], total, limit, offset }` |
 | `GET /tx-status/:txid` | `{ txid, confirmed, seen, in_mempool, block_height, block_hash, block_time }`. A txid the indexer has not observed at a watched address is looked up in the node's mempool: `seen:false` = the node has never seen it, `in_mempool:true` = pending; 502 when the node cannot be asked (never a guess); 400 for a non-txid. `Cache-Control: public, max-age=31536000, immutable` once the block is ≥ 12 below `indexed_height`, else `max-age=10` |
-| `GET /block-info/:height` | `{ height, hash, time }` — same caching rule as `/tx-status` |
-| `GET /blocks/recent?limit` | `{ tip_height, blocks: [{ height, hash }] }` — last N (≤ 32, default 16) block hashes newest first; feeds the yield-digit history board |
+| `GET /block-info/:height` | `{ height, hash, time, weight, tx_count }` — `weight` / `tx_count` (Core `getblock`, cached by block hash) are served for heights within the most recent 32 blocks (the `/blocks/recent` window); an older height answers `null` (or a value that happens to remain in the hash-keyed cache) without asking the node for the block body. `null` is also returned when the block body is unavailable; missing capacity is null, never zero. Fullness is `weight / 4,000,000`. Caching as `/tx-status`, except that a height inside the 32-block window is only frozen `immutable` once its capacity is known — a transient `getblock` failure stays `max-age=10` and is retried |
+| `GET /blocks/recent?limit` | `{ tip_height, blocks: [{ height, hash, time, weight, tx_count }] }` — last N (≤ 32, default 16) blocks newest first; feeds the block tape. `time`, `weight`, `tx_count` come from Core `getblock`, cached by block hash, and are served for exactly this window — the most recent 32 blocks are the only heights whose block body the indexer ever reads. `null` when the block body is unavailable or the RPC pool is full; missing capacity is null, never zero. Fullness is `weight / 4,000,000`, not a mempool congestion estimate |
 | `GET /fees` | `{ fastestFee, halfHourFee, hourFee, economyFee, minimumFee }` sat/vB |
 | `POST /broadcast` | body = raw tx hex (text/plain) → txid text; 400 + reason on node rejection. A tx with an OP_RETURN output whose push starts with the retired v2 prefix `LUCKYPROTOCOL\|` is refused with 400 + JSON `{ "error": "legacy LUCKYPROTOCOL payloads are no longer relayed; withdraw at luckybtc.org" }` before reaching the node; every other tx (sweeps without an OP_RETURN, LUCKY-20 payloads, foreign OP_RETURNs) is relayed |
 | `POST /orders` | JSON `{ psbt, ticker, amount, price_sats }` → `OrderView` (201) — see §7.4 |
@@ -604,7 +604,7 @@ Limits (consensus for this protocol, checked by every indexer):
 | `content-type` | exactly one of `image/png`, `image/jpeg`, `image/webp`, `image/gif` |
 | body size | 1 ≤ bytes ≤ **16,384** |
 | magic bytes | the concatenated body MUST start with the declared type's signature: PNG `89 50 4E 47`, JPEG `FF D8 FF`, WebP `RIFF ???? WEBP` (bytes 0–3 and 8–11), GIF `GIF8` (`GIF87a`/`GIF89a`). A mismatch is `applied:false` like any other limit violation. |
-| reference client target | 256×256, WebP, ≤ 10,240 bytes (client-side compression) |
+| reference client target (not consensus) | up to 128×128, WebP, target ≤ 4,096 bytes; reduce to 96 or 64 px if needed (client-side compression) |
 
 ### 8.3 Validity and effect
 
@@ -664,8 +664,11 @@ single transaction. With an image, step 4 below is the DEPLOY itself
 (§2.1 layout and 5,460-sat fee). Portfolio provides later image replacement
 using AVATAR (§8.1 layout and 546-sat fee).
 
-1. Pick an image → canvas resize to 256×256 → encode WebP, lowering
-   quality until ≤ 10,240 bytes (reject if it cannot get under 16,384).
+1. Pick an image → canvas resize to at most 128×128 without upscaling →
+   encode WebP, lowering quality and then reducing to 96 or 64 px to target
+   ≤ 4,096 bytes. PNG is the fallback when WebP encoding is unavailable.
+   If the target cannot be met, use the smallest result within 16,384 bytes;
+   reject if no result fits. These are client preferences, not consensus rules.
 2. Generate an ephemeral secp256k1 key in the browser; encrypt the recovery
    record with a wallet-signature-derived AES-GCM key before paying.
    Real wallets without repeatable message signatures cannot start.

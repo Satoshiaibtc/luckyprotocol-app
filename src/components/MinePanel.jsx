@@ -10,7 +10,6 @@ import TipReadout from "./TipReadout.jsx";
 import EVReadout from "./EVReadout.jsx";
 import HashReveal from "./HashReveal.jsx";
 import FeeSelector from "./FeeSelector.jsx";
-import UtxoSafetyNotice from "./UtxoSafetyNotice.jsx";
 import Led from "./hud/Led.jsx";
 import RingGauge from "./hud/RingGauge.jsx";
 
@@ -118,7 +117,6 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
 
       {!connected && <ConnectPrompt action="mine" />}
       {connected && wallet.error && <div className="notice">{wallet.error}</div>}
-      <UtxoSafetyNotice />
       {exhausted && <div className="notice">{ticker} supply is fully minted. New mines credit 0.</div>}
       {preActivation && (
         <div className="notice">

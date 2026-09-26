@@ -164,10 +164,10 @@ const BODY = new Uint8Array(1_200).map((_, i) => (i * 7 + 3) & 0xff);
   const leaf = buildEnvelopeScript(XONLY, "image/webp", BODY);
   const v0 = revealInput0Vsize(leaf.length);
   assert.equal(v0, 41 + (1 + 65 + 3 + leaf.length + 34) / 4, "input0 vB = base 41 + witness/4");
-  assert.equal(commitAmountFor({ leafScriptLen: leaf.length, feeRateSatVb: 8 }), 546 + Math.ceil(v0 * 8), "commit = 546 + input0 share");
+  assert.equal(commitAmountFor({ leafScriptLen: leaf.length, feeRateSatVb: 8 }), 546 + Math.ceil(Math.ceil(v0) * 8), "commit = 546 + input0 share");
   const est = estimateRevealFee({ envelopeBytes: BODY.length, feeRateSatVb: 8, deployerAddress: MOCK_WALLET.address });
   assert.equal(est.leafScriptLen, leaf.length);
-  assert.equal(est.input0FeeSats, Math.ceil(v0 * 8));
+  assert.equal(est.input0FeeSats, Math.ceil(Math.ceil(v0) * 8));
   assert.equal(est.totalFeeSats, est.input0FeeSats + est.remainderFeeSats);
   assert.ok(est.remainderVsize > 150 && est.remainderVsize < 260, `remainder ≈ a MINE: ${est.remainderVsize}`);
   assert.throws(() => commitAmountFor({ leafScriptLen: 100, feeRateSatVb: 5_000 }), /safety cap/);
@@ -334,7 +334,7 @@ let commitTx;
   const commit = { txid: commitTx.txid, vout: 0, sats: commitAmount };
   const r = buildSweepPsbt({ commit, ephemeralPriv: PRIV, leafScript: leaf, toAddress: MOCK_WALLET.address, feeRateSatVb: 2 });
   assert.equal(r.commitAddress, commitAddr);
-  assert.equal(r.feeSats, Math.ceil(sweepVsize(MOCK_WALLET.address) * 2));
+  assert.equal(r.feeSats, Math.ceil(Math.ceil(sweepVsize(MOCK_WALLET.address)) * 2));
   assert.equal(r.outSats, commitAmount - r.feeSats);
   const { ins, outs } = parsePsbt(r.psbtHex);
   assert.equal(ins.length, 1);
@@ -411,6 +411,8 @@ const rec = {
   delete noPrior.priorCommits;
   assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(noPrior)).priorCommits, []);
   assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(rec)), rec, "round-trip");
+  assert.equal(parseAvatarRecord(serializeAvatarRecord({ ...rec, feeRateSatVb: 1.25 })).feeRateSatVb, 1.25, "recovery retains fractional rate");
+  for (const bad of [Infinity, NaN, 0, -1, 1000.01]) assert.equal(parseAvatarRecord({ ...rec, feeRateSatVb: bad }).feeRateSatVb, null);
   const withCommit = { ...rec, commitTxid: commitTx.txid, commitVout: 0, commitSats: commitAmount, commitChange: { vout: 1, sats: 1234 }, commitInputs: [{ txid: T(2), vout: 1 }], commitAttemptedAt: 1_700_000_001_000, revealTxid: T(5), revealBroadcastAt: 1_700_000_002_000 };
   assert.deepEqual(parseAvatarRecord(serializeAvatarRecord(withCommit)), withCommit, "round-trip with commit + reveal + timestamps");
   assert.equal(parseAvatarRecord("not json"), null);
@@ -434,7 +436,7 @@ const rec = {
 {
   // test: record bounds — commitAmount upper bound from the stored leaf at the fee cap
   const ceiling = maxCommitAmountFor(leaf.length);
-  assert.equal(ceiling, 546 + Math.ceil(revealInput0Vsize(leaf.length) * MAX_FEE_RATE_SAT_VB) + COMMIT_AMOUNT_MARGIN_SATS, "ceiling = 546 + input0 at the 1000 sat/vB cap + margin");
+  assert.equal(ceiling, 546 + Math.ceil(Math.ceil(revealInput0Vsize(leaf.length)) * MAX_FEE_RATE_SAT_VB) + COMMIT_AMOUNT_MARGIN_SATS, "ceiling = 546 + input0 at the 1000 sat/vB cap + margin");
   assert.equal(commitAmountFor({ leafScriptLen: leaf.length, feeRateSatVb: MAX_FEE_RATE_SAT_VB }) <= ceiling, true, "a commit written at the cap itself is within bounds");
   assert.ok(parseAvatarRecord({ ...rec, commitAmount: ceiling }), "commitAmount == ceiling parses");
   assert.equal(parseAvatarRecord({ ...rec, commitAmount: ceiling + 1 }), null, "commitAmount above the ceiling → corrupt");

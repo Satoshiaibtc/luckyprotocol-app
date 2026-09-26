@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
@@ -6,40 +6,18 @@ import { useRecentBlocks } from "../hooks/useRecentBlocks.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import { BUCKETS, DIGIT_SPACE, mineYield, yieldDigit, bucketOfHash } from "../lib/yield.js";
 import { blockUrl, fmtInt } from "../lib/format.js";
+import { blockFullness, visibleBlockCount } from "../lib/blocks.js";
 import Panel from "./hud/Panel.jsx";
 import { ledFromPoll } from "./hud/Led.jsx";
 import RingGauge from "./hud/RingGauge.jsx";
 import DigitChip from "./DigitChip.jsx";
 
-const MOBILE_COUNT = 16;
-// Desktop: as many tiles as the row can hold (one slot reserved for NEXT),
-// so the tape runs edge to edge instead of stopping short at 16.
-const TILE_W = 56;
-const GAP = 6;
-const MIN_COUNT = 8;
-const MAX_COUNT = 32; // /blocks/recent cap
-function fitCount(width) {
-  if (!width) return MOBILE_COUNT;
-  const perRow = Math.floor((width + GAP) / (TILE_W + GAP));
-  return Math.max(MIN_COUNT, Math.min(MAX_COUNT, perRow - 1));
-}
-// True when the row is wide enough that the tiles fill it without scrolling
-// (tiles stretch via flex); the 1px sub-pixel remainder must not grow a bar.
-function rowFits(width) {
-  return !!width && Math.floor((width + GAP) / (TILE_W + GAP)) - 1 >= MIN_COUNT;
-}
+const MOBILE_COUNT = 3;
 const fmtModel = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
 
 /**
- * The last 16 blocks as a scrolling tape, oldest → newest, each tile
- * showing the height, the last hex digit and what a mine confirmed in that
- * block yielded. A sticky NEXT tile on the right stands for the block that
- * will decide pending mines.
- *
- * Phone (≤ 720px): the same 16 tiles as a 2 × 8 bead plate that fills the
- * width (row 1 = older eight, row 2 = newer eight, same oldest → newest
- * order), each tile showing the digit and the yield only; the NEXT tile
- * becomes a caption under the plate and the tally moves under it too.
+ * A bounded row, oldest to newest. Fill height is actual block weight
+ * divided by the consensus capacity; pending blocks have no projected fill.
  */
 export default function BlockTape() {
   const { health } = useApp();
@@ -48,33 +26,28 @@ export default function BlockTape() {
   const healthDown = !!health.error && !health.data;
   // Health unavailable → fall back to the heights the mine feed knows about.
   const feed = usePoll(healthDown ? (s) => indexer.minesFeed({ limit: 40 }, s) : null, 30_000, [healthDown]);
-  const trackRef = useRef(null);
-  const [fit, setFit] = useState(MOBILE_COUNT);
-  const [fits, setFits] = useState(false);
-  useLayoutEffect(() => {
-    if (mobile) return undefined;
-    const el = trackRef.current;
-    if (!el) return undefined;
-    const update = () => {
-      setFit(fitCount(el.clientWidth));
-      setFits(rowFits(el.clientWidth));
-    };
+  // Desktop tile count. Seeded from the viewport so the first paint is not
+  // the 3-tile phone count; measured precisely by the callback ref below,
+  // which runs whenever the desktop <ol> (re)mounts — including after the
+  // error branch unmounted it — and disconnects on unmount, so the observer
+  // never watches a detached element.
+  const observer = useRef(null);
+  const [fit, setFit] = useState(() => (typeof window === "undefined" ? MOBILE_COUNT : visibleBlockCount(window.innerWidth)));
+  const trackRef = useCallback((el) => {
+    if (observer.current) {
+      observer.current.disconnect();
+      observer.current = null;
+    }
+    if (!el) return;
+    const update = () => setFit(visibleBlockCount(el.clientWidth));
     update();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [mobile]);
+    if (typeof ResizeObserver === "undefined") return;
+    observer.current = new ResizeObserver(update);
+    observer.current.observe(el);
+  }, []);
   const COUNT = mobile ? MOBILE_COUNT : fit;
 
   const { tiles, tally, loaded } = useRecentBlocks({ ceiling, count: COUNT, fallbackRows: healthDown ? feed.data?.items || null : null });
-
-  const scrolledRef = useRef(false);
-  useLayoutEffect(() => {
-    if (mobile || !loaded || scrolledRef.current || !trackRef.current) return;
-    scrolledRef.current = true;
-    trackRef.current.scrollLeft = trackRef.current.scrollWidth;
-  }, [loaded, mobile]);
 
   const led = healthDown ? ledFromPoll(feed) : loaded ? "ok" : ledFromPoll(health);
   const title = healthDown ? "Recent mined blocks" : `Block tape · last ${COUNT} blocks`;
@@ -118,7 +91,7 @@ export default function BlockTape() {
           </div>
         </>
       ) : (
-        <ol className={`tape${fits ? " fits" : ""}`} ref={trackRef} aria-label={`Last ${COUNT} blocks, oldest to newest`} aria-busy={!loaded}>
+        <ol className="tape" ref={trackRef} aria-label={`Last ${COUNT} blocks, oldest to newest`} aria-busy={!loaded}>
           {rows.map((t) => (
             <li key={t.height}>
               <Tile t={t} />
@@ -126,23 +99,20 @@ export default function BlockTape() {
           ))}
           <li className="tile-next" aria-label="Next block, awaiting">
             <Height h={nextHeight} />
-            <RingGauge size={36} sweeping />
+            <RingGauge size={28} sweeping />
             <span className="label">awaiting</span>
           </li>
         </ol>
       )}
-      <p className="help">What a mine confirmed in each block would have yielded. The next block decides pending mines.</p>
     </Panel>
   );
 }
 
-/** `#969,795` on wide tiles; the last three digits (`…795`) on narrow ones. */
 function Height({ h }) {
   if (h === null || h === undefined) return <span className="h">—</span>;
   return (
     <span className="h" title={`#${fmtInt(h)}`}>
-      <span className="h-full">#{fmtInt(h)}</span>
-      <span className="h-short">…{String(h).slice(-3)}</span>
+      #{fmtInt(h)}
     </span>
   );
 }
@@ -168,7 +138,10 @@ function Tile({ t }) {
   }
   const d = yieldDigit(t.hash);
   const b = bucketOfHash(t.hash);
-  const title = `Block #${fmtInt(t.height)} · last digit ${d} → ${mineYield(t.hash)} per mine`;
+  const fullness = blockFullness(t.weight);
+  const fillLabel = fullness === null ? "Capacity unavailable" : `${fullness.toFixed(1)}% full`;
+  const txLabel = t.tx_count === null || t.tx_count === undefined ? "Transactions unavailable" : `${fmtInt(t.tx_count)} txs`;
+  const title = `Block #${fmtInt(t.height)} · ${fillLabel} · ${txLabel} · last digit ${d} → ${mineYield(t.hash)} per mine`;
   return (
     <a
       href={blockUrl(t.height)}
@@ -179,12 +152,16 @@ function Tile({ t }) {
       aria-label={title}
     >
       <span className="ch-in chamfer">
+        {fullness !== null && <span className="tile-fill" style={{ height: `${fullness}%` }} aria-hidden="true" />}
         <Height h={t.height} />
         <span className="mid">
-          <span className="tail">…{t.hash.slice(-4, -1)}</span>
           <DigitChip digit={d} bare title={title} />
+          <span className="y">{mineYield(t.hash)} / mine</span>
         </span>
-        <span className="y">{mineYield(t.hash)}</span>
+        <span className="tile-stats">
+          <span className="tile-fullness">{fullness === null ? "N/A" : `${fullness.toFixed(1)}%`}</span>
+          <span className="tile-txs">{t.tx_count === null || t.tx_count === undefined ? "N/A txs" : `${fmtInt(t.tx_count)} txs`}</span>
+        </span>
       </span>
     </a>
   );

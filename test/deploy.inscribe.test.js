@@ -29,14 +29,14 @@ const commitRawHex = extractRawTxHex(signedCommit);
 const commitTx = decodeRawTx(commitRawHex);
 const commitOut = { txid: commitTx.txid, vout: 0, sats: amount };
 let built, reveal;
-for (const type of ["tr", "wpkh"]) {
+for (const [type, feeRate] of [["tr", 4], ["wpkh", 4], ["tr", 1.25], ["wpkh", 1.1]]) {
   const walletPriv = new Uint8Array(32).fill(9);
   const publicKey = pubECDSA(walletPriv);
   const address = type === "tr" ? MOCK_WALLET.address : btc.p2wpkh(publicKey).address;
   const pubkeyHex = type === "tr" ? MOCK_WALLET.pubkeyHex : hex.encode(publicKey);
   built = buildDeployRevealPsbt({
     commit: commitOut, ephemeralPriv: priv, leafScript: leaf, deployerAddress: address,
-    deployerPubkeyHex: pubkeyHex, feeRateSatVb: 4, ticker: "IMAGE",
+    deployerPubkeyHex: pubkeyHex, feeRateSatVb: feeRate, ticker: "IMAGE",
     utxos: [{ txid: "dd".repeat(32), vout: 0, sats: 546 }, { txid: "ee".repeat(32), vout: 1, sats: 6000 }, { txid: commitTx.txid, vout: 1, sats: commitTx.outputs[1].sats }],
     tokenOutpoints: [{ txid: "ee".repeat(32), vout: 1 }],
   });
@@ -64,8 +64,10 @@ for (const type of ["tr", "wpkh"]) {
   assert.equal(tx.payload.ticker, "IMAGE");
   assert.deepEqual(reveal.envelope.bytes, body);
   assert.equal(amount + built.inputs.reduce((s, u) => s + u.sats, 0) - tx.outputs.reduce((s, o) => s + o.sats, 0), built.feeSats);
-  assert.ok(built.feeSats >= reveal.vsize * 4, `fee covers actual signed vsize (${type}: ${built.feeSats} / ${reveal.vsize})`);
-  if (type === "tr") {
+  assert.equal(built.feeRateSatVb, feeRate);
+  assert.ok(Number.isInteger(built.feeSats));
+  assert.ok(built.feeSats >= reveal.vsize * feeRate, `fee covers actual signed vsize (${type}: ${built.feeSats} / ${reveal.vsize})`);
+  if (type === "tr" && feeRate === 4) {
     simulateBroadcast(commitRawHex);
     assert.equal(simulateBroadcast(reveal.rawHex), reveal.txid);
     assert.equal(simulateBroadcast(commitRawHex), commitTx.txid, "exact retry does not pay twice");
@@ -84,6 +86,7 @@ for (const type of ["tr", "wpkh"]) {
 
 const record = { kind: "deploy", address: MOCK_WALLET.address, ticker: "IMAGE", ephemeralPrivHex: hex.encode(priv), leafScriptHex: hex.encode(leaf), contentType: "image/webp", bytesBase64: base64.encode(body), commitAddress: pay.address, commitAmount: amount, commitSats: amount, commitTxid: commitTx.txid, commitVout: 0, commitRawHex, commitInputs: commit.inputs, createdAt: Date.now() };
 assert.equal(parseAvatarRecord(record).kind, "deploy");
+assert.equal(parseAvatarRecord({ ...record, feeRateSatVb: 1.25 }).feeRateSatVb, 1.25);
 assert.equal(parseAvatarRecord({ ...record, commitTxid: "ff".repeat(32) }), null);
 assert.equal(parseAvatarRecord({ ...record, commitAddress: MOCK_WALLET.address }), null);
 assert.equal(parseAvatarRecord({ ...record, address: "not-an-address" }), null);

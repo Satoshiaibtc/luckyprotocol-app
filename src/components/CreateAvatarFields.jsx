@@ -3,7 +3,8 @@ import { fmtInt, shortTxid, txUrl } from "../lib/format.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { commitAmountFor, envelopeScriptLen, estimateRevealFee } from "../lib/inscribe.js";
 import { estimatePayFeeSats } from "../lib/psbt.js";
-import { PROJECT_FEE_ADDRESS } from "../lib/payloads.js";
+import { missingFeeHint } from "../lib/feechoice.js";
+import { PROJECT_FEE_ADDRESS, TICKER_RE } from "../lib/payloads.js";
 
 const LABELS = {
   compressing: "Preparing image...", securing: "Approve the recovery message in your wallet.",
@@ -15,14 +16,16 @@ const LABELS = {
   "name-taken": "Another creation claimed this ticker first. Your transaction confirmed, but did not register the token; transaction fees were still paid.",
 };
 
-export default function CreateAvatarFields({ creation, ticker, address, feeRate, disabled }) {
-  const { flow, busy, hasSaved, pickFile, unlock, resume, reclaim, retryBroadcast, discard } = creation;
+export default function CreateAvatarFields({ creation, ticker, address, feeRate, feeChoice = null, disabled }) {
+  const { flow, busy, fileError, hasSaved, pickFile, clearImage, unlock, resume, reclaim, retryBroadcast, discard } = creation;
   const [confirmReclaim, setConfirmReclaim] = useState(false);
   const inputId = useId();
   const rec = flow.record;
   const preview = flow.preview;
+  // Resume builds + signs at feeRate (a relay-only retry does not).
+  const canResume = !!rec && !["pending", "reclaim-pending"].includes(flow.phase);
   let estimate = null;
-  if (preview && feeRate) {
+  if (preview && feeRate && TICKER_RE.test(ticker)) {
     const leafScriptLen = envelopeScriptLen(preview.contentType, preview.sizeBytes);
     const from = address || PROJECT_FEE_ADDRESS;
     const reveal = estimateRevealFee({ leafScriptLen, feeRateSatVb: feeRate, deployerAddress: from, ticker });
@@ -40,11 +43,13 @@ export default function CreateAvatarFields({ creation, ticker, address, feeRate,
           <input id={inputId} className="sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif" aria-label="Choose token avatar" disabled={disabled || busy || hasSaved} onChange={(e) => { const file = e.target.files?.[0]; e.target.value = ""; if (file) pickFile(file); }} />
         </div>
       </div>
+      {fileError && !hasSaved && <div role="alert"><p className="err">{fileError}</p><button type="button" className="btn btn-ghost btn-sm" onClick={clearImage}>Remove image</button></div>}
       {preview && (
         <div className="create-avatar-preview">
           <img src={preview.dataUrl} alt={`${ticker} avatar preview`} width="96" height="96" />
           <div>
-            <span className="mono">{fmtInt(preview.sizeBytes)} bytes</span>
+            {preview.width && preview.height ? <div className="mono">{preview.width} x {preview.height} px</div> : null}
+            <div className="mono">{fmtInt(preview.sizeBytes)} bytes</div>
             {estimate && <p className="fineprint">Avatar prepayment: {fmtInt(estimate.payment)} sats.<br />Estimated network fees for both transactions: {fmtInt(estimate.network)} sats.</p>}
             {!hasSaved && !busy && <button type="button" className="btn btn-ghost btn-sm" onClick={discard}>Remove image</button>}
           </div>
@@ -65,7 +70,8 @@ export default function CreateAvatarFields({ creation, ticker, address, feeRate,
       </p>}
       <div className="actions create-avatar-actions">
         {hasSaved && !rec && flow.phase !== "invalid-record" && <button type="button" className="btn btn-sm" onClick={unlock} disabled={busy || !address}>Unlock recovery</button>}
-        {rec && !["pending", "reclaim-pending"].includes(flow.phase) && <button type="button" className="btn btn-primary btn-sm" onClick={resume} disabled={busy || !address}>Resume creation</button>}
+        {canResume && <button type="button" className="btn btn-primary btn-sm" onClick={resume} disabled={busy || !address || !feeRate}>Resume creation</button>}
+        {canResume && !feeRate && <span className="fineprint">{missingFeeHint(feeChoice, feeRate, "resume")}</span>}
         {rec?.revealTxid && flow.phase === "pending" && flow.unseen && <button type="button" className="btn btn-sm" onClick={retryBroadcast} disabled={busy || !address}>Retry saved transaction</button>}
         {rec?.commitTxid && !rec.reclaimTxid && <button type="button" className="btn btn-sm" onClick={() => setConfirmReclaim(true)} disabled={busy || !feeRate || !address}>Reclaim avatar payment</button>}
         {confirmReclaim && rec && <>

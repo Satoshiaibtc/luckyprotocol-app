@@ -5,7 +5,7 @@ import { presetUnavailableText } from "../lib/feechoice.js";
 /**
  * Compact segmented fee-rate control (fits 375 px): Fast / Normal / Slow /
  * Economy from the indexer's /fees, each with its sat/vB and ETA, plus a
- * Custom integer input (1–1000, clamped; inline error shown above it).
+ * Custom decimal input (1–1000, up to 2 decimal places).
  * `fee` is the object from useFeeRate.
  */
 export default function FeeSelector({ fee, disabled = false }) {
@@ -60,8 +60,8 @@ export default function FeeSelector({ fee, disabled = false }) {
               id={inputId}
               className={`input mono${fee.customError ? " invalid" : ""}`}
               type="text"
-              inputMode="numeric"
-              pattern="[0-9]*"
+              inputMode="decimal"
+              pattern="[0-9]+([.][0-9]{0,2})?"
               placeholder="sat/vB"
               value={fee.customText}
               onChange={(e) => fee.setCustomText(e.target.value)}

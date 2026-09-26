@@ -4,6 +4,7 @@ import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { buildPayPsbt, expectPsbtPayload, minFeeInputSats, outpointKey } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
+import { isUsableFeeRate } from "../lib/feechoice.js";
 import {
   adoptExistingCommit,
   buildEnvelopeScript,
@@ -187,7 +188,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
   }, [isDeployer, ticker, ensureRecordKey]);
 
   const needFeeRate = useCallback(() => {
-    if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) throw new Error(NO_FEE_RATE);
+    if (!isUsableFeeRate(feeRateSatVb)) throw new Error(NO_FEE_RATE);
   }, [feeRateSatVb]);
 
   // An error thrown while broadcasting is the node's / relay's own words,
@@ -460,7 +461,7 @@ export function useAvatar({ wallet: walletState, ticker, tokenInfo, feeRateSatVb
   /** From a compressed preview: new ephemeral key → record → commit → reveal. */
   const start = useCallback(async () => {
     if (!isDeployer || !av.preview || runningRef.current) return;
-    if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) {
+    if (!isUsableFeeRate(feeRateSatVb)) {
       fail(new Error(NO_FEE_RATE));
       return;
     }

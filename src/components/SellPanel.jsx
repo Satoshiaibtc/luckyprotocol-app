@@ -8,6 +8,7 @@ import { useTxStatus } from "../hooks/useTxStatus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { buildListingPsbt, LISTING_SIGHASH, MIN_PRICE_SATS } from "../lib/swap.js";
 import { buildSendPsbt, expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
+import { isUsableFeeRate } from "../lib/feechoice.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { DUST_SATS } from "../lib/payloads.js";
 import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, shortTxid } from "../lib/format.js";
@@ -389,12 +390,14 @@ export default function SellPanel({ ticker, token, onSettled }) {
 }
 
 function requireRate(v) {
-  if (!Number.isInteger(v) || v < 1) throw new Error("No fee estimate from the indexer — try again later.");
+  // Fractional rates are fine; the predicate also rejects anything above the safety cap.
+  if (!isUsableFeeRate(v)) throw new Error("No fee estimate from the indexer — try again later.");
   return v;
 }
 
+// Formats any finite value — whole numbers and fractions alike (2 decimals
+// at ≥ 1, 4 below; Number() drops trailing zeros so 5 stays "5").
 function fmtUnitInput(v) {
   if (!Number.isFinite(v)) return "";
-  if (Number.isInteger(v)) return String(v);
   return String(Number(v.toFixed(v >= 1 ? 2 : 4)));
 }

@@ -2,7 +2,7 @@ import { useId, useMemo, useState } from "react";
 import { useApp } from "../context.js";
 import { useAvatar, AVATAR_RECORD_PHASES } from "../hooks/useAvatar.js";
 import { estimatePayFeeSats } from "../lib/psbt.js";
-import { estimateRevealFee, revealInput0Vsize, envelopeScriptLen, MAX_AVATAR_BYTES, TARGET_AVATAR_BYTES } from "../lib/inscribe.js";
+import { estimateRevealFee, revealInput0Vsize, envelopeScriptLen, MAX_AVATAR_BYTES, TARGET_AVATAR_BYTES, AVATAR_SIDE_PX } from "../lib/inscribe.js";
 import { missingFeeHint } from "../lib/feechoice.js";
 import { AVATAR_PROTOCOL_FEE_SATS, DUST_SATS } from "../lib/payloads.js";
 import { fmtInt, fmtTime, txUrl, shortTxid, shortAddr } from "../lib/format.js";
@@ -151,7 +151,7 @@ function DiscardControl({ label = "Discard", confirmLabel, warning, onDiscard })
 
 /**
  * Deployer-only console for the on-chain token avatar (spec §8): file
- * picker → 256 px preview + byte size → fee breakdown (commit + reveal +
+ * picker → 128 px preview + byte size → fee breakdown (commit + reveal +
  * protocol fee) → permanent-on-chain warning → two-step progress
  * (Commit → Reveal → Confirm) with the recovery record's Resume / Pay
  * commit again / Rebuild reveal / Discard. Renders nothing unless the
@@ -236,14 +236,14 @@ export default function AvatarPanel({ ticker, tokenInfo, onSettled }) {
           {preview ? "Choose another image" : "Choose image"}
         </label>
         <input id={inputId} className="sr-only" type="file" accept={ACCEPT} onChange={onFile} disabled={!canPick} />
-        <span className="fineprint">PNG, JPEG, WebP or GIF. Resized to 256×256 and compressed to ≤ {fmtInt(TARGET_AVATAR_BYTES)} bytes before anything is signed.</span>
+        <span className="fineprint">PNG, JPEG, WebP or GIF. Up to {AVATAR_SIDE_PX}×{AVATAR_SIDE_PX} px; compression target: {fmtInt(TARGET_AVATAR_BYTES)} bytes.</span>
       </div>
       {av.fileError && <div className="err">{av.fileError}</div>}
 
       {preview && (
         <div className="avatar-preview">
           <span className="frame">
-            <img src={preview.dataUrl} alt={`${ticker} avatar preview`} width={256} height={256} />
+            <img src={preview.dataUrl} alt={`${ticker} avatar preview`} width={128} height={128} />
           </span>
           <dl className="facts-mini">
             <div>

@@ -4,7 +4,7 @@
 //
 // The flow (§8.5), and the ONLY key this app ever holds:
 //
-//   1. compressAvatar(file)            → ≤ 10,240-byte WebP (PNG fallback), 256×256
+//   1. compressAvatar(file)            → target ≤ 4,096-byte WebP (PNG fallback), up to 128×128
 //   2. generateEphemeralKey()          → 32 random bytes, kept in localStorage
 //                                        ('lp.avatar.<TICKER>', AES-GCM-encrypted — see
 //                                        RECORD ENCRYPTION) until the reveal confirms
@@ -117,8 +117,8 @@ import {
 
 export const AVATAR_CONTENT_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 export const MAX_AVATAR_BYTES = 16_384;    // consensus for this protocol
-export const TARGET_AVATAR_BYTES = 10_240; // reference-client target
-export const AVATAR_SIDE_PX = 256;
+export const TARGET_AVATAR_BYTES = 4_096;  // reference-client target, not consensus
+export const AVATAR_SIDE_PX = 128;
 export const MAX_CHUNK_BYTES = 520;        // MAX_SCRIPT_ELEMENT_SIZE
 export const REVEAL_SIGNING_ORDER = "wallet-first";
 
@@ -381,8 +381,9 @@ export function estimateRevealFee({ envelopeBytes, contentType = "image/webp", l
   const input0Vsize = revealInput0Vsize(leafLen);
   let remainder = VSIZE_TX_OVERHEAD + walletInputCount * inputVsize(type) + outputVsize(outAddr) + outputVsize(PROJECT_FEE_ADDRESS) + 9 + payloadLen;
   if (withChange) remainder += outputVsize(outAddr);
-  const input0FeeSats = Math.ceil(input0Vsize * rate);
-  const remainderFeeSats = Math.ceil(remainder * rate);
+  // A node charges by ceil(vsize); ceil the size first so the rate never rounds down (same as buildImageRevealPsbt).
+  const input0FeeSats = Math.ceil(Math.ceil(input0Vsize) * rate);
+  const remainderFeeSats = Math.ceil(Math.ceil(remainder) * rate);
   return {
     leafScriptLen: leafLen,
     input0Vsize,
@@ -398,7 +399,7 @@ export function estimateRevealFee({ envelopeBytes, contentType = "image/webp", l
 /** Sats the wallet sends to the commit address: 546 (inscribed sat) + the reveal's input0 cost. */
 export function commitAmountFor({ leafScriptLen, feeRateSatVb }) {
   const rate = checkedFeeRate(feeRateSatVb);
-  return DUST_SATS + Math.ceil(revealInput0Vsize(leafScriptLen) * rate);
+  return DUST_SATS + Math.ceil(Math.ceil(revealInput0Vsize(leafScriptLen)) * rate);
 }
 
 /** Slack on top of the fee-cap bound below, so a record written at exactly the cap still parses. */
@@ -410,7 +411,7 @@ export const COMMIT_AMOUNT_MARGIN_SATS = 1_000;
  * plus a small margin. Anything above it cannot have come from this app.
  */
 export function maxCommitAmountFor(leafScriptLen) {
-  return DUST_SATS + Math.ceil(revealInput0Vsize(leafScriptLen) * MAX_FEE_RATE_SAT_VB) + COMMIT_AMOUNT_MARGIN_SATS;
+  return DUST_SATS + Math.ceil(Math.ceil(revealInput0Vsize(leafScriptLen)) * MAX_FEE_RATE_SAT_VB) + COMMIT_AMOUNT_MARGIN_SATS;
 }
 
 // ---- reveal PSBT ----------------------------------------------------------------------------------
@@ -489,7 +490,7 @@ function buildImageRevealPsbt({ commit, ephemeralPriv, leafScript, deployerAddre
       const need = fixedOutValue + fee + (withChange ? DUST_SATS : 0) - commitSats;
       // target ≥ 1 sat so selectInputs always picks at least one deployer UTXO (authorization)
       ({ selected, total } = selectInputs({ utxos: spendable, target: Math.max(1, need), excludeKeys: [] }));
-      const newFee = Math.ceil(vsizeFor(selected.length, withChange)) * satVb;
+      const newFee = Math.ceil(Math.ceil(vsizeFor(selected.length, withChange)) * satVb);
       if (newFee === fee) break;
       fee = newFee;
     }
@@ -662,7 +663,7 @@ export function parseAvatarRecord(raw) {
     commitAttemptedAt: posIntOrNull(r.commitAttemptedAt, 1e13),
     revealTxid: txidOrNull(r.revealTxid),
     revealBroadcastAt: posIntOrNull(r.revealBroadcastAt, 1e13),
-    feeRateSatVb: Number.isInteger(r.feeRateSatVb) ? r.feeRateSatVb : null,
+    feeRateSatVb: Number.isFinite(r.feeRateSatVb) && r.feeRateSatVb >= 1 && r.feeRateSatVb <= MAX_FEE_RATE_SAT_VB ? r.feeRateSatVb : null,
     createdAt: Number.isInteger(r.createdAt) ? r.createdAt : Date.now(),
     // Commit outputs paid earlier for this record that were never proven
     // spent (a "Pay commit again" after an unverifiable rejection). They are
@@ -961,7 +962,7 @@ export function buildSweepPsbt({ commit, ephemeralPriv, leafScript, toAddress, f
   const rate = checkedFeeRate(feeRateSatVb);
   const sats = Number(commit.sats);
   const vsize = sweepVsize(toAddress);
-  const feeSats = Math.ceil(vsize * rate);
+  const feeSats = Math.ceil(Math.ceil(vsize) * rate);
   const outSats = sats - feeSats;
   if (outSats < DUST_SATS) {
     throw new Error(
@@ -1164,9 +1165,9 @@ async function blobBytes(blob) {
 }
 
 /**
- * Decode → cover-crop to a square → 256×256 → WebP, lowering quality from
- * 0.85 in 0.1 steps until ≤ 10,240 bytes. Browsers that cannot encode WebP
- * (toBlob answers with a PNG) fall back to PNG, also at 192 and 128 px.
+ * Decode → cover-crop to a square → at most 128×128 → WebP, targeting
+ * ≤ 4,096 bytes. Try lower quality, then 96 and 64 px without upscaling.
+ * Browsers that cannot encode WebP fall back to PNG at the same sizes.
  * Anything that cannot get ≤ 16,384 bytes is refused. SVG and non-images
  * are rejected up front.
  *
@@ -1189,24 +1190,27 @@ export async function compressAvatar(file) {
       return out.bytes.length <= TARGET_AVATAR_BYTES;
     };
 
-    // WebP at 256 px, quality 0.85 → 0.15.
-    const canvas256 = drawCoverSquare(source, AVATAR_SIDE_PX);
+    const sourceSide = Math.min(source.naturalWidth || source.width, source.naturalHeight || source.height);
+    const sides = [...new Set([AVATAR_SIDE_PX, 96, 64].map((side) => Math.min(side, sourceSide)))];
     let webpSupported = true;
-    for (let q = 0.85; q >= 0.15; q -= 0.1) {
-      const quality = Number(q.toFixed(2));
-      const blob = await encodeCanvas(canvas256, "image/webp", quality);
-      if (!blob || blob.type !== "image/webp") {
-        webpSupported = false;
-        break;
+    for (const side of sides) {
+      const canvas = drawCoverSquare(source, side);
+      for (const quality of [0.85, 0.7, 0.55]) {
+        const blob = await encodeCanvas(canvas, "image/webp", quality);
+        if (!blob || blob.type !== "image/webp") {
+          webpSupported = false;
+          break;
+        }
+        const out = { bytes: await blobBytes(blob), contentType: "image/webp", width: side, height: side, quality };
+        if (consider(out)) return out;
       }
-      const out = { bytes: await blobBytes(blob), contentType: "image/webp", width: AVATAR_SIDE_PX, height: AVATAR_SIDE_PX, quality };
-      if (consider(out)) return out;
+      if (!webpSupported) break;
     }
 
-    // No WebP encoder (or none of the WebP attempts fit at all): PNG at 256 / 192 / 128 px.
+    // No usable WebP encoding: try lossless PNG, still respecting the pixel cap.
     if (!webpSupported || !fallback) {
-      for (const side of [AVATAR_SIDE_PX, 192, 128]) {
-        const canvas = side === AVATAR_SIDE_PX ? canvas256 : drawCoverSquare(source, side);
+      for (const side of sides) {
+        const canvas = drawCoverSquare(source, side);
         const blob = await encodeCanvas(canvas, "image/png");
         if (!blob || blob.type !== "image/png") continue;
         const out = { bytes: await blobBytes(blob), contentType: "image/png", width: side, height: side, quality: null };

@@ -1,12 +1,10 @@
 import { useState } from "react";
 import { useApp } from "../context.js";
-import { blockUrl, fmtBtc, fmtInt, shortAddr } from "../lib/format.js";
+import { fmtBtc, fmtInt, shortAddr } from "../lib/format.js";
 import { chipLabel } from "../lib/walletShapes.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
-import { bucketOfHash, yieldDigit } from "../lib/yield.js";
 import Led from "./hud/Led.jsx";
-import DigitChip from "./DigitChip.jsx";
 
 const NAV = [
   { name: "board", href: "#/", label: "Board" },
@@ -15,7 +13,7 @@ const NAV = [
 ];
 
 /**
- * Desktop: wordmark · search · nav · [mock] SYS pill · tip chip · wallet.
+ * Desktop: wordmark · search · nav · [mock] SYS pill · wallet.
  * Phone (≤ 720px): ONE 56px row — wordmark · compact SYS chip · wallet; the
  * search and nav move to the board filter and the bottom tab bar. The
  * wallet control is the same on both: one "Connect Wallet" button (→ the
@@ -23,7 +21,7 @@ const NAV = [
  * same dialog with Switch wallet / Disconnect).
  */
 export default function TopBar() {
-  const { wallet, health, mock, openWalletModal, route, navigate, tokens, tipBlock } = useApp();
+  const { wallet, health, mock, openWalletModal, route, navigate, tokens } = useApp();
   const mobile = useIsMobile();
   const [q, setQ] = useState("");
 
@@ -63,8 +61,6 @@ export default function TopBar() {
   };
 
   const tickers = tokens.data?.items?.map((t) => t.ticker) || [];
-  const tipHash = tipBlock?.data?.hash || null;
-  const tipBucket = tipHash ? bucketOfHash(tipHash) : null;
 
   return (
     <header className="topbar">
@@ -120,17 +116,6 @@ export default function TopBar() {
             <Led state={led} />
             {mobile ? compactText : pillText}
           </span>
-          {!mobile && tipHash && tipBucket && (
-            <a
-              className="tip-chip"
-              href={blockUrl(tipBlock.data.height)}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={`Latest block #${fmtInt(tipBlock.data.height)} · last digit ${yieldDigit(tipHash)} → ${tipBucket.yield} per mine`}
-            >
-              <DigitChip digit={yieldDigit(tipHash)} size="sm" />
-            </a>
-          )}
           <WalletControl wallet={wallet} mobile={mobile} onOpen={openWalletModal} />
         </div>
       </div>

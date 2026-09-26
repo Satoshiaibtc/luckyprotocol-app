@@ -10,6 +10,7 @@ import TopBar from "./components/TopBar.jsx";
 import WalletModal from "./components/WalletModal.jsx";
 import TabBar from "./components/TabBar.jsx";
 import MineTicker from "./components/MineTicker.jsx";
+import UtxoSafetyNotice from "./components/UtxoSafetyNotice.jsx";
 import Footer from "./components/Footer.jsx";
 import Board from "./pages/Board.jsx";
 import TokenPage from "./pages/TokenPage.jsx";
@@ -31,10 +32,10 @@ export default function App() {
   // ---- app-wide indexer reads ----------------------------------------------------------
   const health = usePoll((s) => indexer.health(s), STATUS_POLL_MS, []);
   const tokens = usePoll((s) => indexer.tokens({ limit: 200 }, s), 30_000, []);
-  const fees = usePoll((s) => indexer.fees(s), 60_000, []);
-  // One fee choice (preset from /fees or custom sat/vB) for every builder.
-  const fee = useFeeRate(fees.data);
   const tipHeight = health.data?.tip_height ?? null;
+  const fees = usePoll((s) => indexer.fees(s), 30_000, [tipHeight]);
+  // One fee choice (preset from /fees or custom sat/vB) for every builder.
+  const fee = useFeeRate(fees.error ? null : fees.data);
   const tipBlock = usePoll(tipHeight ? (s) => indexer.blockInfo(tipHeight, s) : null, 0, [tipHeight]);
   const indexerOk = !health.error && !!health.data;
 
@@ -43,6 +44,7 @@ export default function App() {
   refreshAllRef.current = () => {
     health.refresh();
     tokens.refresh();
+    fees.refresh();
     w.refreshBalance();
   };
   const refreshAll = useCallback(() => refreshAllRef.current?.(), []);
@@ -97,6 +99,7 @@ export default function App() {
       <div className={`app${mobile ? " app-mobile" : ""}`}>
         <TopBar />
         <MineTicker />
+        <UtxoSafetyNotice />
         {page}
         <Footer />
         {mobile && <TabBar />}

@@ -3,6 +3,7 @@ import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { buildMinePsbt, expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { mineYield } from "../lib/yield.js";
+import { isUsableFeeRate } from "../lib/feechoice.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { friendlyError } from "./useWallet.js";
 
@@ -37,7 +38,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
     const { address: addr, pubkeyHex } = walletState;
     setMine({ phase: "building", ticker });
     try {
-      if (!Number.isInteger(feeRateSatVb) || feeRateSatVb < 1) {
+      if (!isUsableFeeRate(feeRateSatVb)) {
         throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
       }
       const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr), indexer.tokenUtxos(addr)]);

@@ -30,12 +30,14 @@ import {
   FEE_CHOICE_KEY,
   FEE_PRESETS,
   clampCustomFee,
+  isUsableFeeRate,
   parseFeeChoice,
   presetRows,
   presetUnavailableReason,
   presetUnavailableText,
   resolveFeeRate,
   serializeFeeChoice,
+  missingFeeHint,
 } from "../src/lib/feechoice.js";
 import { MAX_FEE_RATE_SAT_VB } from "../src/lib/psbt.js";
 
@@ -235,6 +237,27 @@ assert.deepEqual(
 assert.deepEqual(presetRows(FEES).map((p) => [p.id, p.satVb]), [["fast", 12], ["normal", 8], ["slow", 5], ["economy", 3]]);
 assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.length > 0));
 
+// A saved preset follows each new quote; an explicit custom rate does not.
+{
+  const updated = { fastestFee: 7, halfHourFee: 4, hourFee: 2, economyFee: 1 };
+  assert.deepEqual(presetRows(updated).map((p) => p.satVb), [7, 4, 2, 1]);
+  const normal = parseFeeChoice("normal");
+  assert.equal(resolveFeeRate(normal, FEES), 8);
+  assert.equal(resolveFeeRate(normal, updated), 4);
+  assert.equal(resolveFeeRate(normal, null), null, "failed quote must not preserve a spendable estimate");
+  assert.equal(resolveFeeRate(parseFeeChoice("27"), updated), 27);
+  const fractional = { fastestFee: 3.75, halfHourFee: 2.5, hourFee: 1.25, economyFee: 1.01 };
+  assert.deepEqual(presetRows(fractional).map((p) => p.satVb), [3.75, 2.5, 1.25, 1.01]);
+  assert.equal(missingFeeHint({ kind: "custom", value: 1.25 }, 1.25), null);
+}
+
+// ---- fee choice: the one spend gate (fractional rates are usable; an integer check is not) ----------
+{
+  for (const ok of [1, 1.02, 1.25, 2.38, MAX_FEE_RATE_SAT_VB]) assert.equal(isUsableFeeRate(ok), true, `usable: ${ok}`);
+  for (const bad of [0, 0.99, NaN, Infinity, null, undefined, MAX_FEE_RATE_SAT_VB + 0.01]) assert.equal(isUsableFeeRate(bad), false, `not usable: ${bad}`);
+  assert.equal(isUsableFeeRate("2"), false, "a string is not a rate");
+}
+
 // ---- fee choice: custom clamping ---------------------------------------------------------------
 {
   assert.deepEqual(clampCustomFee("27"), { value: 27, error: null });
@@ -249,8 +272,14 @@ assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.lengt
   assert.match(zero.error, /Minimum/);
   assert.equal(clampCustomFee("-5").value, 1);
   const frac = clampCustomFee("12.7");
-  assert.equal(frac.value, 12, "fractions floor");
-  assert.match(frac.error, /Whole numbers/);
+  assert.deepEqual(frac, { value: 12.7, error: null }, "fractional rates are never floored");
+  assert.deepEqual(clampCustomFee("1.25"), { value: 1.25, error: null });
+  assert.deepEqual(clampCustomFee("1."), { value: 1, error: null }, "typing a decimal separator is allowed");
+  assert.deepEqual(clampCustomFee("1000.00"), { value: 1000, error: null });
+  assert.equal(clampCustomFee("1000.01").value, 1000);
+  assert.equal(clampCustomFee("1.234").value, null);
+  assert.match(clampCustomFee("1.234").error, /2 decimal/);
+  for (const bad of ["1.2.3", "1e3", "NaN", "Infinity", "."]) assert.equal(clampCustomFee(bad).value, null);
   const empty = clampCustomFee("");
   assert.equal(empty.value, null);
   assert.match(empty.error, /1–1,000/);
@@ -265,13 +294,16 @@ assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.lengt
   assert.deepEqual(parseFeeChoice("fast"), { kind: "preset", id: "fast" });
   assert.deepEqual(parseFeeChoice("economy"), { kind: "preset", id: "economy" });
   assert.deepEqual(parseFeeChoice("27"), { kind: "custom", value: 27 });
+  assert.deepEqual(parseFeeChoice("1.25"), { kind: "custom", value: 1.25 });
+  assert.deepEqual(parseFeeChoice(2.5), { kind: "custom", value: 2.5 });
+  assert.deepEqual(parseFeeChoice("1.234"), { kind: "preset", id: DEFAULT_PRESET });
   assert.deepEqual(parseFeeChoice("5000"), { kind: "custom", value: MAX_FEE_RATE_SAT_VB }, "a stale over-cap value is re-clamped on load");
   assert.deepEqual(parseFeeChoice("0"), { kind: "custom", value: 1 });
   assert.equal(serializeFeeChoice({ kind: "preset", id: "slow" }), "slow");
   assert.equal(serializeFeeChoice({ kind: "custom", value: 42 }), "42");
   assert.equal(serializeFeeChoice({ kind: "custom", value: null }), "normal", "an unusable custom falls back to the default");
   assert.equal(serializeFeeChoice({ kind: "preset", id: "bogus" }), "normal");
-  for (const c of [{ kind: "preset", id: "fast" }, { kind: "custom", value: 250 }]) {
+  for (const c of [{ kind: "preset", id: "fast" }, { kind: "custom", value: 250 }, { kind: "custom", value: 1.25 }]) {
     assert.deepEqual(parseFeeChoice(serializeFeeChoice(c)), c, "round-trip");
   }
 }

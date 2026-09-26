@@ -130,6 +130,13 @@ function forceYield(height, y) {
   const pick = parseInt(raw[40], 16);
   FORCED_DIGITS.set(height, b.digits[pick % b.digits.length]);
 }
+// Display fixtures only; production capacity always comes from Bitcoin Core.
+function blockCapacityAt(height) {
+  const weights = [3_999_200, 3_840_000, 2_120_000, 3_520_000, 1_040_000, 2_800_000, 3_996_000, 3_100_000];
+  const weight = weights[height % weights.length];
+  return { weight, tx_count: Math.floor(weight / 920) };
+}
+
 function blockTimeAt(height) {
   return LOAD_TS - (BASE_TIP - height) * 600 - 240;
 }
@@ -748,7 +755,7 @@ export async function mockGet(path) {
     const tip = tipHeight();
     const limit = Math.min(32, Math.max(1, Number(q.get("limit") || 16)));
     const blocks = [];
-    for (let h = tip; h > tip - limit && h >= 0; h--) blocks.push({ height: h, hash: blockHashAt(h) });
+    for (let h = tip; h > tip - limit && h >= 0; h--) blocks.push({ height: h, hash: blockHashAt(h), time: blockTimeAt(h), ...blockCapacityAt(h) });
     return { tip_height: tip, blocks };
   }
   if ((m = p.match(/^\/block-info\/(\d+)$/))) {
@@ -760,10 +767,12 @@ export async function mockGet(path) {
       const e = [...w.sim.values()].find((x) => x.height === height);
       if (e) time = Math.floor((e.at + CONFIRM_AFTER_MS) / 1000);
     }
-    return { height, hash: blockHashAt(height), time };
+    return { height, hash: blockHashAt(height), time, ...blockCapacityAt(height) };
   }
   if (p === "/fees") {
-    return { fastestFee: 12, halfHourFee: 8, hourFee: 5, economyFee: 3, minimumFee: 1 };
+    // Fractional like the real indexer (f64 rounded up to hundredths) so
+    // mock mode exercises decimal rates end to end.
+    return { fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1 };
   }
   if ((m = p.match(/^\/orders\/by-address\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);

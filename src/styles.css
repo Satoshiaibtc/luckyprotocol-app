@@ -576,14 +576,6 @@ input[type="search"]::-webkit-search-decoration {
   flex-wrap: wrap;
 }
 
-.tip-chip {
-  display: inline-flex;
-  align-items: center;
-}
-.tip-chip:hover {
-  text-decoration: none;
-}
-
 /* Phone header: ONE 56px row — wordmark · SYS chip · wallet (search + nav are
    not rendered; see TopBar.jsx / TabBar.jsx). */
 @media (max-width: 720px) {
@@ -634,9 +626,6 @@ input[type="search"]::-webkit-search-decoration {
   .wordmark {
     font-size: 11px;
     letter-spacing: 0.02em;
-  }
-  .tip-chip {
-    display: none;
   }
   /* "SIM · bc1p…62s" chip (still 44px tall) and the SYS pill tighten so the wordmark keeps its room */
   .topbar-right .wallet-addr {
@@ -1563,27 +1552,6 @@ input[type="search"]::-webkit-search-decoration {
   color: var(--muted);
   line-height: 1.5;
 }
-.contrib {
-  display: grid;
-  gap: 6px;
-}
-.contrib-bar {
-  display: flex;
-  height: 8px;
-  background: var(--surface-3);
-  overflow: hidden;
-}
-.contrib-bar span {
-  display: block;
-  height: 100%;
-  background: var(--t);
-}
-.contrib-derivation {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text);
-  overflow-wrap: anywhere;
-}
 .help {
   font-size: 12.5px;
   color: var(--muted);
@@ -1675,7 +1643,9 @@ input[type="search"]::-webkit-search-decoration {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--text);
-  white-space: nowrap;
+  white-space: normal;
+  line-height: 1.6;
+  letter-spacing: 0;
   font-variant-numeric: tabular-nums;
 }
 .tally .c {
@@ -1687,31 +1657,20 @@ input[type="search"]::-webkit-search-decoration {
 }
 .tape {
   display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  scroll-snap-type: x proximity;
-  padding-bottom: 6px;
-  overscroll-behavior-x: contain;
+  gap: 3px;
   min-width: 0;
 }
 .tape > li {
-  flex: 1 1 56px;
-  min-width: 56px;
-  scroll-snap-align: end;
-}
-.tape > li.tile-next {
-  flex: none;
-}
-.tape.fits {
-  overflow-x: hidden;
+  flex: 1 1 0;
+  min-width: 0;
 }
 .tile {
   --ch-line: var(--t-line);
-  --ch-bg: var(--t-dim);
+  --ch-bg: var(--surface);
   display: block;
   width: 100%;
-  min-width: 56px;
-  height: 88px;
+  min-width: 0;
+  height: 120px;
   color: inherit;
 }
 .tile:hover {
@@ -1719,18 +1678,30 @@ input[type="search"]::-webkit-search-decoration {
   --ch-line: var(--t);
 }
 .tile .ch-in {
+  position: relative;
+  isolation: isolate;
   display: grid;
   grid-template-rows: auto 1fr auto;
   align-items: center;
   justify-items: center;
-  padding: 6px 4px;
+  padding: 8px 2px;
   height: 100%;
+}
+.tile-fill {
+  position: absolute;
+  z-index: -1;
+  inset: auto 0 0;
+  background: var(--t-dim);
+  border-left: 2px solid var(--t);
+  transition: height 250ms ease;
 }
 .tile .h {
   font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--muted);
+  font-size: 10px;
+  color: var(--text);
   white-space: nowrap;
+  letter-spacing: 0;
+  /* graceful degradation: 7-digit heights (#1,000,000 in ~2027) in a 54 px tile */
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
@@ -1738,23 +1709,40 @@ input[type="search"]::-webkit-search-decoration {
 .tile .mid {
   display: grid;
   justify-items: center;
-  gap: 0;
-}
-.tile .tail {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--muted);
-  line-height: 1;
+  gap: 2px;
 }
 .tile .digit-bare {
-  font-size: 26px;
+  font-size: 22px;
 }
 .tile .y {
   font-family: var(--display);
   font-weight: 600;
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  font-size: 9px;
+  letter-spacing: 0;
+  white-space: nowrap;
   color: var(--t);
+}
+.tile-stats {
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.tile-fullness {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+}
+.tile-txs {
+  color: var(--muted);
+  font-size: 9px;
+  /* 5-digit tx counts exist today */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 .tile.is-new {
   animation: slide-in 220ms ease-out both;
@@ -1766,7 +1754,7 @@ input[type="search"]::-webkit-search-decoration {
 }
 .tile.tile-missing .q {
   font-family: var(--mono);
-  font-size: 26px;
+  font-size: 22px;
   color: var(--muted-2);
 }
 .tile.tile-ph {
@@ -1774,38 +1762,31 @@ input[type="search"]::-webkit-search-decoration {
   --ch-bg: transparent;
 }
 .tile-next {
-  position: sticky;
-  right: 0;
-  z-index: 1;
-  width: 56px;
-  height: 88px;
+  height: 120px;
   background: var(--surface);
-  border: 1px solid var(--border-strong);
+  border: 1px dashed var(--border-strong);
   display: grid;
   grid-template-rows: auto 1fr auto;
   align-items: center;
   justify-items: center;
-  padding: 6px 4px;
-  box-shadow: -8px 0 12px rgba(5, 8, 13, 0.7);
+  padding: 8px 2px;
 }
 .tile-next .h {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--muted);
+  letter-spacing: 0;
+  white-space: nowrap;
 }
 .tile-next .label {
   font-size: 9px;
+  letter-spacing: 0;
 }
-.tile .h-short,
-.tile-next .h-short {
-  display: none;
-}
-/* Phone bead plate: 2 rows × 8 tiles filling the width; digit + yield only
-   (height and hash tail stay in the title / aria-label). */
+/* Three complete blocks on phones, with the pending block below. */
 .tape-grid {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 3px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
   overflow: visible;
   padding-bottom: 0;
   scroll-snap-type: none;
@@ -1815,23 +1796,20 @@ input[type="search"]::-webkit-search-decoration {
 }
 .tape-grid .tile {
   width: 100%;
-  height: 52px;
+  height: 120px;
 }
 .tape-grid .tile .ch-in {
-  grid-template-rows: 1fr auto;
-  padding: 4px 2px 5px;
-  gap: 1px;
+  padding: 8px 3px;
 }
-.tape-grid .tile .h,
-.tape-grid .tile .tail {
-  display: none;
+.tape-grid .tile .h {
+  font-size: 10px;
 }
 .tape-grid .tile .digit-bare {
   font-size: 22px;
 }
 .tape-grid .tile .y {
-  font-size: 9.5px;
-  letter-spacing: 0.02em;
+  font-size: 10px;
+  letter-spacing: 0;
 }
 .tape-grid .tile.tile-missing .q {
   font-size: 22px;
@@ -1869,6 +1847,9 @@ input[type="search"]::-webkit-search-decoration {
 @media (prefers-reduced-motion: reduce) {
   .tile.is-new {
     animation: none;
+  }
+  .tile-fill {
+    transition: none;
   }
 }
 
@@ -2480,6 +2461,18 @@ input[type="search"]::-webkit-search-decoration {
 .notice-row .btn {
   flex: none;
   margin-left: auto;
+}
+/* App-wide wallet-safety notice (UtxoSafetyNotice in App.jsx): between the
+   mine ticker and the page, aligned to the page column. */
+.app-notice {
+  width: 100%;
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 16px var(--gutter) 0;
+  min-width: 0;
+}
+.app-notice + .page {
+  padding-top: 12px;
 }
 
 /* ---- fee-rate selector ------------------------------------------------------------------- */
@@ -3686,7 +3679,7 @@ button.wallet-addr:focus-visible {
 }
 .avatar-preview .frame {
   display: block;
-  width: 256px;
+  width: 128px; /* the encoded avatar is at most 128 px (AVATAR_SIDE_PX) — never upscale it */
   max-width: 100%;
   aspect-ratio: 1;
   flex: none;
@@ -3747,8 +3740,3 @@ button.wallet-addr:focus-visible {
 .created-token { border-bottom: 1px solid var(--border); padding: 12px 0; }
 .created-token summary { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; cursor: pointer; }
 .created-token summary > span { margin-left: auto; font-size: 13px; }
-@media (max-width: 720px) {
-  .avatar-preview .frame {
-    width: 200px;
-  }
-}

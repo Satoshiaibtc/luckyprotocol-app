@@ -6,6 +6,7 @@ import * as wallet from "../lib/wallet.js";
 import { ACTIVATION_HEIGHT, TICKER_RE } from "../lib/payloads.js";
 import { buildPayPsbt, expectPsbtPayload, extractRawTxHex, minFeeInputSats, outpointKey } from "../lib/psbt.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
+import { isUsableFeeRate } from "../lib/feechoice.js";
 import {
   AVATAR_KEY_DOMAIN, buildDeployRevealPsbt, buildEnvelopeScript, buildSweepPsbt,
   bytesToDataUrl, clearDeployRecord, commitAmountFor, commitPayment, compressAvatar,
@@ -16,6 +17,11 @@ import {
 
 const IDLE = { phase: "idle" };
 const TX_OPTIONS = { allowUnknownInputs: true, allowUnknownOutputs: true };
+const NO_IMAGE = { preview: null, busy: false, error: null };
+// Every builder runs the rate through checkedFeeRate, which maps null to
+// 1 sat/vB — so a missing quote must be refused BEFORE anything is built
+// or signed, never silently paid at the floor.
+const NO_FEE_RATE = "No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.";
 
 function restored(ticker) {
   if (!TICKER_RE.test(ticker)) return IDLE;
@@ -35,6 +41,8 @@ function fromRecord(record) {
 export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettled }) {
   const [flow, setFlow] = useState(IDLE);
   const [busy, setBusy] = useState(false);
+  const [image, setImage] = useState(NO_IMAGE);
+  const imageRequest = useRef(0);
   const scope = useRef(null);
   const running = useRef(false);
   const keyRef = useRef(null);
@@ -45,6 +53,10 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
   const identity = `${account.provider}:${address}:${ticker}`;
   const currentIdentity = useRef(identity);
   currentIdentity.current = identity;
+  const hasSaved = !!flow.record || ["locked", "invalid-record"].includes(flow.phase) || (TICKER_RE.test(ticker) && loadDeployRecord(ticker).status !== "absent");
+  const preview = flow.preview || (!hasSaved ? image.preview : null);
+
+  useEffect(() => () => { imageRequest.current++; }, []);
 
   useEffect(() => {
     const session = {};
@@ -55,6 +67,11 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
     recordRef.current = next.record || null;
     setFlow(next);
     setBusy(false);
+    // Same reset as clearImage: a preview or error picked under one ticker
+    // or wallet never shows under another (an in-flight compression is
+    // abandoned too).
+    imageRequest.current++;
+    setImage(NO_IMAGE);
     return () => { if (scope.current === session) scope.current = null; };
   }, [identity, ticker]);
 
@@ -152,6 +169,9 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
       update({ phase: "pending" });
       return;
     }
+    // Past this point a commit and/or reveal is built and signed at
+    // feeRateSatVb; the relay-only returns above need no rate.
+    if (!isUsableFeeRate(feeRateSatVb)) throw new Error(NO_FEE_RATE);
     await requireAvailable(check);
     if (!rec.commitRawHex) {
       update({ phase: "commit-building" });
@@ -199,23 +219,39 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
     update({ phase: "pending" });
   };
 
-  const pickFile = (file) => act(async ({ check, update }) => {
-    if (recordRef.current || loadDeployRecord(ticker).status !== "absent") throw new Error("Resume or reclaim the saved creation first.");
-    update({ phase: "compressing" });
-    const image = await compressAvatar(file);
-    check();
-    update({ phase: "ready", preview: { ...image, sizeBytes: image.bytes.length, dataUrl: bytesToDataUrl(image.bytes, image.contentType) } });
-  });
+  // Image preparation is local-only and scoped to the wallet + ticker it
+  // was picked under (the identity effect above resets it). Recovery and
+  // all payment actions remain scoped to the original wallet.
+  const pickFile = async (file) => {
+    if (running.current || hasSaved) return;
+    const request = ++imageRequest.current;
+    setImage({ preview: null, busy: true, error: null });
+    setFlow(IDLE);
+    try {
+      const prepared = await compressAvatar(file);
+      if (request !== imageRequest.current) return;
+      setImage({ preview: { ...prepared, sizeBytes: prepared.bytes.length, dataUrl: bytesToDataUrl(prepared.bytes, prepared.contentType) }, busy: false, error: null });
+    } catch (e) {
+      if (request === imageRequest.current) setImage({ preview: null, busy: false, error: String(e.message || e) });
+    }
+  };
+
+  // Drops the local preview / error only — never a recovery record.
+  const clearImage = () => {
+    imageRequest.current++;
+    setImage(NO_IMAGE);
+  };
 
   const start = () => act(async (ctx) => {
-    if (!flow.preview || recordRef.current || loadDeployRecord(ticker).status !== "absent") throw new Error("An unfinished creation already exists. Resume it first.");
+    if (!preview || image.busy || image.error || recordRef.current || loadDeployRecord(ticker).status !== "absent") throw new Error("Choose an image or resume the saved creation first.");
+    if (!isUsableFeeRate(feeRateSatVb)) throw new Error(NO_FEE_RATE);
     await requireAvailable(ctx.check);
-    ctx.update({ phase: "securing" });
+    ctx.update({ phase: "securing", preview });
     await ensureKey(ctx.check, true);
     if (loadDeployRecord(ticker).status !== "absent") throw new Error("Another creation was saved while the wallet was open. Reload to recover it.");
     const priv = generateEphemeralKey();
-    const leaf = buildEnvelopeScript(ephemeralXonly(priv), flow.preview.contentType, flow.preview.bytes);
-    const rec = await ctx.persist({ kind: "deploy", address, ticker, ephemeralPrivHex: hex.encode(priv), leafScriptHex: hex.encode(leaf), contentType: flow.preview.contentType, bytesBase64: base64.encode(flow.preview.bytes), commitAddress: commitPayment(priv, leaf).address, commitAmount: commitAmountFor({ leafScriptLen: leaf.length, feeRateSatVb }), commitInputs: [], createdAt: Date.now(), feeRateSatVb });
+    const leaf = buildEnvelopeScript(ephemeralXonly(priv), preview.contentType, preview.bytes);
+    const rec = await ctx.persist({ kind: "deploy", address, ticker, ephemeralPrivHex: hex.encode(priv), leafScriptHex: hex.encode(leaf), contentType: preview.contentType, bytesBase64: base64.encode(preview.bytes), commitAddress: commitPayment(priv, leaf).address, commitAmount: commitAmountFor({ leafScriptLen: leaf.length, feeRateSatVb }), commitInputs: [], createdAt: Date.now(), feeRateSatVb });
     await continueRecord(rec, ctx);
   });
 
@@ -242,6 +278,8 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
     if (rec.reclaimTxid) {
       await relay(rec.reclaimRawHex, rec.reclaimTxid, check);
     } else {
+      // The sweep below is built and signed at feeRateSatVb.
+      if (!isUsableFeeRate(feeRateSatVb)) throw new Error(NO_FEE_RATE);
       // Refuse a conflicting sweep while a reveal is in the mempool or
       // confirmed. An unavailable status is an error, not permission.
       if (rec.revealTxid) {
@@ -258,9 +296,13 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
     update({ phase: "reclaim-pending" });
   });
 
+  // Deletes the recovery record — only one this hook has unlocked and that
+  // holds no signed payment. A locked or unreadable record is never
+  // cleared: a paid avatar may still depend on it.
   const discard = () => {
-    if (running.current || recordRef.current?.commitRawHex) return;
-    clearDeployRecord(ticker);
+    if (running.current || recordRef.current?.commitRawHex || ["locked", "invalid-record"].includes(flow.phase)) return;
+    if (TICKER_RE.test(ticker)) clearDeployRecord(ticker);
+    clearImage();
     recordRef.current = null;
     setFlow(IDLE);
   };
@@ -298,5 +340,5 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
     return () => { alive = false; clearTimeout(timer); };
   }, [flow.phase, flow.record, ticker]);
 
-  return { flow, busy, pickFile, start, unlock, resume, reclaim, retryBroadcast, discard, hasSaved: !!flow.record || ["locked", "invalid-record"].includes(flow.phase) || (TICKER_RE.test(ticker) && loadDeployRecord(ticker).status !== "absent") };
+  return { flow: { ...flow, preview, phase: image.busy ? "compressing" : flow.phase }, busy: busy || image.busy, fileError: image.error, pickFile, clearImage, start, unlock, resume, reclaim, retryBroadcast, discard, hasSaved };
 }

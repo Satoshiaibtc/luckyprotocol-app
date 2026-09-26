@@ -56,15 +56,14 @@ export function useFeeRate(feesData) {
   const pickPreset = useCallback((id) => setChoice({ kind: "preset", id: id || DEFAULT_PRESET }), []);
 
   const pickCustom = useCallback(() => {
-    setChoice((c) => {
-      if (c.kind === "custom") return c;
-      const { value } = clampCustomFee(customText);
-      return { kind: "custom", value: value ?? null };
-    });
-  }, [customText]);
+    if (choice.kind === "custom") return;
+    const text = customText.trim() || String(resolveFeeRate(choice, feesData) ?? "");
+    setCustomText(text);
+    setChoice({ kind: "custom", value: clampCustomFee(text).value });
+  }, [choice, customText, feesData]);
 
   const onCustomText = useCallback((text) => {
-    const t = String(text ?? "").replace(/[^\d.]/g, "").slice(0, 6);
+    const t = String(text ?? "").slice(0, 32);
     setCustomText(t);
     const { value } = clampCustomFee(t);
     setChoice({ kind: "custom", value: value ?? null });

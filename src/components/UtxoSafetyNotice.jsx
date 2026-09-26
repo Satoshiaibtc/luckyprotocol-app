@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useApp } from "../context.js";
 import { MIN_FEE_INPUT_SATS_UNSAFE } from "../lib/psbt.js";
 import { DUST_SATS } from "../lib/payloads.js";
@@ -28,7 +28,9 @@ function writeDismissed(address) {
 
 /**
  * The universal wallet-safety notice, shown once per session to EVERY
- * connected wallet on Mine / Create / Portfolio: LUCKY-20 tokens sit on
+ * connected wallet. It is rendered app-wide (App.jsx, between the mine
+ * ticker and the page) so it appears on Mine / Create / Portfolio and the
+ * board alike without any page repeating it: LUCKY-20 tokens sit on
  * 546-sat outputs, and under default routing a BTC spend from this address
  * made with any other wallet (one that does not apply the §4 filter) hands
  * those tokens to whoever receives that transaction's first output — so
@@ -44,16 +46,18 @@ function writeDismissed(address) {
 export default function UtxoSafetyNotice() {
   const { wallet } = useApp();
   const address = wallet.status === "connected" ? wallet.address : null;
-  const [dismissed, setDismissed] = useState(() => readDismissed(address));
-  useEffect(() => {
-    setDismissed(readDismissed(address));
-  }, [address]);
+  // Derived during render, not in an effect: the notice is mounted before
+  // the wallet restores, and an effect would paint one frame of the notice
+  // for an address that already dismissed it this session.
+  const [dismissedFor, setDismissedFor] = useState(null);
+  const dismissed = !address || dismissedFor === address || readDismissed(address);
 
-  if (!address || dismissed) return null;
+  if (dismissed) return null;
   const unsafeList = wallet.assetSafe !== true && wallet.assetSafe !== null;
   const name = wallet.providerName || "This wallet";
   return (
-    <div className="notice notice-row" role="note">
+    <div className="app-notice">
+      <div className="notice notice-row" role="note">
       <span>
         Your LUCKY-20 tokens sit on {DUST_SATS}-sat outputs at this address. Spending BTC from it with any other wallet can hand those tokens to whoever receives that
         transaction&apos;s first output — keep a dedicated address for LUCKY-20.
@@ -67,12 +71,13 @@ export default function UtxoSafetyNotice() {
         type="button"
         onClick={() => {
           writeDismissed(address);
-          setDismissed(true);
+          setDismissedFor(address);
         }}
         aria-label="Dismiss this notice for this session"
       >
         Got it
       </button>
+      </div>
     </div>
   );
 }

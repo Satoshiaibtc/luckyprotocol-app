@@ -244,6 +244,22 @@ function runScenario(label, sellerType, buyerType) {
   assert.ok(est.feeSats > 500 && est.feeSats < 4_000, `${label}: fee preview plausible ${est.feeSats}`);
   assert.equal(est.slotSats, 3 * 546);
   assert.equal(est.totalSats, 60_000 + 3 * 546 + est.feeSats, "price + token slot + fee + residual slot + network fee");
+  assert.ok(est.feeSats >= est.vsize * 8, `${label}: preview fee covers ceil(vsize) × rate`);
+
+  // Decimal rates: integer satoshis, and the fee is never below
+  // ceil(vsize) × rate — the node charges for whole vbytes.
+  for (const feeRateSatVb of [1, 1.01, 1.25, 2.5, 3, 10]) {
+    const fractional = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb });
+    assert.equal(fractional.feeRateSatVb, feeRateSatVb);
+    assert.ok(Number.isInteger(fractional.feeSats));
+    assert.ok(Number.isInteger(fractional.estimatedVsize));
+    assert.ok(fractional.feeSats >= Math.ceil(fractional.estimatedVsize) * feeRateSatVb - 1e-9, `${label} @ ${feeRateSatVb}: fee ${fractional.feeSats} ≥ ${fractional.estimatedVsize} vB × ${feeRateSatVb}`);
+    const decoded = parse(fractional.psbtHex);
+    let total = 0n;
+    for (let i = 0; i < decoded.inputsLength; i++) total += decoded.getInput(i).witnessUtxo.amount;
+    for (let i = 0; i < decoded.outputsLength; i++) total -= decoded.getOutput(i).amount;
+    assert.equal(total, BigInt(fractional.feeSats));
+  }
 
   const fill = buildFillPsbt({
     listingPsbtHex: signedListing,

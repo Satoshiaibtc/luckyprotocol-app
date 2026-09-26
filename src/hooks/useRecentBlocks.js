@@ -20,6 +20,12 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
   const seenRef = useRef(new Set());
   const newRef = useRef(new Set());
   const [version, setVersion] = useState(0);
+  const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setRefresh((v) => v + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     if (ceiling === null || ceiling === undefined) return undefined;
@@ -33,10 +39,21 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
     const fetchHeights = async (heights) => {
       if (heights.length === 0) return false;
       let reorg = false;
+      const store = (height, block) => {
+        const prev = cache.get(height);
+        const sameHash = prev?.hash === block.hash;
+        if (prev?.hash && !sameHash) reorg = true;
+        cache.set(height, {
+          hash: block.hash,
+          time: block.time ?? (sameHash ? prev.time : null),
+          weight: block.weight ?? (sameHash ? prev.weight : null),
+          tx_count: block.tx_count ?? (sameHash ? prev.tx_count : null),
+        });
+      };
       const byHeight = new Map();
       try {
         const res = await indexer.recentBlocks(Math.min(32, count + 8), ctrl.signal);
-        if (res) for (const b of res.blocks) byHeight.set(b.height, b.hash);
+        if (res) for (const b of res.blocks) byHeight.set(b.height, b);
       } catch (e) {
         if (e && e.name === "AbortError") return false;
         /* fall through to per-height reads */
@@ -44,11 +61,9 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       if (!alive || ctrl.signal.aborted) return false;
       const rest = [];
       for (const h of heights) {
-        const hash = byHeight.get(h);
-        if (hash) {
-          const prev = cache.get(h);
-          if (prev && prev.hash && prev.hash !== hash) reorg = true;
-          cache.set(h, { hash, time: cache.get(h)?.time ?? null });
+        const block = byHeight.get(h);
+        if (block) {
+          store(h, block);
         } else {
           rest.push(h);
         }
@@ -59,9 +74,7 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       results.forEach((r, i) => {
         const h = rest[i];
         if (r.status === "fulfilled" && r.value && r.value.hash) {
-          const prev = cache.get(h);
-          if (prev && prev.hash && prev.hash !== r.value.hash) reorg = true;
-          cache.set(h, { hash: r.value.hash, time: r.value.time ?? null });
+          store(h, r.value);
         } else if (r.status === "fulfilled" || !(r.reason && r.reason.name === "AbortError")) {
           cache.set(h, { missing: true });
         }
@@ -75,10 +88,10 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       // Prune heights that fell off the window so the cache stays bounded.
       for (const h of [...cache.keys()]) if (h < ceiling - count + 1 || h > ceiling) cache.delete(h);
       // Only blocks that arrive AFTER the first fill get the "new" entrance;
-      // animating all sixteen on every page load read as the tape flashing.
+      // animating the entire window on every page load reads as flashing.
       const firstFill = cache.size === 0;
       if (!firstFill) for (const h of wanted) if (!cache.has(h)) newRef.current.add(h);
-      const need = wanted.filter((h) => !cache.has(h) || h === ceiling);
+      const need = wanted.filter((h) => !cache.has(h) || cache.get(h).missing || cache.get(h).weight == null || h === ceiling);
       if (need.length === 0) return;
       const reorg = await fetchHeights(need);
       if (!alive) return;
@@ -94,7 +107,7 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       alive = false;
       ctrl.abort();
     };
-  }, [ceiling, count]);
+  }, [ceiling, count, refresh]);
 
   // Heights first seen this render carry `isNew` for one paint; the class
   // is dropped 300 ms later (the only timer here, and it only clears a flag).
@@ -128,7 +141,7 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
         } else {
           const b = bucketOfHash(c.hash);
           if (b) tally[b.id] += 1;
-          tiles.push({ height: h, hash: c.hash, time: c.time, missing: false, pending: false, isNew: newRef.current.has(h) && !seenRef.current.has(h) });
+          tiles.push({ height: h, hash: c.hash, time: c.time, weight: c.weight ?? null, tx_count: c.tx_count ?? null, missing: false, pending: false, isNew: newRef.current.has(h) && !seenRef.current.has(h) });
         }
       }
     } else if (Array.isArray(fallbackRows)) {

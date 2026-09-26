@@ -2,7 +2,10 @@
 // CSP, the canonical-host redirect and the VITE_SPEC_URL validator. Plain
 // Node, no framework.
 import assert from "node:assert/strict";
-import { buildHeaders, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join, relative, sep } from "node:path";
+import { buildHeaders, buildMiddleware, buildRoutes, FIXED_HEADERS, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
 import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHost.js";
 import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/specUrl.js";
 
@@ -36,6 +39,40 @@ import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/s
   console.log("headers: production CSP names only the indexer origin; no loopback, no mempool.space, no 'unsafe-inline'");
 }
 
+// ---- HTML document: the generated Pages Function = _headers + a per-response script-src nonce ------
+{
+  const opts = { indexerUrl: "https://luckyprotocolai.com/", mode: "production", strict: true };
+  const src = buildMiddleware(opts);
+  assert.ok(!src.includes("unsafe-inline") && !src.includes("127.0.0.1") && !src.includes("localhost"), "no 'unsafe-inline', no loopback in the production middleware");
+  assert.ok(src.includes("https://luckyprotocolai.com"), "the indexer origin is baked in at build time");
+  assert.deepEqual(JSON.parse(buildRoutes()), { version: 1, include: ["/"], exclude: [] }, "only the document invokes the Function (Pages 308-redirects /index.html to / before routing); assets keep the static _headers");
+  assert.throws(() => buildMiddleware({ indexerUrl: "", mode: "production", strict: true }), /must name the real indexer/);
+  const mod = await import(`data:text/javascript,${encodeURIComponent(src)}`);
+  const html = async () => new Response("<!doctype html><title>x</title>", { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=10, must-revalidate", "x-upstream": "kept" } });
+  const a = await mod.onRequest({ next: html });
+  const b = await mod.onRequest({ next: html });
+  const cspA = a.headers.get("content-security-policy");
+  const nonceA = /script-src 'self' 'nonce-([A-Za-z0-9+/=]+)'/.exec(cspA)?.[1];
+  const nonceB = /script-src 'self' 'nonce-([A-Za-z0-9+/=]+)'/.exec(b.headers.get("content-security-policy"))?.[1];
+  assert.ok(nonceA && nonceB && nonceA !== nonceB, "a fresh nonce on every response");
+  assert.equal(nonceA.length, 24, "16 random bytes, base64");
+  assert.equal((cspA.match(/nonce-/g) || []).length, 1, "the nonce extends script-src only");
+  const staticCsp = /Content-Security-Policy: (.*)/.exec(buildHeaders(opts))[1];
+  assert.equal(cspA.replace(` 'nonce-${nonceA}'`, ""), staticCsp, "otherwise byte-identical to the static CSP");
+  for (const [name, value] of FIXED_HEADERS) assert.equal(a.headers.get(name), value, `${name} set by the Function`);
+  assert.equal(a.headers.get("x-upstream"), "kept", "upstream headers survive");
+  assert.equal(a.headers.get("cache-control"), "no-store", "a nonce is single-use: Pages' public max-age=10 (edge-shared) is replaced");
+  assert.equal(a.status, 200);
+  assert.equal(await a.text(), "<!doctype html><title>x</title>", "body passes through");
+  const asset = new Response("body{}", { headers: { "content-type": "text/css" } });
+  assert.equal(await mod.onRequest({ next: async () => asset }), asset, "non-HTML responses are returned untouched");
+  const redirect = new Response(null, { status: 301, headers: { location: "/" } });
+  assert.equal(await mod.onRequest({ next: async () => redirect }), redirect, "redirects too");
+  const notModified = new Response(null, { status: 304, headers: { "content-type": "text/html; charset=utf-8", etag: '"x"' } });
+  assert.equal(await mod.onRequest({ next: async () => notModified }), notModified, "a 304 keeps the browser's stored nonce pair (body + CSP) intact");
+  console.log("middleware: the document gets the static header set plus a per-response script-src nonce; assets untouched");
+}
+
 // ---- L-15: *.pages.dev → canonical host ------------------------------------------------------------------
 {
   assert.equal(CANONICAL_HOST, "app.luckyprotocolai.com");
@@ -67,6 +104,30 @@ import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/s
   assert.equal(resolveSpecUrl("javascript:alert(1)"), DEFAULT_SPEC_URL, "invalid → default");
   assert.equal(resolveSpecUrl(""), DEFAULT_SPEC_URL);
   assert.equal(resolveSpecUrl(undefined), DEFAULT_SPEC_URL);
+}
+
+// ---- fee-rate gates: fractional sat/vB must never be refused by an integer check ------------------------
+// The indexer's /fees returns hundredths (1.02, 2.38); every spend gate goes
+// through isUsableFeeRate (src/lib/feechoice.js). Walks src/**/*.{js,jsx}
+// like test/vocab.test.js so a stale `Number.isInteger(rate)` cannot return.
+{
+  const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const walk = (dir, out = []) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walk(p, out);
+      else if (/\.(js|jsx)$/.test(name)) out.push(p);
+    }
+    return out;
+  };
+  const INTEGER_GATES = [/Number\.isInteger\((feeRate|feeRateSatVb|satVb|rate)\b/, /Number\.isInteger\(v\) \|\| v < 1/];
+  const hits = [];
+  for (const p of walk(join(ROOT, "src"))) {
+    const text = readFileSync(p, "utf8");
+    for (const re of INTEGER_GATES) if (re.test(text)) hits.push(`${relative(ROOT, p).split(sep).join("/")}: ${re}`);
+  }
+  assert.deepEqual(hits, [], "integer fee-rate gates in src/ (use isUsableFeeRate)");
+  console.log("fee gates: no Number.isInteger() fee-rate check in src/");
 }
 
 console.log("web: headers, canonical host, spec URL ok");

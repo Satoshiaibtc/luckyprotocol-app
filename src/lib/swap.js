@@ -347,7 +347,8 @@ export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 
     opReturnScriptLen: makeOpReturnScript(payload).length,
   });
   const rate = Math.min(1_000, Math.max(1, Number(feeRateSatVb) || 1));
-  const feeSats = Math.ceil(vsize * rate);
+  // The node charges for whole vbytes (ceil(weight / 4)): round the size up before the rate.
+  const feeSats = Math.ceil(Math.ceil(vsize) * rate);
   const price = Number(order.price_sats) || 0;
   return {
     vsize: Math.ceil(vsize),
@@ -453,11 +454,12 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
         outputAddresses,
         opReturnScriptLen: opReturnScript.length,
       });
-      const newFee = Math.ceil(vsize * satVb);
+      const newFee = Math.ceil(Math.ceil(vsize) * satVb);
       if (newFee === fee) break;
       fee = newFee;
     }
-    return { selected, total, fee };
+    const vsize = fillVsize({ sellerType, buyerType, buyerInputCount: selected.length, outputAddresses, opReturnScriptLen: opReturnScript.length });
+    return { selected, total, fee, vsize };
   };
 
   let sel;
@@ -505,6 +507,7 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
     changeOmitted,
     changeVout: changeOmitted ? null : FILL_BTC_CHANGE_VOUT,
     residualVout: FILL_CHANGE_OUT,
+    estimatedVsize: Math.ceil(sel.vsize),
     feeRateSatVb: satVb,
     seller: sellerAddress,
   };

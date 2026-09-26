@@ -326,6 +326,10 @@ export function checkExpectedPayload(found, expect = {}) {
 /**
  * Estimated vsize for a tx of `inputCount` inputs of `inputType`
  * ('tr' | 'wpkh'), the given address outputs, and one OP_RETURN script.
+ * Fractional (10.5 overhead, 57.5 per P2TR input). A node's real vsize is
+ * ceil(weight / 4), so every fee below is ceil(ceil(vsize) × rate) — a
+ * plain ceil(vsize × rate) can come in under the node's minimum (213.5 vB
+ * at 3 sat/vB: 641 instead of 642).
  */
 export function estimateVsize({ inputCount, inputType, outputAddresses, opReturnScriptLen }) {
   let v = VSIZE_TX_OVERHEAD + inputCount * inputVsize(inputType);
@@ -350,7 +354,7 @@ export function estimateMineFeeSats({ address, ticker, feeRateSatVb, inputCount 
   // Display-only preview: clamp (don't throw) so the console can still render
   // a number; the builder itself refuses rates above MAX_FEE_RATE_SAT_VB.
   const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
-  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate) };
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(Math.ceil(vsize) * rate) };
 }
 
 // ---- coin selection ------------------------------------------------------------------------
@@ -483,7 +487,7 @@ function buildUnsigned({
         outputAddresses,
         opReturnScriptLen: opReturnLen,
       });
-      const newFee = Math.ceil(vsize * satVb);
+      const newFee = Math.ceil(Math.ceil(vsize) * satVb);
       if (newFee === fee) break;
       fee = newFee;
     }
@@ -598,7 +602,7 @@ export function estimatePayFeeSats({ address, toAddress, feeRateSatVb, inputCoun
   const type = isP2tr(address) ? "tr" : "wpkh";
   const vsize = estimateVsize({ inputCount, inputType: type, outputAddresses: [toAddress, address], opReturnScriptLen: 0 });
   const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
-  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate) };
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(Math.ceil(vsize) * rate) };
 }
 
 /**
@@ -641,7 +645,7 @@ export function estimateDeployFeeSats({ address, ticker, feeRateSatVb, inputCoun
     opReturnScriptLen: makeOpReturnScript(payload).length,
   });
   const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
-  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate) };
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(Math.ceil(vsize) * rate) };
 }
 
 /**
@@ -688,7 +692,7 @@ export function estimateSendFeeSats({ address, toAddress, ticker, amount = 1, fe
     opReturnScriptLen: makeOpReturnScript(payload).length,
   });
   const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
-  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(vsize * rate), slotSats: DUST_SATS * 2 + SEND_PROTOCOL_FEE_SATS };
+  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(Math.ceil(vsize) * rate), slotSats: DUST_SATS * 2 + SEND_PROTOCOL_FEE_SATS };
 }
 
 /**
@@ -787,7 +791,7 @@ export function buildSendPsbt({
         outputAddresses,
         opReturnScriptLen: opReturnScript.length,
       });
-      const newFee = Math.ceil(vsize * satVb);
+      const newFee = Math.ceil(Math.ceil(vsize) * satVb);
       if (newFee === fee) break;
       fee = newFee;
     }

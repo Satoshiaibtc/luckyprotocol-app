@@ -11,8 +11,6 @@ import SupplyRing from "../components/SupplyRing.jsx";
 import MinePanel from "../components/MinePanel.jsx";
 import YieldSpectrum from "../components/YieldSpectrum.jsx";
 import TierTable from "../components/TierTable.jsx";
-import EVReadout from "../components/EVReadout.jsx";
-import ObservedMix from "../components/ObservedMix.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Fold from "../components/hud/Fold.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
@@ -44,7 +42,8 @@ export default function TokenPage({ ticker, params, navigate }) {
 
   const deployBlock = usePoll(token?.deploy_block ? (s) => indexer.blockInfo(token.deploy_block, s) : null, 0, [token?.deploy_block]);
 
-  const mixQ = usePoll((s) => indexer.minesFeed({ ticker, limit: MIX_LIMIT }, s), POLL_MS, [ticker]);
+  // The observed-mix stats are desktop-only; a phone never polls the 200-row feed.
+  const mixQ = usePoll(mobile ? null : (s) => indexer.minesFeed({ ticker, limit: MIX_LIMIT }, s), POLL_MS, [ticker, mobile]);
 
   // The mine console is the only action tab; stale `?tab=…` links resolve here.
   useEffect(() => {
@@ -64,9 +63,9 @@ export default function TokenPage({ ticker, params, navigate }) {
 
   const onSettled = useCallback(() => {
     tokenQ.refresh();
-    mixQ.refresh();
+    if (!mobile) mixQ.refresh();
     setRefreshKey((k) => k + 1);
-  }, [tokenQ, mixQ]);
+  }, [tokenQ, mixQ, mobile]);
 
   const mix = useMemo(() => summarizeMix(mixQ.data?.items || []), [mixQ.data]);
   const tip = health.data?.tip_height ?? null;
@@ -107,13 +106,7 @@ export default function TokenPage({ ticker, params, navigate }) {
     <>
       <YieldSpectrum tipDigit={yieldDigit(tipBlock.data?.hash)} />
       <TierTable ticker={token.ticker} />
-      <EVReadout size="lg" ticker={token.ticker} />
     </>
-  );
-  const observedMix = (
-    <Panel title={`Observed mix · last ${MIX_LIMIT} mines`} led={ledFromPoll(mixQ)} aria-label="Observed mix">
-      <ObservedMix rows={mixQ.data?.items} loading={mixQ.loading} error={mixQ.error} meanLabel="Observed mean" ticker={token.ticker} />
-    </Panel>
   );
   const mineConsole = (
     <Panel title="Mine // console" led={ledFromPoll(tokenQ)} aria-label="Mine console">
@@ -123,7 +116,7 @@ export default function TokenPage({ ticker, params, navigate }) {
 
   if (mobile) {
     // Phone order: compact header → 2×2 stats → MINE console (primary action, within
-    // the first 1.5 screens) → folded yield model → observed mix → segmented activity.
+    // the first 1.5 screens) → folded yield model → segmented activity.
     return (
       <main className="page token-page token-page-m">
         <header className="token-head token-head-m">
@@ -170,8 +163,6 @@ export default function TokenPage({ ticker, params, navigate }) {
         <Fold title="Yield model" summary={TIER_SUMMARY} led="ok" aria-label="Yield model">
           {yieldModel}
         </Fold>
-
-        {observedMix}
 
         <Panel led={activeLed} title="Activity" right={<span className="label">{fmtInt(activeQ.total)} total</span>} aria-label="Token activity">
           <div className="seg" role="tablist" aria-label="Token activity">
@@ -245,8 +236,6 @@ export default function TokenPage({ ticker, params, navigate }) {
           <Panel title="Yield model" led="ok" aria-label="Yield model">
             {yieldModel}
           </Panel>
-
-          {observedMix}
 
           <Panel
             led={activeLed}

@@ -3,7 +3,7 @@
 // src/hooks/useFeeRate.js owns the localStorage side.
 //
 // Stored form ('lp.feeChoice'): a preset id ("fast" | "normal" | "slow" |
-// "economy") or the custom rate as a decimal string ("27").
+// "economy") or the custom rate as a decimal string ("27" or "1.25").
 
 import { MAX_FEE_RATE_SAT_VB } from "./psbt.js";
 
@@ -25,24 +25,29 @@ export function isPresetId(id) {
 }
 
 /**
+ * The one gate every builder / action uses before it spends: a finite
+ * sat/vB inside [MIN_FEE_RATE_SAT_VB, MAX_FEE_RATE_SAT_VB]. Rates are
+ * fractional (the indexer's /fees returns hundredths, e.g. 1.02), so an
+ * integer check would refuse most real quotes.
+ */
+export function isUsableFeeRate(v) {
+  return Number.isFinite(v) && v >= MIN_FEE_RATE_SAT_VB && v <= MAX_FEE_RATE_SAT_VB;
+}
+
+/**
  * Validate a custom rate the user typed. Returns `{ value, error }`:
- * `value` is the integer that will be USED (clamped into [1, cap]) or null
+ * `value` is the rate that will be USED (clamped into [1, cap]) or null
  * when nothing usable was entered; `error` is the inline message or null.
  */
 export function clampCustomFee(input, cap = MAX_FEE_RATE_SAT_VB) {
   const text = String(input ?? "").trim();
-  if (text === "") return { value: null, error: `Enter a whole number, ${MIN_FEE_RATE_SAT_VB}–${cap.toLocaleString("en-US")} sat/vB.` };
-  if (!/^-?\d+(\.\d+)?$/.test(text)) return { value: null, error: "Whole numbers only." };
+  if (text === "") return { value: null, error: `Enter a fee rate, ${MIN_FEE_RATE_SAT_VB}–${cap.toLocaleString("en-US")} sat/vB.` };
+  if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) return { value: null, error: "Enter a valid fee rate." };
   const n = Number(text);
-  if (!Number.isFinite(n)) return { value: null, error: "Whole numbers only." };
-  if (!Number.isInteger(n)) {
-    const v = Math.floor(n);
-    if (v < MIN_FEE_RATE_SAT_VB) return { value: MIN_FEE_RATE_SAT_VB, error: `Minimum is ${MIN_FEE_RATE_SAT_VB} sat/vB.` };
-    if (v > cap) return { value: cap, error: `Capped at ${cap.toLocaleString("en-US")} sat/vB (safety limit).` };
-    return { value: v, error: `Whole numbers only — using ${v}.` };
-  }
+  if (!Number.isFinite(n)) return { value: null, error: "Enter a valid fee rate." };
   if (n < MIN_FEE_RATE_SAT_VB) return { value: MIN_FEE_RATE_SAT_VB, error: `Minimum is ${MIN_FEE_RATE_SAT_VB} sat/vB.` };
   if (n > cap) return { value: cap, error: `Capped at ${cap.toLocaleString("en-US")} sat/vB (safety limit).` };
+  if ((text.split(".")[1] || "").length > 2) return { value: null, error: "Use at most 2 decimal places." };
   return { value: n, error: null };
 }
 
@@ -53,12 +58,12 @@ export function clampCustomFee(input, cap = MAX_FEE_RATE_SAT_VB) {
  */
 export function parseFeeChoice(raw) {
   if (isPresetId(raw)) return { kind: "preset", id: raw };
-  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
+  if (typeof raw === "string" && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim())) {
     const { value } = clampCustomFee(raw);
     if (value !== null) return { kind: "custom", value };
   }
   if (typeof raw === "number" && Number.isFinite(raw)) {
-    const { value } = clampCustomFee(String(Math.floor(raw)));
+    const { value } = clampCustomFee(String(raw));
     if (value !== null) return { kind: "custom", value };
   }
   return { kind: "preset", id: DEFAULT_PRESET };
@@ -66,7 +71,7 @@ export function parseFeeChoice(raw) {
 
 export function serializeFeeChoice(choice) {
   if (!choice) return DEFAULT_PRESET;
-  if (choice.kind === "custom" && Number.isInteger(choice.value)) return String(choice.value);
+  if (choice.kind === "custom" && Number.isFinite(choice.value)) return String(choice.value);
   if (choice.kind === "preset" && isPresetId(choice.id)) return choice.id;
   return DEFAULT_PRESET;
 }
@@ -82,7 +87,7 @@ export function presetUnavailableReason(id, feesData) {
   const preset = FEE_PRESETS.find((p) => p.id === id);
   if (!preset || !feesData) return "missing";
   const v = Number(feesData[preset.key]);
-  if (!Number.isInteger(v) || v < MIN_FEE_RATE_SAT_VB) return "missing";
+  if (!Number.isFinite(v) || v < MIN_FEE_RATE_SAT_VB) return "missing";
   if (v > MAX_FEE_RATE_SAT_VB) return "over-cap";
   return null;
 }
@@ -96,7 +101,7 @@ export function presetUnavailableReason(id, feesData) {
  */
 export function resolveFeeRate(choice, feesData) {
   if (!choice) return null;
-  if (choice.kind === "custom") return Number.isInteger(choice.value) ? Math.min(MAX_FEE_RATE_SAT_VB, Math.max(MIN_FEE_RATE_SAT_VB, choice.value)) : null;
+  if (choice.kind === "custom") return Number.isFinite(choice.value) ? Math.min(MAX_FEE_RATE_SAT_VB, Math.max(MIN_FEE_RATE_SAT_VB, choice.value)) : null;
   if (presetUnavailableReason(choice.id, feesData) !== null) return null;
   const preset = FEE_PRESETS.find((p) => p.id === choice.id);
   return Number(feesData[preset.key]);
@@ -107,7 +112,7 @@ export function resolveFeeRate(choice, feesData) {
  * or null when `satVb` is set. `action` completes the sentence ("mine").
  */
 export function missingFeeHint(choice, satVb, action = "continue") {
-  if (Number.isInteger(satVb) && satVb >= MIN_FEE_RATE_SAT_VB) return null;
+  if (Number.isFinite(satVb) && satVb >= MIN_FEE_RATE_SAT_VB) return null;
   if (choice && choice.kind === "custom") return `Enter a custom fee rate (${MIN_FEE_RATE_SAT_VB}–${MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB) to ${action}.`;
   return `No fee estimate from the indexer — choose Custom and enter a sat/vB to ${action}.`;
 }

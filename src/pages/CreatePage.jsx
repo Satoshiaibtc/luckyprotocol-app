@@ -7,14 +7,13 @@ import { friendlyError } from "../hooks/useWallet.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { buildDeployPsbt, estimateDeployFeeSats, expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { withPending } from "../lib/pending.js";
-import { missingFeeHint } from "../lib/feechoice.js";
+import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
 import { ACTIVATION_HEIGHT, DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
 import { BUCKETS, EXPECTED_YIELD } from "../lib/yield.js";
 import { fmtDec, fmtInt, fmtSats } from "../lib/format.js";
 import TokenCard from "../components/TokenCard.jsx";
 import TxProgress, { ConnectPrompt } from "../components/TxProgress.jsx";
 import FeeSelector from "../components/FeeSelector.jsx";
-import UtxoSafetyNotice from "../components/UtxoSafetyNotice.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
 import CreateAvatarFields from "../components/CreateAvatarFields.jsx";
@@ -91,12 +90,12 @@ export default function CreatePage({ params, navigate }) {
   }, [flow.phase, flow.ticker, navigate]);
 
   const create = async () => {
-    if (!connected || !valid || avail.ticker !== ticker || avail.state !== "free" || busy || !indexerOk || preActivation || creation.hasSaved) return;
+    if (!connected || !valid || avail.ticker !== ticker || avail.state !== "free" || busy || !indexerOk || preActivation || creation.hasSaved || creation.fileError) return;
     if (avatarFlow.preview) { await creation.start(); return; }
     const t = ticker;
     setFlow({ phase: "building", ticker: t });
     try {
-      if (!Number.isInteger(feeRate) || feeRate < 1) {
+      if (!isUsableFeeRate(feeRate)) {
         throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
       }
       const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address), indexer.tokenUtxos(address)]);
@@ -190,7 +189,7 @@ export default function CreatePage({ params, navigate }) {
             </span>
           </label>
 
-          <CreateAvatarFields creation={creation} ticker={ticker} address={address} feeRate={feeRate} disabled={!valid || !connected || busy} />
+          <CreateAvatarFields creation={creation} ticker={ticker} address={address} feeRate={feeRate} feeChoice={fee.choice} disabled={busy} />
 
           <dl className="facts">
             <div>
@@ -216,14 +215,14 @@ export default function CreatePage({ params, navigate }) {
             <div>
               <dt>Network fee</dt>
               <dd>
-                {avatarFlow.preview ? "See avatar transaction estimate above" : feeEstimate ? `≈ ${fmtSats(feeEstimate.feeSats)}` : "—"}
+                {/* CreateAvatarFields renders its estimate only with a valid ticker AND a rate. */}
+                {avatarFlow.preview && valid && feeRate ? "See avatar transaction estimate above" : feeEstimate ? `≈ ${fmtSats(feeEstimate.feeSats)}` : "—"}
                 {feeRate ? <span className="muted"> @ {feeRate} sat/vB</span> : null}
               </dd>
             </div>
           </dl>
 
           <FeeSelector fee={fee} disabled={busy} />
-          <UtxoSafetyNotice />
 
           {preActivation && (
             <div className="notice">
@@ -242,7 +241,7 @@ export default function CreatePage({ params, navigate }) {
           {!connected ? (
             <ConnectPrompt action="create a token" />
           ) : (
-            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.ticker !== ticker || avail.state !== "free" || busy || creation.hasSaved || !indexerOk || preActivation || !feeRate || flow.phase === "confirmed" || avatarFlow.phase === "confirmed"}>
+            <button className="btn btn-primary btn-lg" type="button" onClick={create} disabled={!valid || avail.ticker !== ticker || avail.state !== "free" || busy || creation.hasSaved || !!creation.fileError || !indexerOk || preActivation || !feeRate || flow.phase === "confirmed" || avatarFlow.phase === "confirmed"}>
               {flow.phase === "confirmed" || avatarFlow.phase === "confirmed" ? `Created ${ticker}` : busy ? "Working…" : `Create ${valid ? ticker : "token"}`}
             </button>
           )}
