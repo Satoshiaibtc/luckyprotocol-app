@@ -160,7 +160,6 @@ function Tile({ t }) {
         </span>
         <span className="tile-stats">
           <span className="tile-fullness">{fullness === null ? "N/A" : `${fullness.toFixed(1)}%`}</span>
-          <span className="tile-txs">{t.tx_count === null || t.tx_count === undefined ? "N/A txs" : `${fmtInt(t.tx_count)} txs`}</span>
         </span>
       </span>
     </a>

@@ -1686,7 +1686,7 @@ input[type="search"]::-webkit-search-decoration {
   display: block;
   width: 100%;
   min-width: 0;
-  height: 120px;
+  height: 84px;
   color: inherit;
 }
 .tile:hover {
@@ -1700,7 +1700,7 @@ input[type="search"]::-webkit-search-decoration {
   grid-template-rows: auto 1fr auto;
   align-items: center;
   justify-items: center;
-  padding: 8px 2px;
+  padding: 5px 2px;
   height: 100%;
 }
 .tile-fill {
@@ -1728,7 +1728,7 @@ input[type="search"]::-webkit-search-decoration {
   gap: 2px;
 }
 .tile .digit-bare {
-  font-size: 22px;
+  font-size: 20px;
 }
 .tile .y {
   font-family: var(--display);
@@ -1738,10 +1738,11 @@ input[type="search"]::-webkit-search-decoration {
   white-space: nowrap;
   color: var(--t);
 }
+/* Fullness only: the tx count lives in the tile's title / aria-label, and
+   the fill bar already draws the capacity. */
 .tile-stats {
   display: grid;
   justify-items: center;
-  gap: 1px;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0;
@@ -1751,14 +1752,6 @@ input[type="search"]::-webkit-search-decoration {
   color: var(--text);
   font-size: 11px;
   font-weight: 700;
-}
-.tile-txs {
-  color: var(--muted);
-  font-size: 9px;
-  /* 5-digit tx counts exist today */
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
 }
 .tile.is-new {
   animation: slide-in 220ms ease-out both;
@@ -1778,14 +1771,14 @@ input[type="search"]::-webkit-search-decoration {
   --ch-bg: transparent;
 }
 .tile-next {
-  height: 120px;
+  height: 84px;
   background: var(--surface);
   border: 1px dashed var(--border-strong);
   display: grid;
   grid-template-rows: auto 1fr auto;
   align-items: center;
   justify-items: center;
-  padding: 8px 2px;
+  padding: 5px 2px;
 }
 .tile-next .h {
   font-family: var(--mono);
@@ -1812,16 +1805,16 @@ input[type="search"]::-webkit-search-decoration {
 }
 .tape-grid .tile {
   width: 100%;
-  height: 120px;
+  height: 84px;
 }
 .tape-grid .tile .ch-in {
-  padding: 8px 3px;
+  padding: 5px 3px;
 }
 .tape-grid .tile .h {
   font-size: 10px;
 }
 .tape-grid .tile .digit-bare {
-  font-size: 22px;
+  font-size: 20px;
 }
 .tape-grid .tile .y {
   font-size: 10px;
