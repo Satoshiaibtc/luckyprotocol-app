@@ -30,8 +30,10 @@ export default function PortfolioPage() {
 
   const balances = usePoll(address ? (s) => indexer.balances(address, s) : null, POLL_MS, [address]);
   const mines = usePoll(address ? (s) => indexer.minesByAddress(address, s) : null, POLL_MS, [address]);
-  const orders = usePoll(address ? (s) => indexer.ordersByAddress(address, s) : null, POLL_MS, [address]);
-  const trades = usePoll(address ? (s) => indexer.tradesByAddress(address, s) : null, POLL_MS, [address]);
+  // Both per-address lists are paged by the indexer (50 / page, spec §5);
+  // `total` is the real count and Load more walks the rest.
+  const orders = usePaged(address ? (offset, limit, s) => indexer.ordersByAddress(address, { offset, limit }, s) : null, { limit: 50, deps: [address], refreshMs: POLL_MS });
+  const trades = usePaged(address ? (offset, limit, s) => indexer.tradesByAddress(address, { offset, limit }, s) : null, { limit: 50, deps: [address], refreshMs: POLL_MS });
   const created = usePaged(address ? (offset, limit, s) => indexer.tokens({ deployer: address, offset, limit }, s) : null, { limit: 10, deps: [address], refreshMs: 30_000 });
 
   const tokenByTicker = useMemo(() => {
@@ -48,15 +50,15 @@ export default function PortfolioPage() {
     return set.size === 1 ? [...set][0] : "";
   }, [mines.data]);
 
-  // Listings: live first (open / filling), then closed, newest first.
+  // Listings: live first (open / filling), then closed, newest first — within the loaded pages.
   const listings = useMemo(() => {
     const live = (o) => (o.status === "open" || o.status === "filling" ? 0 : 1);
-    return [...(orders.data || [])].sort((a, b) => live(a) - live(b) || (b.updated_at ?? 0) - (a.updated_at ?? 0));
-  }, [orders.data]);
+    return [...orders.rows].sort((a, b) => live(a) - live(b) || (b.updated_at ?? 0) - (a.updated_at ?? 0));
+  }, [orders.rows]);
   const liveCount = listings.filter((o) => o.status === "open" || o.status === "filling").length;
   const fillingCount = listings.filter((o) => o.status === "filling").length;
 
-  // Cancel = SEND-to-self of the listed carrier (M-9 rule inside the hook); Renew = re-POST.
+  // Withdraw = SEND-to-self of the listed carrier (the spec's cancel; M-9 rule inside the hook); Renew = re-POST.
   const { chain, status, run, reset, busy } = useSendToSelf({ onSettled: () => orders.refresh() });
   const [renew, setRenew] = useState(IDLE);
   const renewOrder = async (o) => {
@@ -134,12 +136,12 @@ export default function PortfolioPage() {
 
         <Panel
           title="My listings"
-          led={ledFromPoll(orders)}
+          led={orders.error ? "err" : orders.loading && orders.rows.length === 0 ? "busy" : "ok"}
           className="span-2"
           aria-label="My listings"
           right={
             <span className="label">
-              {fmtInt(liveCount)} live{fillingCount ? ` · ${fmtInt(fillingCount)} filling` : ""} · {fmtInt(listings.length)} total
+              {fmtInt(liveCount)} live{fillingCount ? ` · ${fmtInt(fillingCount)} filling` : ""}{orders.total > orders.rows.length ? ` of ${fmtInt(orders.rows.length)} loaded` : ""} · {fmtInt(orders.total)} total
             </span>
           }
         >
@@ -165,14 +167,14 @@ export default function PortfolioPage() {
               />
             </>
           )}
-          <OrdersTable q={{ ...asQ(orders), rows: listings }} showTicker onCancel={cancelOrder} onRenew={renewOrder} busy={busy || renew.phase === "busy"} empty="No listings from this address. List a carrier on a token's Market tab." />
+          <OrdersTable q={{ ...orders, rows: listings }} showTicker onCancel={cancelOrder} onRenew={renewOrder} busy={busy || renew.phase === "busy"} empty="No listings from this address. List a carrier on a token's Market tab." />
           <p className="fineprint">
-            A listing expires 14 days after it was (re)published; <strong>Renew</strong> re-POSTs the same signed PSBT for free. <strong>Cancel</strong> is a SEND to yourself — the only thing that voids a signed listing. A <em>filling</em> row has a fill in the mempool: if it confirms you are paid; withdrawing it must out-bid that fill.
+            A listing expires 14 days after it was (re)published; <strong>Renew</strong> re-POSTs the same signed PSBT for free. <strong>Withdraw</strong> is a SEND to yourself — the only thing that voids a signed listing. A <em>filling</em> row has a fill in the mempool: if it confirms you are paid; withdrawing it must out-bid that fill.
           </p>
         </Panel>
 
-        <Panel title="My trades" led={ledFromPoll(trades)} className="span-2" aria-label="My trades" right={<span className="label">{fmtInt((trades.data || []).length)} total</span>}>
-          <TradesTable q={asQ(trades)} self={address} usd={usd} showTicker empty="No fills yet — as buyer or seller." />
+        <Panel title="My trades" led={trades.error ? "err" : trades.loading && trades.rows.length === 0 ? "busy" : "ok"} className="span-2" aria-label="My trades" right={<span className="label">{fmtInt(trades.total)} total</span>}>
+          <TradesTable q={trades} self={address} usd={usd} showTicker empty="No fills yet — as buyer or seller." />
         </Panel>
 
         <Panel title="My mines" led={ledFromPoll(mines)} className="span-2" aria-label="My mines">

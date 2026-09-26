@@ -1,12 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useApp } from "../context.js";
+import { useModalFocus } from "../hooks/useModalFocus.js";
 import { fmtBtc, shortAddr } from "../lib/format.js";
 import { isMobileBrowser } from "../lib/wallet.js";
 import { PROVIDER_IDS, PROVIDER_META } from "../lib/walletShapes.js";
 import Led from "./hud/Led.jsx";
 import WalletMobileGuide from "./WalletMobileGuide.jsx";
-
-const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * The ONE wallet dialog (desktop and phones): opened by the top bar's
@@ -20,7 +19,8 @@ const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), selec
  *
  * Accessible: role=dialog + aria-modal, labelled by its heading, focus
  * moves in on open and back to the opener on close, Tab / Shift+Tab cycle
- * inside, Esc and the backdrop close it. Body scroll is locked while open.
+ * inside, Esc and the backdrop close it. Body scroll is locked while open
+ * (all of it in useModalFocus, shared with the buy sheet).
  */
 export default function WalletModal() {
   const { wallet, mock, connect, disconnect, useMock: enableSimulated, walletModalOpen: open, closeWalletModal: onClose } = useApp();
@@ -33,48 +33,7 @@ export default function WalletModal() {
   const busy = wallet.status === "connecting";
   const present = new Set((wallet.providers || []).filter((p) => p.present).map((p) => p.id));
 
-  // Focus management + Esc + scroll lock.
-  useEffect(() => {
-    if (!open) return undefined;
-    const node = dialogRef.current;
-    if (!node) return undefined;
-    const opener = typeof document !== "undefined" ? document.activeElement : null;
-    const focusables = () => Array.from(node.querySelectorAll(FOCUSABLE)).filter((el) => el.offsetParent !== null || el === document.activeElement);
-    const first = focusables().find((el) => !el.classList.contains("modal-close")) || focusables()[0];
-    (first || node).focus({ preventScroll: true });
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const f = focusables();
-      if (f.length === 0) {
-        e.preventDefault();
-        node.focus();
-        return;
-      }
-      const head = f[0];
-      const tail = f[f.length - 1];
-      const active = document.activeElement;
-      if (e.shiftKey && (active === head || !node.contains(active))) {
-        e.preventDefault();
-        tail.focus();
-      } else if (!e.shiftKey && (active === tail || !node.contains(active))) {
-        e.preventDefault();
-        head.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-      if (opener && typeof opener.focus === "function" && document.contains(opener)) opener.focus({ preventScroll: true });
-    };
-  }, [open, onClose]);
+  useModalFocus(dialogRef, open, onClose);
 
   const pick = useCallback(
     async (id) => {

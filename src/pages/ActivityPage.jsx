@@ -28,12 +28,15 @@ export default function ActivityPage() {
   const [addrFilter, setAddrFilter] = useState("");
 
   const dailyQ = usePoll((s) => indexer.activityDaily(DAILY_DAYS, s), POLL_MS, []);
-  const rows = useMemo(() => fillDays(dailyQ.data?.days || [], DAILY_DAYS, Math.floor(Date.now() / 1000)), [dailyQ.data]);
+  // The zero-filled 30-day window exists only once the indexer has answered:
+  // before that (first load, or an error with nothing cached) `rows` is null
+  // so the chart shows its Loading… / error text instead of a flat zero chart.
+  const rows = useMemo(() => (dailyQ.data ? fillDays(dailyQ.data.days || [], DAILY_DAYS, Math.floor(Date.now() / 1000)) : null), [dailyQ.data]);
   const totals = useMemo(() => {
-    const has = !!dailyQ.data;
+    const has = !!rows;
     const sum = (k) => (has ? dailySeries(rows, k).total : null);
     return { events: sum("events"), sends: sum("sends"), volume: sum("volume_sats"), peakAddresses: has ? dailySeries(rows, "active_addresses").max : null, days: has ? rows.filter((r) => r.events > 0).length : null };
-  }, [rows, dailyQ.data]);
+  }, [rows]);
 
   const ledger = usePaged((offset, limit, s) => indexer.activity({ offset, limit, kind, address: addrFilter || undefined }, s), { limit: 50, deps: [kind, addrFilter], refreshMs: 60_000 });
 

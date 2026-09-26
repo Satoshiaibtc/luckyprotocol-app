@@ -19,7 +19,7 @@ const BOOK_LIMIT = 200;
 
 /**
  * The Market tab of a token page: stat strip (24h | 7d) · candles + order
- * book · the persistent buy bar · List / Split / Cancel · recent trades.
+ * book · the persistent buy bar · List / Split / Withdraw · recent trades.
  * Everything is sats-first; USD sub-labels appear only while /price
  * reports a number.
  */
@@ -112,7 +112,8 @@ export default function MarketPanel({ ticker, token, onSettled }) {
           <div>
             <dt>Change · {range}</dt>
             <dd className={sign ? `delta-${sign}` : ""}>{fmtChangePct(m?.change_pct)}</dd>
-            <span className="sub">{m?.self_trades_excluded ? `${typeof m.self_trades_excluded === "number" ? `${fmtInt(m.self_trades_excluded)} ` : ""}self-trade${m.self_trades_excluded === 1 ? "" : "s"} excluded` : ""}</span>
+            {/* the live indexer sends the flag `true` (always excluded, §5), the mock a count: only a count worth mentioning is shown */}
+            <span className="sub">{typeof m?.self_trades_excluded === "number" && m.self_trades_excluded > 0 ? `${fmtInt(m.self_trades_excluded)} self-trade${m.self_trades_excluded === 1 ? "" : "s"} excluded` : ""}</span>
           </div>
           <div>
             <dt>Last trade</dt>
@@ -146,7 +147,7 @@ export default function MarketPanel({ ticker, token, onSettled }) {
 
       <BuyPanel ticker={ticker} token={token} order={selected} onClear={() => setSelectedId(null)} onSettled={settled} usd={usd} />
 
-      <Fold title="List / Split / Cancel" summary="List a whole carrier at a unit or total price · split part of it off first · renew or withdraw your listings" led={address ? "ok" : "idle"} aria-label="Sell">
+      <Fold title="List / Split / Withdraw" summary="List a whole carrier at a unit or total price · split part of it off first · renew or withdraw your listings" led={address ? "ok" : "idle"} aria-label="Sell">
         <SellPanel ticker={ticker} token={token} onSettled={settled} usd={usd} />
       </Fold>
 

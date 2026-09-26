@@ -321,18 +321,24 @@ function _sanitizeTradeRow(t) {
   const amount = _safeInt(t.amount, _MAX_TOKEN_AMT);
   const price = _safeInt(t.price_sats, _MAX_SATS);
   const seller = _safeAddr(t.seller);
+  // `buyer` is null on the wire when vout[TO_OUT] has no address form
+  // (§7.5) — the fill still happened and still counts, so the row stays.
   const buyer = _safeAddr(t.buyer);
-  if (height === null || amount === null || amount < 1 || price === null || !seller || !buyer) return null;
-  const unit = _safeFloat(t.unit_price);
+  // A fill pays ≥ the ask and an ask is ≥ 546 sats (§7.1 / §7.4): a
+  // cheaper "trade" is not one the indexer could have recorded.
+  if (height === null || amount === null || amount < 1 || price === null || price < 546 || !seller) return null;
   return {
     txid: String(t.txid).toLowerCase(),
     block_height: height,
     block_hash: _safeHash(t.block_hash),
-    block_time: _safeInt(t.block_time, 1e12),
+    block_time: _safeTime(t.block_time),
     ticker: t.ticker,
     amount,
     price_sats: price,
-    unit_price: unit !== null ? unit : price / amount,
+    // Always derived here (the indexer's own definition, §7.5): a wire
+    // value that disagreed with price / amount would mis-sort the book
+    // and mislabel the row.
+    unit_price: price / amount,
     seller,
     buyer,
     order_id: _ORDER_ID_RE.test(String(t.order_id || "")) ? String(t.order_id).toLowerCase() : null,
@@ -357,7 +363,6 @@ function _sanitizeOrderRow(o) {
   if (amount === null || amount < 1 || price === null || price < 546 || carrier === null || !seller) return null;
   const status = _ORDER_STATUS.has(o.status) ? o.status : null;
   if (!status) return null;
-  const unit = _safeFloat(o.unit_price);
   const psbt = o.psbt !== undefined && o.psbt !== null ? _safeHex(o.psbt) : null;
   const spentTxid = _TXID_RE.test(String(o.spent_txid || "")) ? String(o.spent_txid).toLowerCase() : null;
   const filling = status === "filling";
@@ -366,7 +371,8 @@ function _sanitizeOrderRow(o) {
     ticker: o.ticker,
     amount,
     price_sats: price,
-    unit_price: unit !== null ? unit : price / amount,
+    // Derived, never trusted from the wire (the book sorts and labels by it).
+    unit_price: price / amount,
     seller,
     carrier_sats: carrier,
     status,
@@ -638,13 +644,21 @@ function _pageQuery(opts = {}) {
 }
 
 function _page(env, maxTotal, sanitize) {
+  const items = ((env && env.items) || []).map(sanitize).filter(Boolean);
   return {
-    total: _safeInt(env && env.total, maxTotal) ?? 0,
+    // An envelope without `total` (a per-address list from an indexer that
+    // predates paging) is taken as complete.
+    total: _safeInt(env && env.total, maxTotal) ?? items.length,
     offset: _safeInt(env && env.offset, maxTotal) ?? 0,
     limit: _safeInt(env && env.limit, 1e6) ?? 0,
-    items: ((env && env.items) || []).map(sanitize).filter(Boolean),
+    items,
   };
 }
+
+// Per-address lists (`/mines/:addr`, `/orders/by-address/:addr`,
+// `/trades/:addr`) are paged by the indexer: `limit` default 50, max 200
+// (spec §5). Callers that need "everything live" ask for the max and page.
+export const ADDR_LIST_MAX_LIMIT = 200;
 
 // ---- Read API — one wrapper per route -----------------------------------------------
 
@@ -864,10 +878,15 @@ export async function order(id, signal) {
   }
 }
 
-/** GET /orders/by-address/:addr → OrderView[] (every status, newest first, psbt omitted) */
-export async function ordersByAddress(address, signal) {
-  const env = await _httpGet(`/orders/by-address/${encodeURIComponent(address)}`, signal);
-  return ((env && env.orders) || []).map(_sanitizeOrderRow).filter(Boolean);
+/**
+ * GET /orders/by-address/:addr?limit&offset → `{ total, offset, limit,
+ * items: OrderView[] }` (every status, newest first by created_at, psbt
+ * omitted). Paged like every per-address list: `limit` default 50, max
+ * 200 — pass `{ limit, offset }`; `total` says how many rows exist.
+ */
+export async function ordersByAddress(address, opts = {}, signal) {
+  const env = await _httpGet(`/orders/by-address/${encodeURIComponent(address)}${_pageQuery({ limit: opts.limit, offset: opts.offset })}`, signal);
+  return _page({ ...(env || {}), items: env && env.orders }, 1e9, _sanitizeOrderRow);
 }
 
 /**
@@ -895,10 +914,10 @@ export async function trades(opts = {}, signal) {
   return _page(env, 1e12, _sanitizeTradeRow);
 }
 
-/** GET /trades/:addr → TradeView[] where addr is buyer or seller */
-export async function tradesByAddress(address, signal) {
-  const env = await _httpGet(`/trades/${encodeURIComponent(address)}`, signal);
-  return ((env && env.trades) || []).map(_sanitizeTradeRow).filter(Boolean);
+/** GET /trades/:addr?limit&offset → `{ total, offset, limit, items: TradeView[] }` where addr is buyer or seller (paged, newest first) */
+export async function tradesByAddress(address, opts = {}, signal) {
+  const env = await _httpGet(`/trades/${encodeURIComponent(address)}${_pageQuery({ limit: opts.limit, offset: opts.offset })}`, signal);
+  return _page({ ...(env || {}), items: env && env.trades }, 1e12, _sanitizeTradeRow);
 }
 
 /**
@@ -911,6 +930,9 @@ export async function renewOrder(id, signal) {
   const o = await order(id, signal);
   if (!o) throw new Error("listing not found on the indexer — it expired or was evicted; sign a new listing");
   if (o.status === "filling") throw new Error("a fill of this listing is pending in the mempool — it is exempt from expiry and cannot be re-published until that spend confirms or drops (§7.3)");
+  // (never "cancelled" in the text: friendlyError reads "cancel" as a declined signature)
+  if (o.status === "cancelled") throw new Error("listing was withdrawn on-chain — nothing to renew");
+  if (o.status === "filled") throw new Error("listing was filled — nothing to renew");
   if (o.status !== "open") throw new Error(`listing is ${o.status} — nothing to renew`);
   if (!o.psbt) throw new Error("the indexer returned the order without its PSBT");
   return postOrder({ psbt: o.psbt, ticker: o.ticker, amount: o.amount, price_sats: o.price_sats }, signal);

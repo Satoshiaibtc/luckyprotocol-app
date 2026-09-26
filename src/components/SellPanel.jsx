@@ -9,7 +9,7 @@ import { buildListingPsbt, LISTING_SIGHASH, MIN_PRICE_SATS } from "../lib/swap.j
 import { estimateSendFeeSats } from "../lib/psbt.js";
 import { cancelFeeRate } from "../lib/market.js";
 import { DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
-import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, fmtUsd, shortTxid } from "../lib/format.js";
+import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, fmtUsd, shortTxid, subUnitDecimals } from "../lib/format.js";
 import TxProgress, { ConnectPrompt } from "./TxProgress.jsx";
 import { OrdersTable } from "./Tables.jsx";
 import Led from "./hud/Led.jsx";
@@ -22,12 +22,14 @@ const RELIST_WARNING =
   "A signed listing is a bearer instrument: anyone who saved the earlier PSBT can still fill it at the old price. Re-listing replaces the order in the book but does NOT void that signature — only moving the tokens on-chain does.";
 
 /**
- * List / Split / Cancel for the connected address (mounted under a fold on
- * the Market tab): pick a carrier, list its whole balance at a unit or
+ * List / Split / Withdraw for the connected address (mounted under a fold
+ * on the Market tab): pick a carrier, list its whole balance at a unit or
  * total price (prefilled from the floor / last trade), split part of it
  * off first when needed, and manage the listings — Renew (re-POST the same
- * PSBT before the 14-day expiry) and Cancel (a SEND to yourself; the M-9
- * replacement rule applies while a fill is pending).
+ * PSBT before the 14-day expiry) and Withdraw (the spec's "cancel": a SEND
+ * to yourself; the M-9 replacement rule applies while a fill is pending).
+ * One word for one action on every surface: the button, the fold, the
+ * notices and the progress labels all say "withdraw".
  */
 export default function SellPanel({ ticker, token, onSettled, usd = null }) {
   const { wallet: w, address, pubkeyHex, fees, fee, indexerOk } = useApp();
@@ -35,7 +37,27 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
 
   const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
   const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
-  const myOrders = usePoll(address ? (s) => indexer.ordersByAddress(address, s) : null, POLL_MS, [address]);
+  // The seller's listings: the per-address history is PAGED by the indexer
+  // (newest 200 of every status), so an open / filling ask older than 200
+  // closed rows would drop out of it — the ticker's live book (open +
+  // filling, ≤ 200 each, the same reads the Asks panel makes) is merged in
+  // by seller so a live listing is never shown as "listable".
+  const myOrders = usePoll(
+    address
+      ? async (s) => {
+          const [mine, open, filling] = await Promise.all([
+            indexer.ordersByAddress(address, { limit: indexer.ADDR_LIST_MAX_LIMIT }, s),
+            indexer.orders({ ticker, status: "open", limit: indexer.ADDR_LIST_MAX_LIMIT }, s),
+            indexer.orders({ ticker, status: "filling", limit: indexer.ADDR_LIST_MAX_LIMIT }, s),
+          ]);
+          const byId = new Map(mine.items.filter((o) => o.ticker === ticker).map((o) => [o.id, o]));
+          for (const o of [...open.items, ...filling.items]) if (o.seller === address) byId.set(o.id, o);
+          return [...byId.values()];
+        }
+      : null,
+    POLL_MS,
+    [address, ticker],
+  );
 
   const refreshMine = useCallback(() => {
     tokenUtxos.refresh();
@@ -66,8 +88,8 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
   }, [tokenUtxos.data, btcUtxos.data, myOrders.data, ticker]);
 
   const ordersHere = useMemo(
-    () => (myOrders.data || []).filter((o) => o.ticker === ticker).sort((a, b) => (a.status === "open" || a.status === "filling" ? -1 : 1) - (b.status === "open" || b.status === "filling" ? -1 : 1) || (b.updated_at ?? 0) - (a.updated_at ?? 0)),
-    [myOrders.data, ticker],
+    () => (myOrders.data || []).sort((a, b) => (a.status === "open" || a.status === "filling" ? -1 : 1) - (b.status === "open" || b.status === "filling" ? -1 : 1) || (b.updated_at ?? 0) - (a.updated_at ?? 0)),
+    [myOrders.data],
   );
   const ordersQ = { rows: ordersHere, total: ordersHere.length, loading: myOrders.loading, error: myOrders.error, hasMore: false, loadMore: () => {} };
 
@@ -122,6 +144,14 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
   const priceOk = Number.isInteger(priceSats) && priceSats >= minPriceSats;
   const fatCarrier = !!sel && Number.isInteger(sel.sats) && sel.sats > DUST_SATS;
   const listBusy = listFlow.phase === "signing" || listFlow.phase === "posting";
+  // §7.4 price band: the indexer refuses an ask above 100× the ticker's best
+  // OTHER open ask. Said here, before the wallet is opened, rather than only
+  // as the server's 400 afterwards. The floor is the closest public
+  // reference (it may be the seller's own ask, in which case the server's
+  // ceiling is higher), so this is a warning, not a gate; a re-list of the
+  // book's only open ask has no band at all.
+  const bandRef = (token?.floor_unit_price ?? null) > 0 ? token.floor_unit_price : null;
+  const aboveBand = !!sel && priceOk && bandRef !== null && !(sel.listing && sel.listing.status === "open" && token?.open_orders === 1) && priceSats / sel.amount > 100 * bandRef;
 
   const signListing = async () => {
     if (!connected || !sel || !priceOk || sel.sats === null) return;
@@ -152,7 +182,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
     }
   };
 
-  // ---- on-chain flows: split / cancel -------------------------------------------------------
+  // ---- on-chain flows: split / withdraw (the spec's "cancel", §7.3) ------------------------
   const { chain, status, run, reset, busy: chainBusy } = useSendToSelf({ onSettled: settled });
   const [splitStr, setSplitStr] = useState("");
   useEffect(() => {
@@ -166,7 +196,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
     run({ kind: "cancel", ticker, amount: o.amount, utxo: { txid, vout: Number(vout), sats: o.carrier_sats }, order: o });
   };
 
-  // The M-9 rule, previewed for every filling listing before Cancel is clicked.
+  // The M-9 rule, previewed for every filling listing before Withdraw is clicked.
   const fillingNotes = useMemo(() => {
     const out = [];
     for (const o of ordersHere) {
@@ -205,6 +235,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
       ) : rows.length === 0 ? (
         <div className="empty">{tokenUtxos.loading ? "Loading…" : `No ${ticker} on this address yet. Mine some, or buy an ask.`}</div>
       ) : (
+        <>
         <ul className="utxo-list" role="radiogroup" aria-label={`${ticker} UTXOs`}>
           {rows.map((r) => {
             const disabled = r.multi || chainBusy;
@@ -240,6 +271,19 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
             );
           })}
         </ul>
+        {/* The reasons a row cannot be listed, in plain sight (a title tooltip
+            never opens on a touch screen and a disabled radio cannot be picked). */}
+        {rows.some((r) => r.multi) && (
+          <p className="fineprint utxo-note">
+            <span className="status-tag s-cancelled">several tickers</span> — a UTXO carrying more than one ticker cannot be listed (§7.1). A SEND of {ticker} to yourself moves it onto a fresh 546-sat carrier (the other tickers ride together to the residual carrier); list that carrier once it confirms.
+          </p>
+        )}
+        {rows.some((r) => !r.multi && !r.listing && r.sats !== null && r.sats > DUST_SATS) && (
+          <p className="fineprint utxo-note">
+            <span className="status-tag s-cancelled">split first</span> — this UTXO also holds BTC above 546 sats, which a fill would hand to the buyer together with the tokens. Select it and use Split below to move the tokens onto a 546-sat carrier, then list that.
+          </p>
+        )}
+        </>
       )}
 
       {sel && (
@@ -288,8 +332,13 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
             </div>
           )}
           {sel.sats === null && <div className="err">The BTC value of this UTXO is unknown — refresh and try again (the listing must commit the exact carrier value).</div>}
+          {aboveBand && (
+            <div className="notice">
+              {fmtUnit(priceSats / sel.amount)} sats/token is more than 100× the current floor ({fmtUnit(bandRef)}). The order book accepts an ask only up to 100× the best other open {ticker} ask (§7.4) — expect it to be refused unless that floor is your own listing.
+            </div>
+          )}
           {sel.listing && sel.listing.status === "open" && <div className="notice">Already listed at {fmtUnit(sel.listing.unit_price)} sats. {RELIST_WARNING}</div>}
-          {sel.listing && sel.listing.status === "filling" && <div className="notice">A fill of this listing is already in the mempool — re-listing changes nothing until it confirms or is replaced by a Cancel.</div>}
+          {sel.listing && sel.listing.status === "filling" && <div className="notice">A fill of this listing is already in the mempool — re-listing changes nothing until it confirms or is replaced by a Withdraw.</div>}
 
           <div className="sheet-actions">
             <button className="btn btn-primary btn-lg" type="button" onClick={signListing} disabled={!priceOk || sel.sats === null || listBusy || !indexerOk || chainBusy}>
@@ -312,7 +361,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
                   Listed{listFlow.order?.replaced ? " (replaced your previous listing for this UTXO)" : ""}: {fmtInt(listFlow.order?.amount)} {ticker} for {fmtSats(listFlow.order?.price_sats)}.
                 </span>
               </div>
-              <div className="detail">Tokens stay on your address until a buyer&apos;s fill pays you. The book keeps it 14 days; Renew below extends it for free. To withdraw, Cancel on-chain.</div>
+              <div className="detail">Tokens stay on your address until a buyer&apos;s fill pays you. The book keeps it 14 days; Renew below extends it for free. Withdraw (below) moves the tokens on-chain — the only thing that voids the signature.</div>
             </div>
           )}
           {listFlow.phase === "error" && (
@@ -382,14 +431,14 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
         </div>
         {fillingNotes.map(({ order: o, rule }) => (
           <div className="notice" key={o.id}>
-            <strong>Fill pending.</strong> {fmtInt(o.amount)} {ticker} @ {fmtUnit(o.unit_price)}: a fill sits in the mempool at {o.pending_feerate ?? "?"} sat/vB{o.pending_fee_sats !== null ? ` (${fmtInt(o.pending_fee_sats)} sats${o.pending_vsize !== null ? ` over ${fmtInt(o.pending_vsize)} vB` : ""})` : ""}. Nobody else can fill it now; if it confirms you are paid. Cancel would have to replace it and will use{" "}
+            <strong>Fill pending.</strong> {fmtInt(o.amount)} {ticker} @ {fmtUnit(o.unit_price)}: a fill sits in the mempool at {o.pending_feerate ?? "?"} sat/vB{o.pending_fee_sats !== null ? ` (${fmtInt(o.pending_fee_sats)} sats${o.pending_vsize !== null ? ` over ${fmtInt(o.pending_vsize)} vB` : ""})` : ""}. Nobody else can fill it now; if it confirms you are paid. Withdraw would have to replace it and will use{" "}
             {rule.overCap ? <span className="err">more than the {fmtInt(1000)} sat/vB safety cap — not possible until it confirms or drops</span> : <span className="mono">≥ {rule.floorSatVb ?? rule.satVb} sat/vB</span>}
             {rule.raised && !rule.overCap ? ` (raised from your ${fee.satVb} sat/vB)` : ""}.
           </div>
         ))}
         <OrdersTable q={ordersQ} onCancel={cancelOrder} onRenew={renewOrder} busy={chainBusy || renew.phase === "busy"} empty={`No ${ticker} listings from this address.`} />
         <p className="fineprint">
-          <strong>Renew</strong> re-publishes the same signed listing (nothing to sign) so the book keeps it past its 14-day expiry. <strong>Cancel</strong> moves the listed tokens to a fresh UTXO of yours (a SEND to yourself). {RELIST_WARNING} Short-lived listings limit how long a low-fee fill can pin your UTXO.
+          <strong>Renew</strong> re-publishes the same signed listing (nothing to sign) so the book keeps it past its 14-day expiry; at the same price it keeps its place among equal-priced asks. <strong>Withdraw</strong> moves the listed tokens to a fresh UTXO of yours (a SEND to yourself) — the spec&apos;s cancel. {RELIST_WARNING} Short-lived listings limit how long a low-fee fill can pin your UTXO.
         </p>
       </div>
     </div>
@@ -397,8 +446,9 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
 }
 
 // Formats any finite value — whole numbers and fractions alike (2 decimals
-// at ≥ 1, 4 below; Number() drops trailing zeros so 5 stays "5").
+// at ≥ 1, below 1 as many as three significant digits need, at least 4;
+// Number() drops trailing zeros so 5 stays "5").
 function fmtUnitInput(v) {
   if (!Number.isFinite(v)) return "";
-  return String(Number(v.toFixed(v >= 1 ? 2 : 4)));
+  return String(Number(v.toFixed(v >= 1 ? 2 : subUnitDecimals(v))));
 }

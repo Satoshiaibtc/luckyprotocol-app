@@ -9,6 +9,10 @@ const H = 220;
  * and the cumulative line over the window (right axis), with a hover
  * readout. Static drawing — nothing animates, so prefers-reduced-motion
  * needs no exception here; the hover crosshair is instant either way.
+ * Keyboard: the svg is focusable; ← → step through the days, Home / End
+ * jump, Esc clears. The selected day's numbers are in the svg's
+ * accessible name (read on focus / change), not in a live region that
+ * would announce every column a pointer crosses.
  */
 export default function DailyChart({ rows, metric, onMetric, usd = null, loading, error }) {
   const wrapRef = useRef(null);
@@ -44,6 +48,21 @@ export default function DailyChart({ rows, metric, onMetric, usd = null, loading
     if (t) onMove({ currentTarget: e.currentTarget, clientX: t.clientX });
   };
   const bar = hover !== null && L ? L.bars[hover] : null;
+  const onKey = (e) => {
+    if (!L) return;
+    const n = L.bars.length;
+    const cur = hover ?? n - 1;
+    let next = null;
+    if (e.key === "ArrowLeft") next = Math.max(0, cur - 1);
+    else if (e.key === "ArrowRight") next = Math.min(n - 1, cur + 1);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = n - 1;
+    else if (e.key === "Escape") next = -1;
+    else return;
+    e.preventDefault();
+    setHover(next < 0 ? null : next);
+  };
+  const readout = bar ? `${bar.date}: ${m.label} ${fmtV(bar.v)}, cumulative ${fmtV(bar.cum)}` : L ? `total ${fmtV(L.total)}, peak day ${fmtV(L.max)}` : "";
 
   return (
     <div className="daily">
@@ -55,7 +74,7 @@ export default function DailyChart({ rows, metric, onMetric, usd = null, loading
             </button>
           ))}
         </div>
-        <div className="daily-readout mono" role="status" aria-live="polite">
+        <div className="daily-readout mono" aria-hidden="true">
           {bar ? (
             <>
               <span className="k">{bar.date}</span>
@@ -88,7 +107,7 @@ export default function DailyChart({ rows, metric, onMetric, usd = null, loading
         ) : !L ? (
           <div className="chart-empty muted">{loading ? "Loading…" : "Nothing indexed in the last 30 days."}</div>
         ) : (
-          <svg className="chart daily-svg" width={width} height={H} viewBox={`0 0 ${width} ${H}`} role="img" aria-label={`${m.label} per day, ${L.bars.length} days, total ${fmtV(L.total)}`} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onTouchStart={onTouch} onTouchMove={onTouch}>
+          <svg className="chart daily-svg" width={width} height={H} viewBox={`0 0 ${width} ${H}`} role="img" tabIndex={0} aria-label={`${m.label} per day, ${L.bars.length} days. ${readout}. Arrow keys step through the days.`} onMouseMove={onMove} onMouseLeave={() => setHover(null)} onTouchStart={onTouch} onTouchMove={onTouch} onKeyDown={onKey}>
             {L.yTicks.map((t) => (
               <g key={`y${t.v}`}>
                 <line className="grid" x1={L.left} x2={L.right} y1={t.y} y2={t.y} />
@@ -105,7 +124,7 @@ export default function DailyChart({ rows, metric, onMetric, usd = null, loading
             </text>
             <line className="axis" x1={L.left} x2={L.right} y1={L.bottom} y2={L.bottom} />
             {L.xTicks.map((t) => (
-              <text key={`x${t.x}`} className="tick" x={t.x} y={H - 6} textAnchor="middle">
+              <text key={`x${t.x}`} className="tick" x={t.x} y={H - 6} textAnchor={t.i === 0 ? "start" : t.i === L.bars.length - 1 ? "end" : "middle"}>
                 {t.label}
               </text>
             ))}

@@ -28,7 +28,9 @@ export function fmtSats(sats) {
 
 /**
  * Unit price in sats per whole token. Adaptive precision: ≥100 → 1 dp,
- * ≥1 → 2 dp, otherwise 4 dp (SATS-like tokens trade well under 1 sat).
+ * ≥1 → 2 dp, below 1 at least 4 dp and as many as three significant
+ * digits need (a 546-sat listing of 100,000 tokens is 0.00546 sats/token —
+ * with a fixed 21,000,000 supply, sub-sat prices are the normal regime).
  */
 export function fmtUnit(satsPerToken) {
   if (satsPerToken === null || satsPerToken === undefined || !Number.isFinite(Number(satsPerToken))) return "—";
@@ -36,7 +38,13 @@ export function fmtUnit(satsPerToken) {
   if (v >= 1000) return v.toLocaleString("en-US", { maximumFractionDigits: 0 });
   if (v >= 100) return v.toFixed(1);
   if (v >= 1) return v.toFixed(2);
-  return v.toFixed(4);
+  return v.toFixed(subUnitDecimals(v));
+}
+
+/** Decimals for a sub-sat unit price: three significant digits, never fewer than 4 dp, at most 8. */
+export function subUnitDecimals(v) {
+  if (!(v > 0)) return 4;
+  return Math.min(8, Math.max(4, 2 - Math.floor(Math.log10(v))));
 }
 
 /** Sats → "0.0123 BTC" (trimmed to what matters; never scientific). */

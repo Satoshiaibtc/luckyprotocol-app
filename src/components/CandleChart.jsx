@@ -10,7 +10,11 @@ const VOL_H = 56;
  * OHLC bodies coloured by sign, volume bars beneath, a dashed last-price
  * line, and a hover crosshair whose readout (o / h / l / c / v) sits above
  * the plot. `candles` ascending from /tokens/:ticker/candles; empty
- * buckets are omitted upstream, so columns are index-spaced.
+ * buckets are omitted upstream, so columns are index-spaced. Keyboard:
+ * the svg is focusable; ← → step through the buckets, Home / End jump,
+ * Esc returns to the last one. The shown bucket's OHLC is in the svg's
+ * accessible name rather than a live region, so a pointer crossing 168
+ * columns does not announce 168 times.
  */
 export default function CandleChart({ ticker, candles, interval, onInterval, loading, error, usd = null }) {
   const wrapRef = useRef(null);
@@ -47,11 +51,26 @@ export default function CandleChart({ ticker, candles, interval, onInterval, loa
 
   const shown = hover !== null && L ? L.bars[hover] : L ? L.bars[L.bars.length - 1] : null;
   const c = shown ? shown.c : null;
+  const onKey = (e) => {
+    if (!L) return;
+    const n = L.bars.length;
+    const cur = hover ?? n - 1;
+    let next = null;
+    if (e.key === "ArrowLeft") next = Math.max(0, cur - 1);
+    else if (e.key === "ArrowRight") next = Math.min(n - 1, cur + 1);
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = n - 1;
+    else if (e.key === "Escape") next = -1;
+    else return;
+    e.preventDefault();
+    setHover(next < 0 ? null : next);
+  };
+  const readout = c ? `${fmtTime(c.t)}: open ${fmtUnit(c.o)}, high ${fmtUnit(c.h)}, low ${fmtUnit(c.l)}, close ${fmtUnit(c.c)}, volume ${fmtBtcShort(c.v_sats)} over ${fmtInt(c.n)} fill${c.n === 1 ? "" : "s"}` : "";
 
   return (
     <div className="candles">
       <div className="candles-head">
-        <div className="candles-readout mono" role="status" aria-live="polite">
+        <div className="candles-readout mono" aria-hidden="true">
           {c ? (
             <>
               <span className="k">{fmtTime(c.t)}</span>
@@ -97,17 +116,19 @@ export default function CandleChart({ ticker, candles, interval, onInterval, loa
             height={H}
             viewBox={`0 0 ${width} ${H}`}
             role="img"
-            aria-label={`${ticker} ${interval} candles, ${rows.length} buckets, last ${fmtUnit(L.last.v)} sats`}
+            tabIndex={0}
+            aria-label={`${ticker} ${interval} candles, ${rows.length} buckets, last ${fmtUnit(L.last.v)} sats. ${readout}. Arrow keys step through the buckets.`}
             onMouseMove={onMove}
             onMouseLeave={() => setHover(null)}
             onTouchStart={onTouch}
             onTouchMove={onTouch}
+            onKeyDown={onKey}
           >
             {L.priceTicks.map((t) => (
               <g key={`y${t.v}`}>
                 <line className="grid" x1={L.left} x2={L.right} y1={t.y} y2={t.y} />
                 <text className="tick" x={L.left - 8} y={t.y + 4} textAnchor="end">
-                  {fmtTick(t.v)}
+                  {fmtTick(t.v, L.priceStep)}
                 </text>
               </g>
             ))}

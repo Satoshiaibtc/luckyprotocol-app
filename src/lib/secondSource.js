@@ -7,9 +7,19 @@
 //
 //   GET https://mempool.space/api/tx/<txid>/outspend/<vout>   → spent must be false
 //   GET https://mempool.space/api/tx/<txid>                    → vout[<vout>].value must equal
-//                                                                the listing's carrier_sats and
+//                                                                the listing's carrier_sats,
 //                                                                vout[<vout>].scriptpubkey must
-//                                                                equal its witnessUtxo script
+//                                                                equal its witnessUtxo script, and
+//                                                                the tx's OP_RETURN, re-parsed,
+//                                                                must credit this vout (§7.2 step 3)
+//
+// The OP_RETURN re-parse is what ties the outpoint to the TOKENS the
+// indexer vouches for (§7.6): value + script alone say nothing about them.
+// A MINE carrier is vout0 and the yield recomputed from the confirming
+// block hash (§3) must equal `amount`; a SEND carrier is either TO_OUT
+// (AMT must equal `amount`) or the CHANGE_OUT residual slot (§2.3 / §4.1,
+// whose balance depends on the inputs — only the slot is checked). Any
+// other vout, opcode, or no LUCKY-20 payload at all is a disagreement.
 //
 // Verdicts: "agree" (proceed), "disagree" (hard stop — the two sources do
 // not describe the same UTXO), "unreachable" (timeout / network error /
@@ -22,12 +32,17 @@
 // credentials, no body. Pure comparison in `compareSecondSource`; the
 // transport in `checkSecondSource` takes an injectable fetch for tests.
 
+import { hex } from "@scure/base";
+import { protocolPayloadOfScripts } from "./psbt.js";
+import { mineYield } from "./yield.js";
+
 export const SECOND_SOURCE_ORIGIN = "https://mempool.space";
 export const SECOND_SOURCE_NAME = "mempool.space";
 export const SECOND_SOURCE_TIMEOUT_MS = 5_000;
 
 const TXID_RE = /^[0-9a-f]{64}$/;
 const HEX_RE = /^[0-9a-f]*$/;
+const TICKER_RE = /^[A-Z0-9]{1,8}$/;
 
 function checkOutpoint(txid, vout) {
   const t = String(txid || "").toLowerCase();
@@ -47,18 +62,40 @@ export function secondSourceUrls(txid, vout, origin = SECOND_SOURCE_ORIGIN) {
 }
 
 /**
+ * The creating tx's LUCKY-20 payload as the indexer would read it (§2,
+ * audit M-3: the lowest-index OP_RETURN whose single push parses), from
+ * the explorer's `vout[].scriptpubkey` hex. Null when there is none.
+ */
+export function payloadOfTxVouts(vouts) {
+  const scripts = [];
+  for (const v of Array.isArray(vouts) ? vouts : []) {
+    const spk = String((v && v.scriptpubkey) || "").toLowerCase();
+    if (!HEX_RE.test(spk) || spk.length % 2 !== 0) {
+      scripts.push(new Uint8Array());
+      continue;
+    }
+    scripts.push(hex.decode(spk));
+  }
+  return protocolPayloadOfScripts(scripts).payload;
+}
+
+/**
  * Compare what the listing claims with what the second source answered.
- * `listing` = { txid, vout, carrierSats, scriptHex } (from the order id and
- * the PSBT's witnessUtxo); `outspend` / `tx` are the parsed JSON bodies.
- * Returns `{ verdict: "agree" | "disagree", reasons: string[] }`.
+ * `listing` = { txid, vout, carrierSats, scriptHex, ticker, amount } (from
+ * the order id, the PSBT's witnessUtxo and the OrderView); `outspend` /
+ * `tx` are the parsed JSON bodies. Returns `{ verdict: "agree" |
+ * "disagree", reasons: string[] }`.
  */
 export function compareSecondSource(listing, { outspend, tx }) {
   const { txid, vout } = checkOutpoint(listing.txid, listing.vout);
   const carrier = Number(listing.carrierSats);
   const script = String(listing.scriptHex || "").toLowerCase();
+  const ticker = String(listing.ticker || "");
+  const amount = Number(listing.amount);
   const reasons = [];
   if (!Number.isInteger(carrier) || carrier <= 0) reasons.push("listing has no carrier value to compare");
   if (!HEX_RE.test(script) || script.length === 0 || script.length % 2 !== 0) reasons.push("listing has no witnessUtxo script to compare");
+  if (!TICKER_RE.test(ticker) || !Number.isInteger(amount) || amount < 1) reasons.push("listing has no ticker / amount to check the OP_RETURN against");
 
   if (!outspend || typeof outspend !== "object") {
     reasons.push(`${SECOND_SOURCE_NAME} returned no outspend record for ${txid.slice(0, 8)}…:${vout}`);
@@ -80,8 +117,34 @@ export function compareSecondSource(listing, { outspend, tx }) {
       const spk = String(out.scriptpubkey || "").toLowerCase();
       if (spk !== script) reasons.push(`${SECOND_SOURCE_NAME} shows a different scriptPubKey on vout ${vout} than the listing's witnessUtxo`);
     }
+    // §7.2 step 3 / §7.6: the OP_RETURN must say this vout carries the
+    // tokens — the only thing here that speaks about tokens at all.
+    if (TICKER_RE.test(ticker) && Number.isInteger(amount) && amount >= 1) {
+      for (const r of opReturnReasons({ vout, ticker, amount }, tx)) reasons.push(r);
+    }
   }
   return { verdict: reasons.length ? "disagree" : "agree", reasons };
+}
+
+function opReturnReasons({ vout, ticker, amount }, tx) {
+  const p = payloadOfTxVouts(tx.vout);
+  if (!p) return [`${SECOND_SOURCE_NAME} shows no LUCKY-20 OP_RETURN on the creating tx — vout ${vout} is not a MINE or SEND token output`];
+  if (p.ticker !== ticker) return [`${SECOND_SOURCE_NAME} shows an OP_RETURN for ${p.ticker}, the listing says ${ticker}`];
+  if (p.op === "MINE") {
+    const out = [];
+    if (vout !== 0) out.push(`a MINE credits vout 0, the listing is vout ${vout}`);
+    const hash = tx.status && typeof tx.status.block_hash === "string" ? tx.status.block_hash : null;
+    const y = hash ? mineYield(hash) : null;
+    if (y === null) out.push(`${SECOND_SOURCE_NAME} does not show the MINE as confirmed — its yield cannot be recomputed`);
+    else if (y !== amount) out.push(`block hash …${hash.slice(-1)} yields ${y} ${ticker} (§3), the listing says ${amount}`);
+    return out;
+  }
+  if (p.op === "SEND") {
+    if (vout === p.toOutIdx) return p.amount === amount ? [] : [`the SEND's OP_RETURN moves ${p.amount} ${ticker} to vout ${vout}, the listing says ${amount}`];
+    if (vout === p.changeOutIdx) return []; // the residual slot (§2.3 / §4.1): its balance depends on the inputs
+    return [`the SEND's OP_RETURN routes ${ticker} to vout ${p.toOutIdx} and the residual to vout ${p.changeOutIdx} — vout ${vout} carries no tokens`];
+  }
+  return [`the creating tx is a ${p.op}, which credits no token output`];
 }
 
 async function readJson(res, what) {
@@ -102,7 +165,9 @@ async function readJson(res, what) {
  *
  * `fetchImpl` defaults to the global fetch; `timeoutMs` bounds BOTH requests
  * together (one AbortController). A 404 on either request is a
- * disagreement; any other failure is "unreachable".
+ * disagreement — even when the other request failed in transport, since
+ * "no record of this tx" is an answer, not an outage; only when neither
+ * is a 404 does a failure make the verdict "unreachable".
  */
 export async function checkSecondSource(listing, { fetchImpl, timeoutMs = SECOND_SOURCE_TIMEOUT_MS, origin = SECOND_SOURCE_ORIGIN } = {}) {
   const f = fetchImpl || (typeof fetch === "function" ? fetch : null);
@@ -129,26 +194,25 @@ export async function checkSecondSource(listing, { fetchImpl, timeoutMs = SECOND
     return { body: await readJson(res, what) };
   };
 
-  let outspendRes;
-  let txRes;
-  try {
-    [outspendRes, txRes] = await Promise.all([get(urls.outspend, "outspend"), get(urls.tx, "tx")]);
-  } catch (e) {
-    clearTimeout(timer);
-    return { verdict: "unreachable", reasons: [], detail: e.message || String(e), urls };
-  }
+  const [outspendSettled, txSettled] = await Promise.allSettled([get(urls.outspend, "outspend"), get(urls.tx, "tx")]);
   clearTimeout(timer);
+  const outspendRes = outspendSettled.status === "fulfilled" ? outspendSettled.value : null;
+  const txRes = txSettled.status === "fulfilled" ? txSettled.value : null;
 
+  // A 404 is a verdict and wins over the other request's outage.
   const notFound = [];
-  if (outspendRes.notFound) notFound.push(`${SECOND_SOURCE_NAME} has no record of outpoint ${String(listing.txid).slice(0, 8)}…:${listing.vout}`);
-  if (txRes.notFound) notFound.push(`${SECOND_SOURCE_NAME} has no record of transaction ${String(listing.txid).slice(0, 8)}…`);
+  if (outspendRes?.notFound) notFound.push(`${SECOND_SOURCE_NAME} has no record of outpoint ${String(listing.txid).slice(0, 8)}…:${listing.vout}`);
+  if (txRes?.notFound) notFound.push(`${SECOND_SOURCE_NAME} has no record of transaction ${String(listing.txid).slice(0, 8)}…`);
   if (notFound.length) return { verdict: "disagree", reasons: notFound, detail: notFound.join("; "), urls };
+
+  const failed = [outspendSettled, txSettled].find((r) => r.status === "rejected");
+  if (failed) return { verdict: "unreachable", reasons: [], detail: failed.reason?.message || String(failed.reason), urls };
 
   const cmp = compareSecondSource(listing, { outspend: outspendRes.body, tx: txRes.body });
   return {
     verdict: cmp.verdict,
     reasons: cmp.reasons,
-    detail: cmp.verdict === "agree" ? `${SECOND_SOURCE_NAME} agrees: unspent, ${Number(listing.carrierSats).toLocaleString("en-US")} sats, same script` : cmp.reasons.join("; "),
+    detail: cmp.verdict === "agree" ? `${SECOND_SOURCE_NAME} agrees: unspent, ${Number(listing.carrierSats).toLocaleString("en-US")} sats, same script, OP_RETURN credits vout ${listing.vout}` : cmp.reasons.join("; "),
     urls,
   };
 }

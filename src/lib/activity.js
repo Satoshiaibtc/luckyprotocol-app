@@ -56,8 +56,10 @@ const PARTY_KEYS = ["from", "to", "sender", "deployer", "buyer", "seller"];
 
 /**
  * Aggregate raw ledger items into daily rows (ascending). An item lands on
- * the UTC day of its `block_time`; items without one are skipped. Volume
- * counts non-self trades only (§7.5).
+ * the UTC day of its `block_time`; items without one are skipped. A
+ * self-trade is an event but not a trade: `trades`, `volume_sats` and the
+ * trade share of `token_amount` count non-self fills only (§5, §7.5) —
+ * exactly what the indexer's `/activity/daily` does.
  */
 export function aggregateDaily(items, { days = DAILY_DAYS, now } = {}) {
   const nowSec = Number.isFinite(now) ? now : Math.floor(Date.now() / 1000);
@@ -86,8 +88,8 @@ export function aggregateDaily(items, { days = DAILY_DAYS, now } = {}) {
       row.sends += 1;
       if (applied && Number.isFinite(it.amount)) row.token_amount += it.amount;
     } else if (it.kind === "trade") {
-      row.trades += 1;
       if (!it.self_trade) {
+        row.trades += 1;
         if (Number.isFinite(it.price_sats)) row.volume_sats += it.price_sats;
         if (Number.isFinite(it.amount)) row.token_amount += it.amount;
       }
@@ -131,19 +133,25 @@ export function dailyLayout({ rows, metric, width, height, pad = DAILY_PAD }) {
   const x = (i) => pad.left + colW * (i + 0.5);
   const bars = rows.map((r, i) => ({ i, date: r.date, v: values[i], cum: cumulative[i], x: x(i), y: yBar(values[i]), h: pad.top + innerH - yBar(values[i]) }));
   const line = bars.map((b, i) => `${i === 0 ? "M" : "L"}${b.x.toFixed(1)} ${yLine(b.cum).toFixed(1)}`).join(" ");
-  const yTicks = niceCountTicks(max).map((v) => ({ v, y: yBar(v) }));
+  const yTicks = niceCountTicks(max, { integer: metric !== "volume_sats" }).map((v) => ({ v, y: yBar(v) }));
   const labelEvery = rows.length > 16 ? 7 : rows.length > 8 ? 2 : 1;
-  const xTicks = bars.filter((b, i) => i % labelEvery === 0 || i === rows.length - 1).map((b) => ({ x: b.x, label: b.date.slice(5) }));
+  // A periodic label within one label width (~36px of MM-DD) of the last
+  // bar's label would overprint it, so it is skipped in favour of the last.
+  const keepAway = Math.ceil(36 / colW);
+  const xTicks = bars
+    .filter((b, i) => i === rows.length - 1 || (i % labelEvery === 0 && rows.length - 1 - i >= keepAway))
+    .map((b) => ({ i: b.i, x: b.x, label: b.date.slice(5) }));
   return { bars, line, colW, barW, x, yBar, yLine, yTicks, xTicks, total, max, top: pad.top, bottom: pad.top + innerH, left: pad.left, right: pad.left + innerW };
 }
 
-/** 0 … max in ≤ 4 steps of 1-2-5 × 10ⁿ. */
-export function niceCountTicks(max) {
+/** 0 … max in ≤ 4 steps of 1-2-5 × 10ⁿ; `integer` clamps the step to ≥ 1 (counts never get a 0.2 tick). */
+export function niceCountTicks(max, { integer = false } = {}) {
   if (!(max > 0)) return [0];
   const rough = max / 4;
   const mag = Math.pow(10, Math.floor(Math.log10(rough)));
   const norm = rough / mag;
-  const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+  let step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+  if (integer) step = Math.max(1, step);
   const out = [];
   for (let v = 0; v <= max + 1e-9; v += step) out.push(Number(v.toFixed(10)));
   return out;

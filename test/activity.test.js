@@ -60,8 +60,8 @@ const NOW = 1790452492; // 2026-09-26T09:14:52Z
   assert.deepEqual(y, { date: "2026-09-25", events: 4, deploys: 1, mines: 3, sends: 0, trades: 0, active_addresses: 2, token_amount: 600, volume_sats: 0 }, "a deploy's supply and an invalid mine's 0 never count as moved tokens");
   assert.equal(t.events, 4);
   assert.equal(t.sends, 2, "a non-applied SEND is still an event…");
-  assert.equal(t.trades, 2, "…and so is a self-trade…");
-  assert.equal(t.volume_sats, 10_000, "…but never volume (§7.5)");
+  assert.equal(t.trades, 1, "…and a self-trade is an event, not a trade (§5: `trades` excludes self-trades, as the indexer's /activity/daily does)…");
+  assert.equal(t.volume_sats, 10_000, "…and never volume (§7.5)");
   assert.equal(t.active_addresses, 3, "distinct parties across from/to/buyer/seller");
   assert.equal(t.token_amount, 240, "applied send 40 + non-self trade 200; the non-applied send and the self-trade are excluded");
   assert.deepEqual(aggregateDaily([], { now: NOW }), []);
@@ -105,10 +105,19 @@ const NOW = 1790452492; // 2026-09-26T09:14:52Z
   const many = dailyLayout({ rows: fillDays([], 30, NOW), metric: "events", width: 600, height: 240 });
   assert.equal(many.bars.length, 30);
   assert.ok(many.bars.every((b) => b.h === 0), "all-zero month draws flat, no NaN");
-  assert.equal(many.xTicks.length, 6, "30 days: weekly labels + the last day");
+  assert.equal(many.xTicks.length, 5, "30 days: weekly labels + the last day — day 28's label, one column from day 29's, is skipped");
+  assert.deepEqual(many.xTicks.map((t) => t.i), [0, 7, 14, 21, 29]);
+  const narrow = dailyLayout({ rows: fillDays([], 30, NOW), metric: "events", width: 358, height: 220 });
+  assert.deepEqual(narrow.xTicks.map((t) => t.i), [0, 7, 14, 21, 29], "phone width: still no label within a label width of the last");
+  assert.ok(narrow.xTicks.every((t, k) => k === 0 || t.x - narrow.xTicks[k - 1].x >= 36), "labels ≥ 36px apart");
   assert.deepEqual(niceCountTicks(0), [0]);
   assert.deepEqual(niceCountTicks(23), [0, 5, 10, 15, 20]);
   assert.deepEqual(niceCountTicks(1_234_567), [0, 500000, 1000000], "1-2-5 × 10ⁿ, at most ~4 steps");
+  assert.deepEqual(niceCountTicks(1, { integer: true }), [0, 1], "a count axis never shows 0.2");
+  assert.deepEqual(niceCountTicks(2, { integer: true }), [0, 1, 2]);
+  assert.deepEqual(niceCountTicks(1), [0, 0.2, 0.4, 0.6, 0.8, 1], "sats keep fractional steps");
+  const one = dailyLayout({ rows: fillDays([{ date: "2026-09-26", events: 1, deploys: 0, mines: 1, sends: 0, trades: 0, active_addresses: 1, token_amount: 0, volume_sats: 0 }], 3, NOW), metric: "events", width: 600, height: 240 });
+  assert.deepEqual(one.yTicks.map((t) => t.v), [0, 1], "events / sends / addresses are integers");
   console.log("activity chart: bars on the metric axis, cumulative line on its own axis, weekly labels at 30 days");
 }
 

@@ -45,6 +45,7 @@ const CONFIRM_AFTER_MS = 20_000;
 const LATENCY_MS = 120;
 const LOAD_TS = Math.floor(Date.now() / 1000);
 const ORDER_TTL_SEC = 14 * 86400;      // §7.4: an open order expires 14 days after updated_at
+const MAX_ASK_BAND_MULTIPLE = 100;     // §7.4: a new ask may be at most 100× the ticker's best open ask
 const USD_PER_BTC = 67_250;            // /price — a fixed number so USD sub-labels can be previewed
 const INCREMENTAL_RELAY_FEE = 0.1;     // /fees.incrementalrelayfee — Bitcoin Core's default (sat/vB)
 const DAY_BLOCKS = 144;
@@ -856,19 +857,29 @@ function activityItems() {
   for (const x of w.trades) {
     items.push(item({ kind: "trade", txid: x.txid, block_height: x.block_height, block_time: x.block_time, ticker: x.ticker, amount: x.amount, buyer: x.buyer, seller: x.seller, price_sats: x.price_sats, unit_price: x.unit_price, self_trade: !!x.self_trade }));
     if (!w.simSends.some((s) => s.txid === x.txid)) {
-      items.push(item({ kind: "send", txid: x.txid, block_height: x.block_height, block_time: x.block_time, ticker: x.ticker, amount: x.amount, from: x.seller, sender: x.seller, to: x.buyer }));
+      // The fill's SEND row as the live indexer attributes it: `from` is the
+      // largest input contributor — the buyer, who funds price + fees (the
+      // seller's input is the 546-sat carrier) — and `to` is vout[TO_OUT],
+      // also the buyer.
+      items.push(item({ kind: "send", txid: x.txid, block_height: x.block_height, block_time: x.block_time, ticker: x.ticker, amount: x.amount, from: x.buyer, sender: x.buyer, to: x.buyer }));
     }
   }
-  return items.sort((a, b) => b.block_height - a.block_height || b.block_time - a.block_time || a.txid.localeCompare(b.txid) || a.kind.localeCompare(b.kind));
+  // Newest first; inside one block the live feed serves the reverse of its
+  // apply order (deploy < mine < send < trade), so a fill's trade row sits
+  // above its send row.
+  const rank = { deploy: 0, mine: 1, send: 2, trade: 3 };
+  return items.sort((a, b) => b.block_height - a.block_height || b.block_time - a.block_time || a.txid.localeCompare(b.txid) || (rank[b.kind] ?? 0) - (rank[a.kind] ?? 0));
 }
 
 /**
  * Mock second source (audit M-12) for VITE_MOCK=1: answers from the mock's
  * own UTXO set with the same verdict shape as src/lib/secondSource.js —
- * "agree" when the outpoint is known, unspent, and its sats + script match
- * the listing; "disagree" otherwise. Nothing leaves the browser.
+ * "agree" when the outpoint is known, unspent, its sats + script match the
+ * listing, and (the OP_RETURN re-parse of §7.2 step 3, which here is the
+ * mock's own routing record) the outpoint carries exactly `{ ticker:
+ * amount }`; "disagree" otherwise. Nothing leaves the browser.
  */
-export async function mockCheckSecondSource({ txid, vout, carrierSats, scriptHex }) {
+export async function mockCheckSecondSource({ txid, vout, carrierSats, scriptHex, ticker, amount }) {
   await sleep(LATENCY_MS * 2);
   const w = world();
   const k = `${String(txid).toLowerCase()}:${Number(vout)}`;
@@ -878,6 +889,10 @@ export async function mockCheckSecondSource({ txid, vout, carrierSats, scriptHex
   else {
     if (w.spent.has(k)) reasons.push("mock second source says the outpoint is already spent");
     if (u.sats !== Number(carrierSats)) reasons.push(`mock second source shows ${u.sats} sats on vout ${vout}, the listing says ${carrierSats}`);
+    const bal = Object.entries(u.balances || {});
+    if (bal.length !== 1 || bal[0][0] !== ticker || bal[0][1] !== Number(amount)) {
+      reasons.push(`mock second source routes ${bal.length ? JSON.stringify(u.balances) : "no tokens"} to vout ${vout}, the listing says { ${ticker}: ${amount} }`);
+    }
     let script = null;
     try {
       script = hex.encode(decodeAddress(u.address).script);
@@ -889,7 +904,7 @@ export async function mockCheckSecondSource({ txid, vout, carrierSats, scriptHex
   return {
     verdict: reasons.length ? "disagree" : "agree",
     reasons,
-    detail: reasons.length ? reasons.join("; ") : `mock second source agrees: unspent, ${Number(carrierSats).toLocaleString("en-US")} sats, same script (VITE_MOCK=1 — mempool.space is not consulted)`,
+    detail: reasons.length ? reasons.join("; ") : `mock second source agrees: unspent, ${Number(carrierSats).toLocaleString("en-US")} sats, same script, ${Number(amount).toLocaleString("en-US")} ${ticker} on vout ${vout} (VITE_MOCK=1 — mempool.space is not consulted)`,
     urls: null,
   };
 }
@@ -1055,9 +1070,11 @@ export async function mockGet(path) {
     return { fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
   }
   if ((m = p.match(/^\/orders\/by-address\/([^/]+)$/))) {
+    // Paged like the live indexer (spec §5: limit default 50, max 200).
     const addr = decodeURIComponent(m[1]);
-    const rows = [...w.orders.values()].filter((o) => o.seller === addr).sort((a, b) => b.created_at - a.created_at).map(publicOrder);
-    return { address: addr, orders: rows };
+    const rows = [...w.orders.values()].filter((o) => o.seller === addr).sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id)).map(publicOrder);
+    const pg = page(rows, q, 50);
+    return { address: addr, orders: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset };
   }
   if ((m = p.match(/^\/orders\/([^/]+)$/))) {
     const o = w.orders.get(decodeURIComponent(m[1]).toLowerCase());
@@ -1080,7 +1097,8 @@ export async function mockGet(path) {
   if ((m = p.match(/^\/trades\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);
     const rows = w.trades.filter((t) => t.seller === addr || t.buyer === addr).sort((a, b) => b.block_height - a.block_height);
-    return { address: addr, trades: rows };
+    const pg = page(rows, q, 50);
+    return { address: addr, trades: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset };
   }
   if (p === "/trades") {
     const ticker = q.get("ticker");
@@ -1154,6 +1172,16 @@ export async function mockPostJson(path, body) {
   }
   const perAddress = [...w.orders.values()].filter((o) => o.seller === u.address && o.status === "open" && o.id !== outpoint).length;
   if (perAddress >= 50) throw bad("per-address open-order cap (50) reached");
+  // §7.4 price band (audit M-11), the live indexer's exact rule: at most
+  // 100× the ticker's best OTHER open ask; no band on an otherwise empty book.
+  const others = [...w.orders.values()].filter((o) => o.ticker === ticker && o.status === "open" && o.id !== outpoint);
+  if (others.length) {
+    const best = Math.min(...others.map((o) => o.unit_price));
+    const ceiling = best * MAX_ASK_BAND_MULTIPLE;
+    if (order.unit_price > ceiling) {
+      throw bad(`unit price ${order.unit_price.toFixed(4)} sats/token is outside the price band: at most ${MAX_ASK_BAND_MULTIPLE}× the current best ${ticker} ask (${best.toFixed(4)} sats/token → ceiling ${ceiling.toFixed(4)})`);
+    }
+  }
   const existing = w.orders.get(outpoint);
   // §7.3: an outpoint the book shows as `filling` has a spend in the
   // mempool — a buyer must not be handed it again (and it is exempt from
@@ -1163,7 +1191,8 @@ export async function mockPostJson(path, body) {
   const row = {
     ...order,
     status: "open",
-    created_at: existing ? existing.created_at : ts,
+    // §7.4: a same-price re-POST (Renew) keeps its place in the queue; a re-price is a new ask.
+    created_at: existing && existing.status === "open" && existing.price_sats === order.price_sats ? existing.created_at : ts,
     updated_at: ts,
     expires_at: ts + ORDER_TTL_SEC,
     spent_txid: null,

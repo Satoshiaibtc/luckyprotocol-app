@@ -44,6 +44,8 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   const leak = orderRow({ ...base, status: "open", pending_feerate: 0.1, pending_fee_sats: 100 });
   assert.equal(leak.pending_feerate, null, "pending_* on a non-filling order are dropped");
   assert.equal(orderRow({ ...base, status: "expired" }), null, "unknown status → row dropped");
+  assert.equal(orderRow({ ...base, unit_price: 1 }).unit_price, 87_121 / 1921, "unit_price is price / amount — a wire value that disagreed would mis-sort the book");
+  assert.equal(orderRow({ ...base, unit_price: undefined }).unit_price, 87_121 / 1921);
   console.log("views OrderView: filling + pending_* (bounded, only while filling) + expires_at; null is null");
 }
 
@@ -54,7 +56,18 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.equal(tradeRow({ ...t, self_trade: true }).self_trade, true);
   assert.equal(tradeRow({ ...t, self_trade: "yes" }).self_trade, false, "only an explicit true");
   assert.equal(tradeRow({ ...t, self_trade: 1 }).self_trade, false);
-  console.log("views TradeView: self_trade kept, strictly boolean");
+  // §7.5: `buyer` is null when vout[TO_OUT] has no address form — the fill still counts.
+  const noBuyer = tradeRow({ ...t, buyer: null });
+  assert.ok(noBuyer, "a fill with an address-less token slot is kept");
+  assert.equal(noBuyer.buyer, null);
+  assert.equal(tradeRow({ ...t, buyer: "not-an-address" }).buyer, null, "a malformed buyer is null, not a dropped row");
+  assert.equal(tradeRow({ ...t, seller: null }), null, "the seller (an order's address) is required");
+  assert.equal(tradeRow({ ...t, block_time: 0 }).block_time, null, "block_time 0 = unknown, like every other view");
+  assert.equal(tradeRow({ ...t, unit_price: 1 }).unit_price, 50, "unit_price is price / amount — never the wire value");
+  assert.equal(tradeRow({ ...t, unit_price: undefined }).unit_price, 50);
+  assert.equal(tradeRow({ ...t, price_sats: 0 }), null, "a fill pays ≥ the ask ≥ 546 sats: price 0 is not a trade");
+  assert.equal(tradeRow({ ...t, price_sats: 545 }), null);
+  console.log("views TradeView: self_trade kept, strictly boolean; buyer may be null; unit_price derived; sub-546 dropped");
 }
 
 // ---- token rows' market_24h -------------------------------------------------------------------

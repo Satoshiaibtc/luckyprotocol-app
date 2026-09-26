@@ -97,7 +97,8 @@ export function TradesTable({ q, self, usd = null, showTicker = false, empty = "
               {usd ? <small className="usd">{fmtUsd(t.price_sats, usd)}</small> : null}
             </span>
             <span>
-              <AddrLink address={t.buyer} self={self} head={4} tail={4} />
+              {/* null when vout[TO_OUT] has no address form (§7.5) */}
+              {t.buyer ? <AddrLink address={t.buyer} self={self} head={4} tail={4} /> : <span className="muted" title="the token output pays a script without an address form">—</span>}
             </span>
             <span className="right">
               <TxLink txid={t.txid} />
@@ -115,7 +116,7 @@ const KIND_LABEL = { deploy: "Deploy", mine: "Mine", send: "Send", trade: "Trade
  * The network ledger (GET /activity): date · block · kind · who · amount ·
  * tx. The "who" cell is from → to for a send, buyer ← seller for a trade,
  * the miner / deployer otherwise. `usd` adds a USD line to trade amounts.
- * `compact` (phones) drops the block column.
+ * `compact` (phones) drops the block column and shortens the date to MM-DD.
  */
 export function ActivityTable({ q, self, usd = null, compact = false, empty = "Nothing indexed yet." }) {
   return (
@@ -137,8 +138,8 @@ export function ActivityTable({ q, self, usd = null, compact = false, empty = "N
           const mine = self && [p.left, p.right].includes(self);
           return (
             <div className={`tr${mine ? " me" : ""}${it.applied === false ? " not-applied" : ""}`} key={`${it.kind}:${it.txid}`} role="row">
-              <span className="num" title={it.block_time ? fmtAgo(it.block_time) : "block time unknown"}>
-                {fmtDateUtc(it.block_time)}
+              <span className="num" title={it.block_time ? `${fmtDateUtc(it.block_time)} · ${fmtAgo(it.block_time)}` : "block time unknown"}>
+                {compact ? fmtDateUtc(it.block_time).replace(/^\d{4}-/, "") : fmtDateUtc(it.block_time)}
               </span>
               {!compact && <span className="num">{fmtInt(it.block_height)}</span>}
               <span>
@@ -332,10 +333,10 @@ const LIVE = new Set(["open", "filling"]);
 
 /**
  * A seller's listings, every status. Live rows (`open`, `filling`) show
- * their expiry (§7.4 TTL) and take Renew (re-POST the same PSBT) / Cancel
- * (a SEND-to-self; for a `filling` row the M-9 replacement rule applies —
- * the row says which fill is pending and at what rate). Closed rows link
- * the spending tx.
+ * their expiry (§7.4 TTL) and take Renew (re-POST the same PSBT) /
+ * Withdraw (the spec's cancel: a SEND-to-self; for a `filling` row the M-9
+ * replacement rule applies — the row says which fill is pending and at
+ * what rate). Closed rows link the spending tx.
  */
 export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = false, empty = "No listings from this address." }) {
   const actions = !!(onCancel || onRenew);
@@ -390,8 +391,8 @@ export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = f
                         </button>
                       )}
                       {onCancel && (
-                        <button className="btn btn-sm btn-danger" type="button" onClick={() => onCancel(o)} disabled={busy} title="Move the listed tokens to a fresh UTXO of yours (a SEND to yourself) — the only real cancel">
-                          Cancel
+                        <button className="btn btn-sm btn-danger" type="button" onClick={() => onCancel(o)} disabled={busy} title="Move the listed tokens to a fresh UTXO of yours (a SEND to yourself) — the only thing that voids the signed listing">
+                          Withdraw
                         </button>
                       )}
                     </>

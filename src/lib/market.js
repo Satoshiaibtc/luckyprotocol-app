@@ -25,29 +25,49 @@ export const INTERVALS = [
 
 // ---- axis ticks -------------------------------------------------------------------------
 
+/** The 1-2-5 × 10ⁿ step that splits [min, max] into about `count` parts; null for a degenerate range. */
+export function niceStep(min, max, count = 4) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min)) return null;
+  const rough = (max - min) / Math.max(1, count);
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  const norm = rough / mag;
+  return (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+}
+
 /** 1-2-5 ticks inside [min, max]. `count` is a target, not a promise. */
 export function niceTicks(min, max, count = 4) {
   if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
   if (!(max > min)) return [min];
-  const span = max - min;
-  const rough = span / Math.max(1, count);
-  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
-  const norm = rough / mag;
-  const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+  const step = niceStep(min, max, count);
   const start = Math.ceil(min / step) * step;
   const out = [];
   for (let v = start; v <= max + step * 1e-9; v += step) out.push(Number(v.toFixed(10)));
   return out;
 }
 
-/** Axis label for a sats-per-token value: fewer decimals the larger it is. */
-export function fmtTick(v) {
+/** Decimals that make every multiple of `step` distinct (0.0002 → 4, 0.5 → 1, 2 → 0); capped at 8. */
+export function stepDecimals(step) {
+  if (!Number.isFinite(step) || step <= 0) return null;
+  return Math.min(8, Math.max(0, Math.ceil(-Math.log10(step) - 1e-9)));
+}
+
+/**
+ * Axis label for a sats-per-token value. With the axis `step` every tick
+ * shares the decimal count the step needs (sub-sat prices — the normal
+ * regime for a 21,000,000-supply token — otherwise collapse to the same
+ * label). Without a step the precision follows the magnitude: fewer
+ * decimals the larger it is, and below 1 sat three significant digits.
+ */
+export function fmtTick(v, step) {
   if (!Number.isFinite(v)) return "";
+  const d = stepDecimals(step);
+  if (d !== null) return v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
   if (v >= 1000) return Math.round(v).toLocaleString("en-US");
   if (v >= 100) return v.toFixed(0);
   if (v >= 10) return v.toFixed(1);
   if (v >= 1) return v.toFixed(2);
-  return v.toFixed(3);
+  if (v <= 0) return v.toFixed(3);
+  return v.toFixed(Math.min(8, Math.max(3, 2 - Math.floor(Math.log10(v)))));
 }
 
 /** Indices of the candles that get a time label: evenly spaced, first and last included. */
@@ -81,7 +101,7 @@ export const CANDLE_PAD = { top: 12, right: 14, bottom: 22, left: 56 };
  * by index, not by time) inside a `width` × `height` box whose lower
  * `volumeHeight` px hold the volume bars. Returns null with no candles.
  *
- *   { colW, bodyW, x(i), yPrice(v), yVol(v), yMin, yMax, vMax,
+ *   { colW, bodyW, x(i), yPrice(v), yVol(v), yMin, yMax, vMax, priceStep,
  *     priceTicks: [{ v, y }], timeTicks: [{ i, x, label }],
  *     bars: [{ i, x, yO, yC, yH, yL, yV, up, c }], last: { v, y },
  *     priceTop, priceBottom, volTop, volBottom }
@@ -139,6 +159,7 @@ export function candleLayout({ candles, width, height, volumeHeight = 56, pad = 
     yMin,
     yMax,
     vMax,
+    priceStep: niceStep(yMin, yMax, 4),
     priceTicks: niceTicks(yMin, yMax, 4).map((v) => ({ v, y: yPrice(v) })),
     timeTicks: timeTicks(rows.length, Math.max(2, Math.floor(innerW / 96))).map((i) => ({ i, x: x(i), label: fmtTimeTick(rows[i].t, interval) })),
     bars,

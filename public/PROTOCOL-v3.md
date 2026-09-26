@@ -502,10 +502,13 @@ rejected by the mempool as a double-spend and that buyer loses nothing.
    — **and the outpoint is re-checked against a second source** the
    indexer does not control (the creating tx from the wallet's own node
    or an explorer: its output script and value must match `witnessUtxo`,
-   and its `OP_RETURN` re-parsed — a MINE carrier's yield recomputed from
-   the confirming block hash (§3) must equal `amount`, a SEND carrier's
-   `TO_OUT` must be this vout). The client fails closed when the two
-   disagree (§7.6);
+   and its `OP_RETURN` re-parsed — a MINE carrier is `vout0` and its
+   yield recomputed from the confirming block hash (§3) must equal
+   `amount`; a SEND carrier is either its `TO_OUT` (then `AMT` must equal
+   `amount`) or its `CHANGE_OUT` residual slot (§2.3 / §4.1 — the amount
+   on a residual slot depends on the inputs, so only the slot is checked);
+   any other vout, another opcode, or no LUCKY-20 payload at all is a
+   disagreement). The client fails closed when the two disagree (§7.6);
 4. `output0.value == price_sats` and `output0.script == input0.script`;
 5. `witnessUtxo.amount == carrier_sats` reported by the indexer.
 
@@ -521,10 +524,18 @@ so. The indexer records whatever actually confirms (§7.5).
 **`filling` — a spend is in the mempool (audit M-9).** On every poll
 tick the indexer asks the node which live listings' outpoints are spent
 by a mempool tx (`gettxspendingprevout`, batched) and, for each such tx,
-its fee and size (`getmempoolentry`). The order then shows
-`status: "filling"` with `pending_spend_txid`, `pending_fee_sats`,
+its fees and size (`getmempoolentry`, re-read every tick). The order then
+shows `status: "filling"` with `pending_spend_txid`, `pending_fee_sats`,
 `pending_vsize` and `pending_feerate` (sat/vB, two decimals) — whether
-the pending tx is a fill or the seller's own cancel. A `filling` order:
+the pending tx is a fill or the seller's own cancel. `pending_fee_sats`
+is the **descendant-package fee** (`getmempoolentry.fees.descendant`:
+the pending tx's fee plus every in-mempool descendant of it — a child
+spending the fill's BTC change, or a pinning attacker's children), because
+BIP125 rule 3 makes a replacement pay for everything it evicts, not only
+the conflicting tx; `pending_feerate` is the pending tx's OWN feerate
+(`fees.base / vsize`, what rule 6 compares). A child attached later moves
+`pending_fee_sats` without changing `pending_spend_txid`. A `filling`
+order:
 
 - is NOT `open`: `GET /orders?status=open`, `open_orders`,
   `floor_unit_price` and `listed_amount` exclude it, and `POST /orders`
@@ -554,8 +565,9 @@ replacement of the pending tx and is only relayed when it pays
 - a feerate ≥ `pending_feerate + incrementalrelayfee` (sat/vB, from
   `/fees`), and
 - an absolute fee ≥ `pending_fee_sats + cancel_vsize × incrementalrelayfee`
-  sats (BIP125 rule 3/4 — the replacement must pay for the bandwidth of
-  what it evicts),
+  sats (BIP125 rule 3/4 — the replacement must pay the fees of everything
+  it evicts, the pending tx AND its descendants, plus the bandwidth of the
+  replacement itself),
 
 so the reference client sizes a cancel at
 `max(halfHourFee × cancel_vsize, pending_fee_sats + cancel_vsize ×
@@ -603,7 +615,11 @@ the book already shows as `filling`, §7.3):
 - **TTL**: an open order expires **14 days after `updated_at`** and is
   dropped from the book (`expires_at` in `OrderView`). Re-POSTing the same
   PSBT refreshes it for free — it replaces the entry and counts against no
-  cap. The UI should re-POST open listings it still wants shown. A
+  cap; at the **same `price_sats`** it keeps its `created_at`, i.e. its
+  place among equal-priced asks (the book is ordered `unit_price` asc,
+  `created_at` asc), while a re-price is a new ask (`created_at` = now)
+  that queues behind the others at that price. The UI should re-POST open
+  listings it still wants shown. A
   `filling` order is exempt while its spend is pending (§7.3); it expires
   on the next tick after reverting to `open`.
 - **Global cap 10,000** orders (any status): when full, the oldest closed
@@ -700,8 +716,8 @@ outpoint does. That is why the reference client re-checks the outpoint
 against a second source before signing (§7.2 step 3: the creating tx
 from the wallet or another node / explorer, its output script and value,
 and — for a MINE carrier — the yield recomputed from the confirming
-block hash; for a SEND carrier, `TO_OUT`), and fails closed when the
-sources disagree. Loss from such an attack is bounded by the fills made
+block hash; for a SEND carrier, that the vout is its `TO_OUT` or
+`CHANGE_OUT`), and fails closed when the sources disagree. Loss from such an attack is bounded by the fills made
 while it lasts; every single-indexer OP_RETURN meta-protocol shares this
 property, which is also why this indexer is open source and meant to be
 run by more than one party.

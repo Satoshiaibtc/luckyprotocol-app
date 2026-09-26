@@ -12,11 +12,14 @@ import {
   fmtTick,
   fmtTimeTick,
   nearestCandle,
+  niceStep,
   niceTicks,
   orderSelectable,
   sortAsks,
+  stepDecimals,
   timeTicks,
 } from "../src/lib/market.js";
+import { fmtUnit } from "../src/lib/format.js";
 import { MAX_FEE_RATE_SAT_VB } from "../src/lib/psbt.js";
 import { DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "../src/lib/payloads.js";
 
@@ -35,8 +38,25 @@ const T = "ab".repeat(32);
   assert.equal(fmtTick(312.4), "312");
   assert.equal(fmtTick(48.56), "48.6");
   assert.equal(fmtTick(3.008), "3.01");
-  assert.equal(fmtTick(0.0123), "0.012");
+  assert.equal(fmtTick(0.0123), "0.0123", "below 1 sat: three significant digits");
+  assert.equal(fmtTick(0.00546), "0.00546");
   assert.equal(fmtTick(NaN), "");
+  // Sub-sat candles (the normal regime for a 21,000,000-supply token): every
+  // tick label is distinct because the step, not the magnitude, sets the decimals.
+  assert.equal(niceStep(0.0052, 0.0060, 4), 0.0002);
+  assert.equal(stepDecimals(0.0002), 4);
+  assert.equal(stepDecimals(0.5), 1);
+  assert.equal(stepDecimals(2), 0);
+  assert.equal(stepDecimals(0.001), 3, "an exact power of ten");
+  assert.equal(stepDecimals(null), null);
+  const sub = candleLayout({ candles: [{ t: 1, o: 0.00546, h: 0.006, l: 0.0052, c: 0.0056, v_sats: 1, v_amount: 1, n: 1 }, { t: 2, o: 0.0056, h: 0.0058, l: 0.0055, c: 0.00546, v_sats: 1, v_amount: 1, n: 1 }], width: 390, height: 300 });
+  const labels = sub.priceTicks.map((t) => fmtTick(t.v, sub.priceStep));
+  assert.ok(labels.length >= 4, `several ticks: ${labels}`);
+  assert.equal(new Set(labels).size, labels.length, `ticks pairwise distinct: ${labels}`);
+  assert.ok(labels.every((l) => /^0\.\d{4}$/.test(l)), `same decimal count on every tick: ${labels}`);
+  assert.deepEqual(niceTicks(0, 100, 4).map((v) => fmtTick(v, 20)), ["0", "20", "40", "60", "80", "100"], "an integer step prints no decimals");
+  assert.deepEqual([0.00546, 0.0055, 0.0056].map(fmtUnit), ["0.00546", "0.00550", "0.00560"], "O/H/L/C readouts stay distinct");
+  assert.deepEqual([0.5, 0.1234, 45.35, 312.4, 1234.5].map(fmtUnit), ["0.5000", "0.1234", "45.35", "312.4", "1,235"], "≥ 0.01 sat unchanged");
   assert.deepEqual(timeTicks(0), []);
   assert.deepEqual(timeTicks(1), [0]);
   assert.deepEqual(timeTicks(2, 6), [0, 1]);

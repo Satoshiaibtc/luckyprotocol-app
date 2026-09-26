@@ -4,11 +4,12 @@ import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { useTxStatus } from "../hooks/useTxStatus.js";
+import { useModalFocus } from "../hooks/useModalFocus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { buildFillPsbt, finalizeFill, parseListing, verifyListing } from "../lib/swap.js";
 import { expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
-import { fillQuote } from "../lib/market.js";
+import { fillQuote, fmtChangePct } from "../lib/market.js";
 import { SECOND_SOURCE_NAME, checkSecondSource } from "../lib/secondSource.js";
 import { mockCheckSecondSource } from "../lib/mock.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
@@ -195,6 +196,12 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
   const [full, setFull] = useState(null);
   const [verifyError, setVerifyError] = useState(null);
   const runRef = useRef(0);
+  const sheetRef = useRef(null);
+  const busy = BUSY.has(flow.phase);
+  // Dialog semantics: focus moves in, Tab cycles inside, Esc closes (only
+  // while nothing is in flight — a busy sheet can be hidden from its own
+  // button and re-shown from the bar), body scroll locked, focus restored.
+  useModalFocus(sheetRef, true, busy ? null : onClose);
 
   const status = useTxStatus(flow.phase === "pending" || flow.phase === "confirmed" ? flow.txid : null, {
     onConfirmed: () => {
@@ -231,9 +238,27 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
       }
       const v = verifyListing({ psbtHex: o.psbt, order: o });
       for (const c of v.checks) apply(c.id, c.ok, c.detail);
+      // Every number this sheet shows comes from the row it was opened for
+      // (`order`), while the PSBT that would be signed is the one just
+      // fetched (`o`). A seller can re-POST the same outpoint at another
+      // price between the book's poll and this read — that must never be
+      // signed at a total the sheet did not display, so it fails check 3.
+      const drift = [];
+      if (o.price_sats !== order.price_sats) drift.push(`ask ${fmtSats(order.price_sats)} → ${fmtSats(o.price_sats)}`);
+      if (o.amount !== order.amount) drift.push(`amount ${fmtInt(order.amount)} → ${fmtInt(o.amount)}`);
+      if (o.ticker !== order.ticker) drift.push(`ticker ${order.ticker} → ${o.ticker}`);
+      if (o.seller !== order.seller) drift.push("seller differs");
+      if (o.carrier_sats !== order.carrier_sats) drift.push(`carrier ${fmtInt(order.carrier_sats)} → ${fmtInt(o.carrier_sats)} sats`);
       // Check 3: live reads.
-      let liveOk = o.status === "open";
-      let liveDetail = liveOk ? "order open" : o.status === "filling" ? "a fill of this listing is already in the mempool" : `order is ${o.status}`;
+      let liveOk = o.status === "open" && drift.length === 0;
+      let liveDetail = drift.length
+        ? `the seller re-published this listing since you selected it (${drift.join(", ")}) — close and pick it again`
+        : liveOk
+          ? "order open"
+          : o.status === "filling"
+            ? "a fill of this listing is already in the mempool"
+            : `order is ${o.status}`;
+      if (drift.length) setVerifyError("This listing changed since you selected it. Close the sheet and select it again to see the new total.");
       if (liveOk) {
         try {
           const utxos = await indexer.tokenUtxos(o.seller);
@@ -262,7 +287,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
       // M-12: a second, independent source must describe the same UTXO.
       const L = parseListing(o.psbt);
       const [txid, vout] = o.id.split(":");
-      const listing = { txid, vout: Number(vout), carrierSats: o.carrier_sats, scriptHex: L.input0?.witnessUtxo?.script ? hex.encode(L.input0.witnessUtxo.script) : "" };
+      const listing = { txid, vout: Number(vout), carrierSats: o.carrier_sats, scriptHex: L.input0?.witnessUtxo?.script ? hex.encode(L.input0.witnessUtxo.script) : "", ticker: o.ticker, amount: o.amount };
       setSecond({ state: "checking", detail: `asking ${SECOND_SOURCE_NAME}…`, reasons: [] });
       const r = mock ? await mockCheckSecondSource(listing) : await checkSecondSource(listing);
       if (run !== runRef.current) return;
@@ -271,7 +296,8 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
       if (run !== runRef.current) return;
       setVerifyError(friendlyError(e));
     }
-  }, [order.id, mock]);
+    // `order` is the snapshot the sheet was opened for (stable until re-opened)
+  }, [order, mock]);
 
   useEffect(() => {
     verify();
@@ -286,7 +312,6 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
   const quote = fillQuote({ order, address: w.address || order.seller, feeRateSatVb: fee.satVb });
   const feeSats = flow.feeSats ?? quote?.feeSats ?? null;
   const totalSats = flow.totalSats ?? quote?.totalSats ?? null;
-  const busy = BUSY.has(flow.phase);
   const canConfirm = connected && indexerOk && !!full && allOk && secondOk && !busy && flow.phase !== "confirmed";
 
   const confirm = async () => {
@@ -313,7 +338,9 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
       // Buyer signs ONLY inputs 1..n; input0 keeps the seller's 0x83 signature.
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: addr, autoFinalized: true });
       setFlow((f) => ({ ...f, phase: "broadcasting" }));
-      const raw = finalizeFill(signed);
+      // Broadcast-time guard, same shape as the sign-time one: the extracted
+      // tx is a SEND of exactly this ticker / amount, nothing else.
+      const raw = finalizeFill(signed, { op: "SEND", ticker: full.ticker, amount: full.amount });
       let txid;
       try {
         txid = await wallet.broadcastRawTx(raw);
@@ -334,14 +361,15 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
 
   return (
     <div className="sheet-backdrop" role="presentation" onClick={busy ? undefined : onClose}>
-      <div className="sheet panel" role="dialog" aria-modal="true" aria-labelledby="buy-sheet-title" onClick={(e) => e.stopPropagation()}>
+      <div className="sheet panel" role="dialog" aria-modal="true" aria-labelledby="buy-sheet-title" ref={sheetRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}>
         <div className="panel-head">
           <Led state={verifyError || anyFail || second.state === "disagree" ? "err" : allOk && second.state === "agree" ? "ok" : "busy"} />
           <div className="panel-title" id="buy-sheet-title">
             <Identicon ticker={ticker} size={20} /> Buy {fmtInt(order.amount)} {ticker}
           </div>
           <div className="panel-right">
-            <button className="btn btn-ghost btn-sm" type="button" onClick={onClose} aria-label="Close">
+            {/* the visible text is the accessible name: "Hide" keeps the flow running, "Close" does not */}
+            <button className="btn btn-ghost btn-sm sheet-close" type="button" onClick={onClose} title={busy ? "Hide the sheet — the fill keeps running; Show on the bar brings it back" : undefined}>
               {busy ? "Hide" : "Close"}
             </button>
           </div>
@@ -372,7 +400,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
             </span>
             <span className="check-body">
               <span className="check-label">
-                <Led state={secondLed} /> Second source: {SECOND_SOURCE_NAME} shows the outpoint unspent, {fmtInt(order.carrier_sats)} sats, same script
+                <Led state={secondLed} /> Second source: {SECOND_SOURCE_NAME} shows the outpoint unspent, {fmtInt(order.carrier_sats)} sats, same script, and its OP_RETURN names this vout as a {order.ticker} carrier
               </span>
               {second.detail && <span className="check-detail mono">{second.detail}</span>}
               {second.reasons.length > 1 && (
@@ -447,7 +475,8 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, onClose, onReset, 
         </dl>
         {token?.last_trade && (
           <div className="fineprint">
-            Last trade {fmtUnit(token.last_trade.unit_price)} sats · this ask is {(((order.unit_price - token.last_trade.unit_price) / token.last_trade.unit_price) * 100).toFixed(1)}% {order.unit_price >= token.last_trade.unit_price ? "above" : "below"} it.
+            Last trade {fmtUnit(token.last_trade.unit_price)} sats
+            {token.last_trade.unit_price > 0 ? ` · this ask is ${fmtChangePct(((order.unit_price - token.last_trade.unit_price) / token.last_trade.unit_price) * 100)} against it` : ""}.
             BTC change comes back to you as vout5 when it is at least 546 sats, otherwise it folds into the fee. If another buyer fills first, the network rejects your transaction and your funds stay where they were.
           </div>
         )}

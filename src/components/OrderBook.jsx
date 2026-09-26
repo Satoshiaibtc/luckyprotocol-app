@@ -20,7 +20,7 @@ export default function OrderBook({ ticker, rows, loading, error, address, selec
       {error && asks.length === 0 ? (
         <div className="err">Could not load asks: {String(error.message)}</div>
       ) : asks.length === 0 ? (
-        <div className="empty">{loading ? "Loading asks…" : `No open asks for ${ticker}. Holders can list under List / Split / Cancel below.`}</div>
+        <div className="empty">{loading ? "Loading asks…" : `No open asks for ${ticker}. Holders can list under List / Split / Withdraw below.`}</div>
       ) : (
         asks.map((o) => {
           const sel = orderSelectable(o, address);
@@ -43,7 +43,7 @@ export default function OrderBook({ ticker, rows, loading, error, address, selec
                   pick();
                 }
               }}
-              title={sel.reason === "own" ? "Your own listing — manage it under List / Split / Cancel" : sel.reason === "filling" ? `A fill of this listing is already in the mempool${o.pending_feerate !== null ? ` at ${o.pending_feerate} sat/vB` : ""} — a second one would only be rejected as a double-spend` : undefined}
+              title={sel.reason === "own" ? "Your own listing — manage it under List / Split / Withdraw" : sel.reason === "filling" ? `A fill of this listing is already in the mempool${o.pending_feerate !== null ? ` at ${o.pending_feerate} sat/vB` : ""} — a second one would only be rejected as a double-spend` : undefined}
             >
               <span className="num right">{fmtInt(o.amount)}</span>
               <span className="num right strong">{fmtUnit(o.unit_price)}</span>
