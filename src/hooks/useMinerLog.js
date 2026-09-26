@@ -61,3 +61,15 @@ export function useMinerLog(ticker) {
 
   return { lines, push, clear, meta: storeFor(ticker).meta };
 }
+
+/**
+ * The create page's DEPLOY // LOG buffer. Namespaced under "deploy:" so it
+ * can never share a store with a token page's mine log (tickers are
+ * [A-Z0-9]{1,8}, so the prefix cannot collide). One buffer for the page —
+ * the ticker is a text field there, and a buffer per keystroke would
+ * restart the log (and repeat the wallet / fee / tip lines) on every
+ * character typed; the deploy lines name their ticker instead.
+ */
+export function useDeployLog(scope = "page") {
+  return useMinerLog(`deploy:${scope}`);
+}

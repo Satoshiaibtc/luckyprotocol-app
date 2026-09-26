@@ -6,16 +6,9 @@ import { estimatePayFeeSats } from "../lib/psbt.js";
 import { missingFeeHint } from "../lib/feechoice.js";
 import { PROJECT_FEE_ADDRESS, TICKER_RE } from "../lib/payloads.js";
 
-const LABELS = {
-  compressing: "Preparing image...", securing: "Approve the recovery message in your wallet.",
-  "commit-building": "Preparing avatar payment...", "commit-signing": "Approve the avatar payment in your wallet.",
-  "commit-broadcast": "Sending avatar payment...", "reveal-building": "Preparing token creation...",
-  "reveal-signing": "Approve token creation in your wallet.", "reveal-broadcast": "Sending token creation...",
-  pending: "Token creation sent. Waiting for confirmation.",
-  "reclaim-pending": "Refund sent. Waiting for confirmation.", reclaimed: "Avatar payment reclaimed.",
-  "name-taken": "Another creation claimed this ticker first. Your transaction confirmed, but did not register the token; transaction fees were still paid.",
-};
-
+// Phase narration (preparing / approve in wallet / sent / pending / refund /
+// name taken) is printed by the DEPLOY // LOG terminal on the create page;
+// this block keeps only the standing state and the recovery controls.
 export default function CreateAvatarFields({ creation, ticker, address, feeRate, feeChoice = null, disabled }) {
   const { flow, busy, fileError, hasSaved, pickFile, clearImage, unlock, resume, reclaim, retryBroadcast, discard } = creation;
   const [confirmReclaim, setConfirmReclaim] = useState(false);
@@ -57,7 +50,6 @@ export default function CreateAvatarFields({ creation, ticker, address, feeRate,
       )}
       {preview && <p className="fineprint">The image is public and permanent on Bitcoin. Creation with an avatar uses two transactions. The creation fee is still 5,460 sats, with no additional avatar protocol fee. Keep this browser's recovery record until creation or refund confirms.</p>}
       <div role="status" aria-live="polite">
-        {LABELS[flow.phase] && <p>{LABELS[flow.phase]}</p>}
         {flow.phase === "confirmed" && <p>Created <a href={tokenHref(ticker)}>{ticker}</a>. {flow.avatarApplied ? "Avatar applied." : "The registry did not apply the image; you can replace it from Portfolio."}</p>}
         {flow.phase === "resumable" && <p>An unfinished creation is saved in this browser.</p>}
         {(flow.phase === "locked" || (hasSaved && !rec && flow.phase === "error")) && <p>Unlock the saved creation with the wallet that started it.</p>}

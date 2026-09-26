@@ -6,6 +6,7 @@ import Led from "./hud/Led.jsx";
 import YieldSpectrum from "./YieldSpectrum.jsx";
 
 const PHASES = ["Build", "Sign", "Broadcast", "Confirm"];
+const BUSY_PHASES = ["building", "signing", "broadcasting", "pending"];
 const FOLLOW_SLACK_PX = 24;
 
 /** How many phase LEDs are lit for a mine state (mirrors the retired phase track). */
@@ -77,13 +78,42 @@ function Line({ line, last }) {
  * The MINE // LOG terminal: a cpuminer-style event log that is also where
  * the settlement is revealed (the confirming block's hash with its last
  * character enlarged in tier colour, then the digit and the banner line).
- * Props: { lines, mine, ticker, onClear, litDigit }.
+ * Props: { lines, mine, ticker, onClear, litDigit } plus the generic knobs
+ * the DEPLOY // LOG reuses: `title` ("Mine // log"), `phases` (the four LED
+ * labels), `lit` (LEDs done; default litCount(mine)), `ledStates` (per-LED
+ * override of the default derivation), `busy` (default from mine.phase),
+ * `showDigits` (false hides the 16-digit chip row and renders `footer`
+ * under the terminal instead).
  */
-export default function MinerLog({ lines, mine, ticker, onClear, litDigit = null }) {
+export default function MinerLog({
+  lines,
+  mine,
+  ticker,
+  onClear,
+  litDigit = null,
+  title = "Mine // log",
+  phases = PHASES,
+  lit: litProp,
+  ledStates = null,
+  busy: busyProp,
+  showDigits = true,
+  footer = null,
+}) {
   const bodyRef = useRef(null);
   const [following, setFollowing] = useState(true);
-  const lit = litCount(mine);
-  const busy = ["building", "signing", "broadcasting", "pending"].includes(mine?.phase);
+  const lit = litProp ?? litCount(mine);
+  const busy = busyProp ?? BUSY_PHASES.includes(mine?.phase);
+  const slashAt = title.indexOf("//");
+  const titleNode =
+    slashAt < 0 ? (
+      title
+    ) : (
+      <>
+        {title.slice(0, slashAt)}
+        <span className="slash">//</span>
+        {title.slice(slashAt + 2)}
+      </>
+    );
 
   const onScroll = useCallback(() => {
     const el = bodyRef.current;
@@ -113,17 +143,17 @@ export default function MinerLog({ lines, mine, ticker, onClear, litDigit = null
 
   return (
     <div className="mlog-wrap">
-      <section className="ch chamfer mlog" aria-label="Mine log">
+      <section className="ch chamfer mlog" aria-label={title.replace(/\s*\/\/\s*/, " ")}>
         <div className="ch-in chamfer">
           <div className="mlog-head">
             <span className="mlog-title">
               <Led state={mine?.phase === "error" ? "err" : busy ? "busy" : lines.length ? "ok" : "idle"} />
-              Mine <span className="slash">//</span> log
+              {titleNode}
             </span>
-            <div className="mlog-leds" role="group" aria-label={`Phases: ${PHASES.map((p, i) => `${p} ${i < lit ? "done" : "waiting"}`).join(", ")}`}>
-              {PHASES.map((p, i) => (
+            <div className="mlog-leds" role="group" aria-label={`Phases: ${phases.map((p, i) => `${p} ${i < lit ? "done" : "waiting"}`).join(", ")}`}>
+              {phases.map((p, i) => (
                 <span key={p} className={i < lit ? "done" : undefined}>
-                  <Led state={ledState(mine, i, lit)} />
+                  <Led state={ledStates ? ledStates[i] ?? "idle" : ledState(mine, i, lit)} />
                   {p}
                 </span>
               ))}
@@ -160,34 +190,38 @@ export default function MinerLog({ lines, mine, ticker, onClear, litDigit = null
         </div>
       </section>
 
-      <div className={`mlog-chips${d ? " lit-one" : ""}`}>
-        <YieldSpectrum compact litDigit={d} />
-        <div className="chip-caption">
-          <span className={b ? `tier-${b.id}` : undefined}>{b ? <b>{caption}</b> : caption}</span>
-          {mine?.txid && (
-            <span>
-              tx{" "}
-              <a href={txUrl(mine.txid)} target="_blank" rel="noopener noreferrer" className="mono" title={mine.txid}>
-                {shortTxid(mine.txid)}
-              </a>
-              {mine.phase === "confirmed" && mine.blockHeight ? (
-                <>
-                  {" · block "}
-                  <a href={blockUrl(mine.blockHeight)} target="_blank" rel="noopener noreferrer" className="mono">
-                    #{fmtInt(mine.blockHeight)}
-                  </a>
-                  {mine.reconcile === "pending" ? " · indexer reconciling…" : ""}
-                </>
-              ) : mine.phase === "pending" ? (
-                <>
-                  {" · checking every 15 s"}
-                  {mine.pollError ? ` · last check failed: ${mine.pollError}` : ""}
-                </>
-              ) : null}
-            </span>
-          )}
+      {showDigits ? (
+        <div className={`mlog-chips${d ? " lit-one" : ""}`}>
+          <YieldSpectrum compact litDigit={d} />
+          <div className="chip-caption">
+            <span className={b ? `tier-${b.id}` : undefined}>{b ? <b>{caption}</b> : caption}</span>
+            {mine?.txid && (
+              <span>
+                tx{" "}
+                <a href={txUrl(mine.txid)} target="_blank" rel="noopener noreferrer" className="mono" title={mine.txid}>
+                  {shortTxid(mine.txid)}
+                </a>
+                {mine.phase === "confirmed" && mine.blockHeight ? (
+                  <>
+                    {" · block "}
+                    <a href={blockUrl(mine.blockHeight)} target="_blank" rel="noopener noreferrer" className="mono">
+                      #{fmtInt(mine.blockHeight)}
+                    </a>
+                    {mine.reconcile === "pending" ? " · indexer reconciling…" : ""}
+                  </>
+                ) : mine.phase === "pending" ? (
+                  <>
+                    {" · checking every 15 s"}
+                    {mine.pollError ? ` · last check failed: ${mine.pollError}` : ""}
+                  </>
+                ) : null}
+              </span>
+            )}
+          </div>
         </div>
-      </div>
+      ) : (
+        footer
+      )}
     </div>
   );
 }

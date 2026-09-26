@@ -3077,7 +3077,7 @@ input[type="search"]::-webkit-search-decoration {
 }
 .modal {
   width: 100%;
-  max-width: 460px;
+  max-width: 400px;
   max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
   overflow: auto;
@@ -3148,17 +3148,44 @@ input[type="search"]::-webkit-search-decoration {
 }
 .wallet-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
   grid-template-areas:
-    "head action"
-    "desc action"
-    "hint action";
-  gap: 4px 14px;
+    "logo head action"
+    "logo desc action"
+    "logo hint action";
+  gap: 3px 12px;
   align-items: center;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   background: var(--surface);
   min-width: 0;
+}
+/* Wallet logo: the provider's own mark, served from /wallets (same origin). */
+.wallet-logo {
+  grid-area: logo;
+  align-self: center;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.wallet-logo img {
+  display: block;
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+}
+.wallet-logo-sim {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  border-color: var(--accent-line);
 }
 .wallet-card.installed {
   border-color: var(--border-strong);
@@ -3182,9 +3209,9 @@ input[type="search"]::-webkit-search-decoration {
 .wallet-card-desc {
   grid-area: desc;
   margin: 0;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--muted);
-  line-height: 1.45;
+  line-height: 1.4;
 }
 .wallet-card-hint {
   grid-area: hint;
@@ -3228,13 +3255,13 @@ button.wallet-addr:focus-visible {
     border-bottom: 0;
   }
   .wallet-card {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 40px minmax(0, 1fr);
     grid-template-areas:
-      "head"
-      "desc"
-      "hint"
-      "action";
-    gap: 6px;
+      "logo head"
+      "logo desc"
+      "logo hint"
+      "action action";
+    gap: 6px 12px;
   }
   .wallet-card-action {
     margin-top: 4px;
@@ -3754,6 +3781,14 @@ button.wallet-addr:focus-visible {
 }
 .ln.yours .ts {
   color: var(--muted);
+}
+/* The DEPLOY // LOG banner ("LUCKY deployed  block N  ✓ yours") has no tier:
+   it takes the accent instead of a tier variable. */
+.ln.yours.ln-ok {
+  --t: var(--accent);
+  --t-dim: var(--accent-dim);
+  --t-glow: var(--accent-line);
+  color: var(--accent);
 }
 .ln.yours .sum {
   font-size: 15px;

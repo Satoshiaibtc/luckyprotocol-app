@@ -22,6 +22,8 @@ const NO_IMAGE = { preview: null, busy: false, error: null };
 // 1 sat/vB — so a missing quote must be refused BEFORE anything is built
 // or signed, never silently paid at the floor.
 const NO_FEE_RATE = "No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.";
+/** `flow.note` while the reveal is confirmed but /tokens/:ticker has no row yet (the DEPLOY // LOG maps it to "not indexed yet"). */
+export const WAITING_FOR_REGISTRY = "Confirmed; waiting for the token registry.";
 
 function restored(ticker) {
   if (!TICKER_RE.test(ticker)) return IDLE;
@@ -182,7 +184,9 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
       const built = buildPayPsbt({ address, pubkeyHex: account.pubkeyHex, utxos: u.utxos, tokenOutpoints: u.tokenOutpoints, feeRateSatVb, toAddress: rec.commitAddress, amountSats: rec.commitAmount, minInputSats: minFeeInputSats(u.assetSafe) });
       expectPsbtPayload(built.psbtHex, { op: null });
       await requireAvailable(check);
-      update({ phase: "commit-signing" });
+      // Build details ride on the flow for the DEPLOY // LOG and the
+      // signing-time input listing (audit M-8); they describe this phase's tx.
+      update({ phase: "commit-signing", feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, inputCount: built.inputIndexes.length, inputs: built.inputs, assetSafe: u.assetSafe });
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
       check();
       assertRevealWalletResult(built.psbtHex, signed);
@@ -206,7 +210,7 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
     const built = buildDeployRevealPsbt({ commit: { txid: rec.commitTxid, vout: rec.commitVout, sats: rec.commitSats }, ephemeralPriv: priv, leafScript: hex.decode(rec.leafScriptHex), deployerAddress: address, deployerPubkeyHex: account.pubkeyHex, utxos, tokenOutpoints: u.tokenOutpoints, feeRateSatVb, ticker, minInputSats: minFeeInputSats(u.assetSafe) });
     expectPsbtPayload(built.psbtHex, { op: "DEPLOY", ticker });
     await requireAvailable(check);
-    update({ phase: "reveal-signing" });
+    update({ phase: "reveal-signing", feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, inputCount: built.walletInputIndexes.length, inputs: built.inputs, assetSafe: u.assetSafe });
     const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.walletInputIndexes, address });
     check();
     assertRevealWalletResult(built.psbtHex, signed);
@@ -320,13 +324,15 @@ export function useDeployAvatar({ wallet: account, ticker, feeRateSatVb, onSettl
         if (status.confirmed) {
           const token = flow.phase === "pending" ? await indexer.token(ticker) : null;
           if (!alive) return;
+          // The confirming block, for the DEPLOY // LOG and the block link.
+          const block = { blockHeight: status.block_height ?? null, blockHash: status.block_hash ?? null };
           if (flow.phase === "pending" && !token) {
-            setFlow((s) => ({ ...s, note: "Confirmed; waiting for the token registry." }));
+            setFlow((s) => ({ ...s, ...block, note: WAITING_FOR_REGISTRY }));
           } else {
             const ours = token?.deploy_txid === rec.revealTxid && token?.deployer === rec.address;
             clearDeployRecord(ticker);
             recordRef.current = null;
-            setFlow((s) => ({ ...s, phase: rec.reclaimTxid ? "reclaimed" : ours ? "confirmed" : "name-taken", avatarApplied: ours && token.avatar_txid === rec.revealTxid, note: null, record: null }));
+            setFlow((s) => ({ ...s, ...block, phase: rec.reclaimTxid ? "reclaimed" : ours ? "confirmed" : "name-taken", avatarApplied: ours && token.avatar_txid === rec.revealTxid, note: null, record: null }));
             settledRef.current?.();
             return;
           }
