@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "lint": "eslint src/ test/ scripts/",
     "lint:fix": "eslint src/ test/ --fix",
-    "test": "node test/yield.vectors.test.js && node test/buckets.test.js && node test/mix.test.js && node test/blocks.test.js && node test/payloads.test.js && node test/web.test.js",
+    "test": "node test/yield.vectors.test.js && node test/buckets.test.js && node test/mix.test.js && node test/blocks.test.js && node test/payloads.test.js && node test/web.test.js && node test/minerlog.test.js",
     "test:payloads": "node test/payloads.test.js",
     "test:web": "node test/web.test.js",
     "headers": "node scripts/gen-headers.mjs",

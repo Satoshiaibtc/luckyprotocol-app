@@ -204,6 +204,8 @@ export default function TokenPage({ ticker, params, navigate }) {
               {age ? <span className="muted"> · {age}</span> : null}
             </span>
           </div>
+        </div>
+        <div className="token-head-supply">
           <SupplyRing ticker={token.ticker} minted={token.minted} supply={token.supply} size={96} showText />
         </div>
       </header>

@@ -1261,14 +1261,25 @@ input[type="search"]::-webkit-search-decoration {
 
 .token-head {
   display: flex;
-  gap: 18px;
-  align-items: flex-start;
+  gap: 18px 24px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 .token-head-main {
   flex: 1;
   min-width: 0;
   display: grid;
   gap: 8px;
+  align-self: center;
+}
+/* Supply ring + minted figures sit at the right end of the head row (the
+   left column is the identity: avatar, ticker, deploy meta). */
+.token-head-supply {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
 }
 .token-head .ticker {
   font-size: 32px;
@@ -1279,6 +1290,11 @@ input[type="search"]::-webkit-search-decoration {
 @media (max-width: 560px) {
   .token-head {
     flex-direction: column;
+    align-items: flex-start;
+  }
+  .token-head-supply {
+    margin-left: 0;
+    padding-right: 0;
   }
 }
 
@@ -2061,87 +2077,8 @@ input[type="search"]::-webkit-search-decoration {
   }
 }
 
-/* ---- hash reveal ----------------------------------------------------------------------------------------- */
+/* ---- lit digit (shared by the spectrum's is-lit cell and the terminal's hash line) ------------------------- */
 
-.reveal {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-.reveal .label.ok {
-  color: var(--ok);
-}
-.reveal-height {
-  font-size: 28px;
-}
-.reveal-height:hover {
-  text-decoration: none;
-}
-.reveal-hash {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-  line-height: 1.7;
-  font-feature-settings: "zero";
-}
-.reveal-hash span {
-  display: inline-block;
-  animation: char-in 120ms both;
-  animation-delay: calc(var(--i) * 16ms);
-}
-.reveal-hash .lit {
-  font-weight: 700;
-  color: var(--t);
-  transform: scale(1.25);
-  transform-origin: center;
-  margin: 0 4px;
-  text-shadow: 0 0 10px var(--t-glow);
-  animation: char-in 120ms both, digit-lit 480ms 1.05s both;
-  animation-delay: calc(var(--i) * 16ms), 1.05s;
-}
-.reveal-sentence {
-  font-size: 13px;
-  color: var(--text);
-}
-.reveal-yield {
-  font-family: var(--mono);
-  font-weight: 300;
-  font-size: 36px;
-  color: var(--t);
-  text-shadow: 0 0 14px var(--t-glow);
-  line-height: 1.05;
-  animation: rise 320ms 1.4s both;
-  font-variant-numeric: tabular-nums;
-  font-feature-settings: "zero";
-}
-.reveal-yield .unit {
-  font-size: 14px;
-  font-weight: 400;
-  color: var(--muted);
-  text-shadow: none;
-  margin-left: 6px;
-}
-.reveal-reconcile {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-.reveal-reconcile .mono,
-.reveal-reconcile a {
-  color: var(--text);
-}
-@keyframes char-in {
-  from {
-    opacity: 0;
-    transform: translateY(3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 @keyframes digit-lit {
   0% {
     transform: scale(1);
@@ -2156,26 +2093,9 @@ input[type="search"]::-webkit-search-decoration {
     text-shadow: 0 0 10px var(--t-glow);
   }
 }
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
 @media (prefers-reduced-motion: reduce) {
-  .reveal-hash span,
-  .reveal-hash .lit,
-  .reveal-yield,
   .spectrum .cell.is-lit .ch-in {
     animation: none;
-  }
-  .reveal-hash .lit {
-    transform: scale(1.25);
-    text-shadow: 0 0 10px var(--t-glow);
   }
 }
 
@@ -2378,11 +2298,8 @@ input[type="search"]::-webkit-search-decoration {
 }
 /* Static inline styles moved to classes so the CSP's style-src can be 'self'
    without 'unsafe-inline' (audit L-14). The remaining dynamic style props
-   (bar widths, grid columns, the reveal stagger index) are applied by React
-   through the CSSOM, which CSP does not restrict. */
-.reveal .actions.actions-flush {
-  padding-left: 0;
-}
+   (bar widths, grid columns) are applied by React through the CSSOM, which
+   CSP does not restrict. */
 .tier-table .th .th-right {
   text-align: right;
 }
@@ -2400,45 +2317,6 @@ input[type="search"]::-webkit-search-decoration {
   align-items: center;
   flex-wrap: wrap;
 }
-.status .pending {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-}
-.status .pending-body {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-.status .stamps {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-  display: flex;
-  gap: 4px 14px;
-  flex-wrap: wrap;
-}
-.status .stamps .label {
-  margin-right: 4px;
-}
-.status .placeholder {
-  font-family: var(--mono);
-  font-weight: 300;
-  font-size: 30px;
-  color: var(--muted-2);
-  letter-spacing: 0.1em;
-  line-height: 1;
-}
-.status .copy {
-  font-size: 13px;
-  color: var(--muted);
-  line-height: 1.5;
-}
-.status .reveal {
-  padding-left: 16px;
-}
-
 .notice {
   font-size: 13px;
   color: var(--muted);
@@ -3443,7 +3321,6 @@ button.wallet-addr:focus-visible {
   }
   .cta .row .btn,
   .status .actions .btn,
-  .reveal .actions .btn,
   .empty-state .btn {
     width: 100%;
     min-height: 44px;
@@ -3474,18 +3351,14 @@ button.wallet-addr:focus-visible {
   body::before {
     background: radial-gradient(ellipse at center, transparent 55%, rgba(0, 0, 0, 0.45) 100%);
   }
-  /* Glow layers: none on numerals, digits and chips (the LED pulse and the block
-     reveal keep theirs); no other continuous animation runs on phones. */
+  /* Glow layers: none on numerals, digits and chips (the LED pulse and the lit
+     digit in the terminal keep theirs); no other continuous animation runs on phones. */
   .hero-num,
   .digit-bare,
   .chip-d .d,
   .wordmark .mark {
     text-shadow: none;
     box-shadow: none;
-  }
-  .reveal-yield,
-  .reveal-hash .lit {
-    text-shadow: 0 0 10px var(--t-glow);
   }
   .tile-next {
     box-shadow: none;
@@ -3530,7 +3403,6 @@ button.wallet-addr:focus-visible {
   .fineprint,
   .field-help,
   .tier-sub,
-  .status .copy,
   .status .detail,
   .notice,
   .cta,
@@ -3539,14 +3411,7 @@ button.wallet-addr:focus-visible {
   }
   .ev.sz-lg .hero-num,
   .token-page-m .ev.sz-lg .hero-num,
-  .ev.sz-md .hero-num,
-  .reveal-height {
-    font-size: 24px;
-  }
-  .reveal-yield {
-    font-size: 28px;
-  }
-  .status .placeholder {
+  .ev.sz-md .hero-num {
     font-size: 24px;
   }
   .empty-state {
@@ -3740,3 +3605,281 @@ button.wallet-addr:focus-visible {
 .created-token { border-bottom: 1px solid var(--border); padding: 12px 0; }
 .created-token summary { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; cursor: pointer; }
 .created-token summary > span { margin-left: auto; font-size: 13px; }
+
+/* ---- MINE // LOG terminal (the mine status line + the settlement reveal) --------------------------- */
+
+.mlog-wrap {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.mlog {
+  --ch-line: var(--border-strong);
+  --ch-bg: var(--bg);
+  --chamfer: 8px;
+  display: block;
+  width: 100%;
+}
+.mlog > .ch-in {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.mlog-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.mlog-title {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text);
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.mlog-title .slash {
+  color: var(--muted-2);
+}
+.mlog-leds {
+  display: flex;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.mlog-leds span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.mlog-leds .done {
+  color: var(--text);
+}
+.mlog-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.mlog-right .btn-sm {
+  height: 24px;
+  padding: 0 9px;
+  font-size: 10px;
+  --chamfer: 5px;
+}
+.mlog-screen {
+  position: relative;
+  min-width: 0;
+}
+.mlog-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.022) 0 1px, transparent 1px 3px);
+}
+.mlog-body {
+  position: relative;
+  margin: 0;
+  padding: 10px 12px 12px;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "zero";
+  display: grid;
+  gap: 1px;
+  align-content: start;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.ln {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0 6px;
+  margin: 0 -6px;
+  color: var(--muted);
+}
+.ln .ts {
+  color: var(--muted);
+}
+.ln-sys {
+  color: var(--muted);
+}
+.ln-act {
+  color: var(--accent);
+}
+.ln-ok {
+  color: var(--ok);
+  font-weight: 500;
+}
+.ln-block {
+  color: #fff;
+  font-weight: 500;
+  padding-top: 6px;
+  padding-bottom: 4px;
+  margin-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+.ln-tier {
+  color: var(--t, var(--muted));
+}
+.ln-err {
+  color: var(--danger);
+}
+.ln.yours {
+  border-left: 3px solid var(--t);
+  background: var(--t-dim);
+  padding: 5px 9px;
+  margin: 4px -6px 0;
+  font-weight: 700;
+}
+.ln.yours .ts {
+  color: var(--muted);
+}
+.ln.yours .sum {
+  font-size: 15px;
+  color: #fff;
+  letter-spacing: 0.02em;
+  margin-left: 10px;
+}
+.ln .hash {
+  color: var(--ice);
+  overflow-wrap: anywhere;
+  letter-spacing: 0.01em;
+}
+.ln .lit {
+  display: inline-block;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: -4px;
+  margin: -3px 0 -3px 1px;
+  color: var(--t);
+  text-shadow: 0 0 12px var(--t-glow);
+  animation: digit-lit 480ms both;
+}
+.mlog-cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.05em;
+  vertical-align: -0.2em;
+  margin-left: 4px;
+  background: var(--accent);
+  animation: mlog-blink 1s steps(2, start) infinite;
+}
+.ln.yours .mlog-cursor {
+  background: var(--t);
+}
+@keyframes mlog-blink {
+  to {
+    visibility: hidden;
+  }
+}
+.mlog-follow {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  z-index: 1;
+  border: 1px solid var(--accent-line);
+  background: var(--surface-2);
+  color: var(--accent);
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.mlog-follow:hover {
+  border-color: var(--accent);
+}
+.mlog-chips {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.mlog-chips .spectrum-wrap > .label {
+  display: none;
+}
+.mlog-chips .spectrum .cell {
+  aspect-ratio: 1 / 1.1;
+}
+.mlog-chips.lit-one .spectrum .cell:not(.is-lit) {
+  opacity: 0.28;
+}
+.mlog-chips.lit-one .spectrum .cell.is-lit {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+.chip-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.chip-caption b {
+  color: var(--t);
+  font-weight: 700;
+}
+.chip-caption a {
+  color: var(--text);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mlog-cursor,
+  .ln .lit {
+    animation: none;
+  }
+}
+@media (max-width: 720px) {
+  .mlog-body {
+    max-height: 156px;
+    font-size: 11.5px;
+    padding: 8px 10px 10px;
+  }
+  .mlog-right .cnt {
+    display: none;
+  }
+  .ln .lit {
+    font-size: 22px;
+  }
+  .ln.yours .sum {
+    font-size: 13px;
+  }
+}
+@media (max-width: 400px) {
+  .mlog-leds {
+    gap: 4px 8px;
+    font-size: 8.5px;
+  }
+}

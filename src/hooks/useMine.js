@@ -36,7 +36,8 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
   const startMine = useCallback(async () => {
     if (walletState.status !== "connected" || !tokenInfo) return;
     const { address: addr, pubkeyHex } = walletState;
-    setMine({ phase: "building", ticker });
+    const startedAt = Date.now(); // keys the terminal's per-attempt lines
+    setMine({ phase: "building", ticker, startedAt });
     try {
       if (!isUsableFeeRate(feeRateSatVb)) {
         throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
@@ -55,8 +56,10 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       setMine({
         phase: "signing",
         ticker,
+        startedAt,
         feeSats: built.feeSats,
         feeRateSatVb: built.feeRateSatVb,
+        vsize: built.estimatedVsize,
         inputCount: built.inputIndexes.length,
         inputs: built.inputs,
         utxoSource: utxoRes.source,

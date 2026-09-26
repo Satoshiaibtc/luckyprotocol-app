@@ -1,17 +1,43 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useApp } from "../context.js";
 import { useMine } from "../hooks/useMine.js";
+import { useMinerLog } from "../hooks/useMinerLog.js";
+import { usePoll } from "../hooks/usePoll.js";
+import * as indexer from "../lib/indexer.js";
 import { estimateMineFeeSats } from "../lib/psbt.js";
 import { missingFeeHint } from "../lib/feechoice.js";
 import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS, ACTIVATION_HEIGHT } from "../lib/payloads.js";
-import { fmtInt, fmtTime, txUrl, shortTxid } from "../lib/format.js";
+import { fmtInt } from "../lib/format.js";
+import { yieldDigit } from "../lib/yield.js";
+import {
+  acceptedLine,
+  blockFoundLine,
+  broadcastingLine,
+  buildLine,
+  digitLine,
+  errorLine,
+  feeQuoteLine,
+  heartbeatLine,
+  mempoolLine,
+  reconcileLine,
+  settlementLine,
+  signLine,
+  tipLine,
+  untrackedLine,
+  walletLine,
+  yoursLine,
+} from "../lib/minerlog.js";
 import { ConnectPrompt, SpentInputs } from "./TxProgress.jsx";
 import TipReadout from "./TipReadout.jsx";
 import EVReadout from "./EVReadout.jsx";
-import HashReveal from "./HashReveal.jsx";
 import FeeSelector from "./FeeSelector.jsx";
+import MinerLog from "./MinerLog.jsx";
 import Led from "./hud/Led.jsx";
-import RingGauge from "./hud/RingGauge.jsx";
+
+const HEARTBEAT_MS = 60_000;
+const FEED_POLL_MS = 30_000;
+const FEED_MAX_PER_POLL = 5;
+const FEE_LOG_MIN_MS = 10 * 60_000;
 
 function buttonLabel(phase) {
   switch (phase) {
@@ -30,33 +56,15 @@ function buttonLabel(phase) {
   }
 }
 
-const PHASES = ["Build", "Sign", "Broadcast", "Confirm"];
-
-function litCount(mine) {
-  switch (mine.phase) {
-    case "building":
-      return 1;
-    case "signing":
-      return 2;
-    case "broadcasting":
-      return 3;
-    case "pending":
-    case "confirmed":
-      return 4;
-    case "error":
-      return mine.txid ? 4 : mine.inputCount != null ? 2 : 1;
-    default:
-      return 0;
-  }
-}
-
 /**
  * The mining console: latest block, expected yield, fee preview, the MINE
- * button, the phase track and the idle→building→signing→broadcasting→
- * pending→confirmed state line with indexer reconcile.
+ * button, a one-line status and the MINE // LOG terminal — every event the
+ * app observes (wallet, fee quotes, the tip, each phase of the flow, other
+ * miners' settlements, found blocks) and, in the same log, the settlement
+ * reveal: the confirming block's hash with its last digit lit.
  */
 export default function MinePanel({ ticker, tokenInfo, onSettled }) {
-  const { wallet, fee, indexerOk, tipBlock, refreshAll, health } = useApp();
+  const { wallet, fee, fees, indexerOk, tipBlock, refreshAll, health } = useApp();
   // Before the activation height the indexer ignores every protocol tx, so a
   // MINE would only cost fees — lock the button and say when it opens. An
   // unknown tip counts as pre-activation (fail closed, audit L-12).
@@ -74,6 +82,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     feeRateSatVb: fee.satVb,
     onSettled: settled,
   });
+  const { lines, push, clear, meta } = useMinerLog(ticker);
 
   const minted = tokenInfo?.minted ?? 0;
   const supply = tokenInfo?.supply ?? 0;
@@ -90,7 +99,181 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
 
   const connected = wallet.status === "connected";
   const canMine = connected && indexerOk && !busy && !!tokenInfo && !exhausted && !preActivation && !!feeRate;
-  const lit = litCount(mine);
+
+  // Refs so the event effects read the latest mine / tip without re-running on every change.
+  const mineRef = useRef(mine);
+  mineRef.current = mine;
+  const tipRef = useRef(tipBlock.data);
+  tipRef.current = tipBlock.data;
+  const tipNowRef = useRef(tipNow);
+  tipNowRef.current = tipNow;
+  const linesRef = useRef(lines);
+  linesRef.current = lines;
+  const tipHeight = tipBlock.data?.height ?? null;
+  // Every txid this page broadcast, so the settlements feed never re-prints
+  // the user's own mine as another miner's (also after Clear / Mine again).
+  const ownTxidsRef = useRef(new Set());
+
+  // (a) wallet connect / switch / disconnect — transitions only, remembered
+  // per ticker (meta) so a wallet change made on another page is still
+  // logged on return; the very first observation is logged only when this
+  // ticker's log is still empty.
+  useEffect(() => {
+    const prev = meta.lastWallet;
+    const cur = wallet.status === "connected" ? wallet.address : null;
+    meta.lastWallet = cur;
+    if (prev === undefined) {
+      if (cur && lines.length === 0) push(walletLine(wallet));
+      return;
+    }
+    if (cur !== prev) push(walletLine(wallet));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- transitions of status/address only
+  }, [wallet.status, wallet.address, push]);
+
+  // (b) fee quotes — keyed by value (a repeat quote is a no-op) AND throttled:
+  // mainnet estimates drift by a few hundredths on most 30 s polls, which
+  // would otherwise fill the log with fee lines. One line at most per
+  // FEE_LOG_MIN_MS unless the log is still empty of fee lines.
+  useEffect(() => {
+    if (!fees.data) return;
+    const now = Date.now();
+    if (meta.lastFeeLogAt && now - meta.lastFeeLogAt < FEE_LOG_MIN_MS) return;
+    const l = feeQuoteLine(fees.data, now);
+    if (!l) return;
+    push(l);
+    meta.lastFeeLogAt = now;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- meta is a stable per-ticker object
+  }, [fees.data, push]);
+
+  // (c) the tip, once per ticker mount (as soon as the tip is known).
+  const tipLoggedRef = useRef(null);
+  useEffect(() => {
+    if (tipLoggedRef.current === ticker || tipHeight === null) return;
+    tipLoggedRef.current = ticker;
+    push(tipLine(tipRef.current, ticker, tokenInfo));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per ticker, when the tip is first known
+  }, [ticker, tipHeight, push]);
+
+  // (d) + (g) + (h) phase transitions of the user's own mine.
+  useEffect(() => {
+    const m = mineRef.current;
+    switch (m.phase) {
+      case "signing":
+        push(buildLine(m, ticker));
+        push(signLine(wallet.providerName, m.startedAt));
+        break;
+      case "broadcasting":
+        push(broadcastingLine(m.startedAt));
+        break;
+      case "pending": {
+        const tip = tipRef.current?.height ?? tipNowRef.current;
+        ownTxidsRef.current.add(m.txid);
+        push(acceptedLine(m.txid));
+        push(mempoolLine(Number.isInteger(tip) ? tip + 1 : null, m.txid));
+        break;
+      }
+      case "confirmed": {
+        // The lit block line is re-appended (`move`) so it sits right before
+        // the digit and banner lines even when feed or heartbeat lines landed
+        // after the plain "block found" print; its txs/weight come from the
+        // tip poll when it already names this block, else from that plain line.
+        const tip = tipRef.current;
+        const prev = linesRef.current.find((l) => l.key === `block:${m.blockHeight}`);
+        const stats = tip && tip.height === m.blockHeight ? { tx_count: tip.tx_count, weight: tip.weight } : prev ? { tx_count: prev.tx_count, weight: prev.weight } : {};
+        push(blockFoundLine({ height: m.blockHeight, hash: m.blockHash, ...stats }, { lit: true }), { move: true });
+        push(digitLine(m.blockHash, m.yieldLocal));
+        push(yoursLine(ticker, m.blockHeight, m.yieldLocal, m.txid));
+        break;
+      }
+      case "error":
+        push(errorLine(m.error, m.startedAt ?? m.txid));
+        break;
+      default:
+        break;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one line set per phase transition
+  }, [mine.phase, mine.txid, mine.startedAt, push]);
+
+  // (g) the indexer's verdict once reconcile leaves "pending".
+  useEffect(() => {
+    if (mine.phase !== "confirmed") return;
+    push(reconcileLine(mine));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires when reconcile / indexed change
+  }, [mine.phase, mine.reconcile, mine.indexed, push]);
+
+  // (e) heartbeat every 60 s while pending.
+  useEffect(() => {
+    if (mine.phase !== "pending") return undefined;
+    const beat = () => {
+      const tip = tipRef.current;
+      const known = Number.isInteger(tip?.height) ? tip.height : tipNowRef.current;
+      const next = Number.isInteger(known) ? known + 1 : null;
+      const since = tip?.time ? Date.now() - tip.time * 1000 : null;
+      push(heartbeatLine(next, since));
+    };
+    const id = setInterval(beat, HEARTBEAT_MS);
+    return () => clearInterval(id);
+  }, [mine.phase, push]);
+
+  // (f) a new tip block — plain line, unless it is the user's confirming
+  // block: that one is printed lit by (g), and when the tip poll names it
+  // only afterwards, its txs/weight are filled into the lit line in place.
+  const prevTipRef = useRef(null);
+  useEffect(() => {
+    if (tipHeight === null) return;
+    const prev = prevTipRef.current;
+    prevTipRef.current = tipHeight;
+    if (prev === null || prev === tipHeight) return;
+    const m = mineRef.current;
+    if (m.phase === "confirmed" && m.blockHeight === tipHeight) {
+      const tip = tipRef.current;
+      const existing = linesRef.current.find((l) => l.key === `block:${tipHeight}`);
+      if (existing && existing.lit && !existing.post && tip && (tip.tx_count != null || tip.weight != null)) {
+        push(blockFoundLine({ height: tipHeight, hash: m.blockHash, tx_count: tip.tx_count, weight: tip.weight }, { lit: true, at: existing.ts }), { replace: true });
+      }
+      return;
+    }
+    push(blockFoundLine(tipRef.current));
+  }, [tipHeight, push]);
+
+  // Leaving the page while a mine is pending: the flow state does not travel,
+  // so say so instead of leaving "awaiting block" as the last word.
+  useEffect(
+    () => () => {
+      const m = mineRef.current;
+      if (m.phase === "pending" && m.txid) push(untrackedLine(m.txid));
+    },
+    [push],
+  );
+
+  // (i) other miners' settlements for this ticker, diffed by txid.
+  const feed = usePoll((s) => indexer.minesFeed({ ticker, limit: 10 }, s), FEED_POLL_MS, [ticker]);
+  const seenRef = useRef({ ticker: null, txids: new Set() });
+  useEffect(() => {
+    const items = feed.data?.items;
+    if (!items) return;
+    const seen = seenRef.current;
+    if (seen.ticker !== ticker) {
+      // First result after mount: seed silently so a page load does not dump history.
+      seenRef.current = { ticker, txids: new Set(items.map((r) => r.txid)) };
+      return;
+    }
+    const own = ownTxidsRef.current;
+    const fresh = items.filter((r) => !seen.txids.has(r.txid));
+    for (const r of items) seen.txids.add(r.txid);
+    fresh
+      .filter((r) => !own.has(r.txid))
+      .slice(0, FEED_MAX_PER_POLL)
+      .reverse()
+      .forEach((r) => push(settlementLine(r, ticker)));
+  }, [feed.data, ticker, push]);
+
+  const onClear = useCallback(() => {
+    clear();
+    if (mine.phase === "confirmed" || mine.phase === "error") resetMine();
+  }, [clear, mine.phase, resetMine]);
+
+  const litDigit = mine.phase === "confirmed" ? yieldDigit(mine.blockHash) : null;
 
   return (
     <div className="action-body">
@@ -133,37 +316,19 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
         {buttonLabel(mine.phase)}
       </button>
 
-      <div className="phase-track" aria-hidden="true">
-        {PHASES.map((p, i) => {
-          let cls = "";
-          if (i < lit) cls = mine.phase === "error" ? "fail" : mine.phase === "pending" && i === 3 ? "pulse" : "on";
-          return (
-            <div key={p} className={cls}>
-              <span className="seg" />
-              <span className="label">{p}</span>
-            </div>
-          );
-        })}
-      </div>
+      <StatusLine mine={mine} wallet={wallet} onReset={resetMine} indexerOk={indexerOk} fee={fee} feeRate={feeRate} />
 
-      <StatusLine mine={mine} ticker={ticker} wallet={wallet} onReset={resetMine} indexerOk={indexerOk} fee={fee} feeRate={feeRate} />
+      <MinerLog lines={lines} mine={mine} ticker={ticker} onClear={onClear} litDigit={litDigit} />
     </div>
   );
 }
 
-function StatusLine({ mine, ticker, wallet, onReset, indexerOk, fee, feeRate }) {
+/** One-line status above the terminal: idle hints, the in-flight phases, and the error with its Reset. */
+function StatusLine({ mine, wallet, onReset, indexerOk, fee, feeRate }) {
   let led = "idle";
   let text;
   let detail = null;
   let actions = null;
-  let reveal = null;
-  let pending = null;
-
-  const txLink = mine.txid && (
-    <a href={txUrl(mine.txid)} target="_blank" rel="noopener noreferrer" className="mono" title={mine.txid}>
-      {shortTxid(mine.txid)}
-    </a>
-  );
 
   switch (mine.phase) {
     case "building":
@@ -187,60 +352,9 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk, fee, feeRate }) 
       text = "Broadcasting…";
       break;
     case "pending":
-      led = "busy";
-      text = "Broadcast. Pending confirmation — checking every 15 s.";
-      detail = (
-        <>
-          tx {txLink}
-          {mine.pollError ? ` · last check failed: ${mine.pollError}` : ""}
-        </>
-      );
-      pending = (
-        <>
-          <div className="stamps">
-            <span>
-              <span className="label">Broadcast</span>
-              {mine.broadcastAt ? fmtTime(mine.broadcastAt / 1000) : "—"}
-            </span>
-            {mine.lastChecked ? (
-              <span>
-                <span className="label">Last check</span>
-                {fmtTime(mine.lastChecked / 1000)}
-              </span>
-            ) : null}
-          </div>
-          <div className="copy">
-            Awaiting a block. The next block&apos;s last hex digit decides the yield — there is nothing to choose: every valid mine yields.
-          </div>
-          <div className="placeholder" aria-hidden="true">
-            — — — —
-          </div>
-        </>
-      );
-      break;
     case "confirmed":
-      led = "ok";
-      text = "Confirmed.";
-      detail = (
-        <>
-          tx {txLink} · hash …<span className="mono">{mine.blockHash?.slice(-8)}</span> ·{" "}
-          {mine.reconcile === "done" && mine.indexed
-            ? mine.indexed.status === "invalid"
-              ? "indexer: invalid mine (0 credited)"
-              : mine.indexed.cap_exhausted
-                ? "indexer: settled, supply exhausted (0 credited)"
-                : `indexer: settled, ${fmtInt(mine.indexed.yield_smallest)} ${mine.indexed.ticker} credited`
-            : mine.reconcile === "timeout"
-              ? "indexer has not indexed this mine yet"
-              : "reconciling with indexer…"}
-          {mine.reconcile === "done" && mine.indexed && mine.indexed.status !== "invalid" && mine.indexed.yield_smallest !== mine.yieldLocal
-            ? " · local yield differs from indexer — indexer is authoritative"
-            : ""}
-        </>
-      );
-      reveal = <HashReveal key={mine.txid} mine={mine} ticker={ticker} reconcileLine={detail} txLink={txLink} onReset={onReset} />;
-      detail = null;
-      break;
+      // The terminal below is the status for these phases.
+      return null;
     case "error":
       led = "err";
       text = mine.error || "Failed.";
@@ -257,31 +371,12 @@ function StatusLine({ mine, ticker, wallet, onReset, indexerOk, fee, feeRate }) 
       else text = "Ready. Fee inputs are selected from spendable BTC only — dust and token-bearing outputs are never spent.";
   }
 
-  if (mine.phase === "pending") {
-    return (
-      <div className="status" role="status" aria-live="polite">
-        <div className="pending">
-          <RingGauge size={72} sweeping label="NEXT" />
-          <div className="pending-body">
-            <div className="line">
-              <Led state={led} />
-              <span>{text}</span>
-            </div>
-            {detail && <div className="detail">{detail}</div>}
-            {pending}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="status" role="status" aria-live="polite">
       <div className="line">
         <Led state={led} />
         <span>{text}</span>
       </div>
-      {reveal}
       {detail && <div className="detail">{detail}</div>}
       {actions && <div className="actions">{actions}</div>}
     </div>
