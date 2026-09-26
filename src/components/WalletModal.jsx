@@ -94,6 +94,9 @@ export default function WalletModal() {
     const current = connected && wallet.provider === id;
     return (
       <li key={id} className={`wallet-card${installed ? " installed" : ""}${current ? " current" : ""}`}>
+        <span className="wallet-logo" aria-hidden="true">
+          <img src={meta.logo} alt="" width="40" height="40" decoding="async" />
+        </span>
         <div className="wallet-card-head">
           <span className="wallet-card-name">{meta.name}</span>
           <span className={`status-tag${current ? " s-open" : installed ? " s-ok" : ""}`}>
@@ -130,6 +133,9 @@ export default function WalletModal() {
     const current = connected && wallet.provider === "mock";
     cards.push(
       <li key="mock" className={`wallet-card installed${current ? " current" : ""}`}>
+        <span className="wallet-logo wallet-logo-sim" aria-hidden="true">
+          SIM
+        </span>
         <div className="wallet-card-head">
           <span className="wallet-card-name">{meta.name}</span>
           <span className={`status-tag${current ? " s-open" : ""}`}>{current ? "Connected" : "Mock mode"}</span>
@@ -175,9 +181,7 @@ export default function WalletModal() {
             </button>
           </div>
         ) : (
-          <p className="wallet-modal-lead">
-            Pick a Bitcoin wallet. LuckyProtocol never holds keys — every transaction is signed in your wallet, on Bitcoin mainnet only.
-          </p>
+          <p className="wallet-modal-lead">LuckyProtocol never holds keys: every transaction is signed in your wallet, on Bitcoin mainnet.</p>
         )}
 
         {connected && <span className="label wallet-modal-sub">Switch wallet</span>}
