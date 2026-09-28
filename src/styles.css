@@ -2807,6 +2807,36 @@ input[type="search"]::-webkit-search-decoration {
   gap: 12px;
   flex-wrap: wrap;
 }
+.footer-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+/* A link-styled button (the Donate toggle) so the footer reads as one row of links. */
+.footer-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+.footer-link:hover,
+.footer-link:focus-visible {
+  text-decoration: underline;
+}
+.footer-donate {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.footer-donate code {
+  word-break: break-all;
+  color: var(--text);
+}
 
 /* ---- fold (collapsible panel on <details>) ---------------------------------------------------- */
 

@@ -11,12 +11,7 @@ export default defineConfig(({ mode }) => {
   if (mode === "production" && env.VITE_MOCK === "1") {
     throw new Error("VITE_MOCK=1 is set for a production build — the mock indexer must never ship; unset it (it belongs in .env.development only)");
   }
-  // The commit a Cloudflare Pages build was made from (CF_PAGES_COMMIT_SHA,
-  // set by Pages; empty for a local build) is printed in the footer, so a
-  // build nobody meant to ship is visible to anyone who compares it with
-  // the repository (audit web-1).
-  const commit = String(process.env.CF_PAGES_COMMIT_SHA || "").replace(/[^0-9a-f]/gi, "").slice(0, 12);
-  return { ...config, define: { "import.meta.env.VITE_BUILD_COMMIT": JSON.stringify(commit) } };
+  return config;
 });
 
 const config = {
