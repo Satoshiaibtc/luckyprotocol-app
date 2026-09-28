@@ -1,7 +1,6 @@
 # LUCKY-20 Protocol Specification — v1
 
-**Revision 2026-09-28** (activation height 969,300, SNAPSHOT_VERSION 17 —
-see §9 for the revisions made before activation).
+**Version 1** — in force from block 969,300 (`ACTIVATION_HEIGHT`, §1).
 
 LUCKY-20 is a token protocol on Bitcoin L1, published by **LuckyProtocol**.
 Its operations are OP_RETURN payloads and its tokens are bound to UTXOs.
@@ -10,9 +9,8 @@ and anyone can mine it. The amount each MINE credits is decided by the
 hash of the block that confirms it.
 
 This document is the canonical wire specification. The reference indexer
-(Rust) and the reference web app (`luckyprotocol-app`) implement exactly
-this document. Where code and this document disagree, this document is
-authoritative.
+and the reference web app implement exactly this document. Where code
+and this document disagree, this document is authoritative.
 
 ## 0. Design principles
 
@@ -38,18 +36,17 @@ authoritative.
   payload moves the tokens to its first non-OP_RETURN output (Runes-style
   default routing, §4) instead of destroying them. A burn on such a spend
   would protect nobody and would cost ordinary users their tokens on a
-  plain wallet sweep (audit H-1).
+  plain wallet sweep.
 
 ## 1. Constants
 
 | Name | Value | Notes |
 |---|---|---|
 | `PROTOCOL_PREFIX` | `LUCKY-20` | The standard's name, field 0 of every payload (cf. brc-20's `p`). A push whose field 0 is anything other than `LUCKY-20` — e.g. `LUCKYPROTOCOL` — is not a LUCKY-20 payload; the activation-height gate applies on top. |
-| `ACTIVATION_HEIGHT` | **969_300** | FINAL. Txs in earlier blocks are ignored. |
-| `SNAPSHOT_VERSION` | 17 | An internal indexer state-schema number, unrelated to the protocol version. A snapshot of any other version is refused (its `version` is read before the rest of it is decoded) and the indexer rebuilds from `ACTIVATION_HEIGHT`. |
+| `ACTIVATION_HEIGHT` | **969_300** | Txs in earlier blocks are ignored. |
 | `REQUIRED_TOKEN_SUPPLY` | 21_000_000 | Implicit on every DEPLOY, not user-settable. |
 | `DUST_SATS` | 546 | Token-carrier output value **by wallet convention** — consensus accepts any non-OP_RETURN output as a carrier whatever its value, 0 sats included (§4 rule 5). |
-| `PROJECT_FEE_ADDRESS` | `bc1phk23psaqmq4rlsjeet79xpt65n9v2hvrv97ezc6c4rpld4s2shwqa9qx9n` | Set before activation. |
+| `PROJECT_FEE_ADDRESS` | `bc1phk23psaqmq4rlsjeet79xpt65n9v2hvrv97ezc6c4rpld4s2shwqa9qx9n` | Fixed; the protocol fee outputs of §2.1–§2.3 pay it. |
 | `DEPLOY_PROTOCOL_FEE_SATS` | 5_460 | Exact-amount output required on DEPLOY (the REVEAL, §2.1). A COMMIT pays no protocol fee. |
 | `MINE_PROTOCOL_FEE_SATS` | 546 | Exact-amount output required on MINE. |
 | `SEND_PROTOCOL_FEE_SATS` | 546 | Exact-amount output required on SEND. |
@@ -172,7 +169,7 @@ DEPLOY's machine-readable `reason` and the DEPLOY is `applied:false`:
 | 6 | an output pays **exactly 5,460 sats** to `PROJECT_FEE_ADDRESS` | `fee_missing` |
 | 7 | the ticker is not registered yet | `ticker_taken` |
 
-The old three-field form `LUCKY-20|DEPLOY|<TICKER>` still parses (it is
+The three-field form `LUCKY-20|DEPLOY|<TICKER>` parses (it is
 recorded as a DEPLOY row) but is **always** `applied:false` with reason
 `commit_required`, whatever else the tx holds.
 
@@ -227,8 +224,7 @@ carrier — route to the **default output** (§4 rule 3): in the reference
 layout `vout0`, the 546-sat proof output the deployer's own wallet
 controls, so the tokens are merged there and stay spendable.
 
-Test vectors (`H` of a REVEAL payload `P` under a carrier script `S`;
-both test suites assert them):
+Test vectors (`H` of a REVEAL payload `P` under a carrier script `S`):
 
 | exact REVEAL payload `P` | carrier scriptPubKey `S` (hex) | `H` = SHA-256(`P` ‖ `S`) |
 |---|---|---|
@@ -355,7 +351,7 @@ Reference layout (the web app builds exactly this):
 | 4 | change | sender | BTC change, **optional** — dropped when sub-dust; it never carries tokens |
 
 The residual output is a separate 546-sat output so that tokens never
-ride on a large BTC change output (audit H-1 A): a wallet that later
+ride on a large BTC change output: a wallet that later
 spends the change as plain BTC cannot take the tokens with it. **`vout3`
 must exist** — a builder must never drop it as sub-dust.
 
@@ -413,8 +409,7 @@ new chain crosses (§7.4). Minted out is the condition under which a
 token's market opens, once the block that completed the supply has 6
 confirmations (§7.4).
 
-Golden vectors (`tests/yield_vectors.json`, shared byte-identical by
-indexer and web; both test suites assert them):
+Golden vectors:
 
 | last hex char | yield |
 |---|---|
@@ -424,8 +419,8 @@ indexer and web; both test suites assert them):
 | `f` | 1000 |
 | `F` (uppercase input) | 1000 |
 
-Real mainnet blocks (the same file's `headers`; both suites recompute the
-display hash from the header and assert it):
+Real mainnet blocks (the display hash recomputed from each block's
+header):
 
 | height | display `block_hash` | yield |
 |---|---|---|
@@ -476,11 +471,11 @@ that can no longer change the amount any listing sells.
    goes to `CHANGE_OUT`, falling back to the default output when
    `CHANGE_OUT` is unusable); COMMIT and DEPLOY carry no routing index,
    so their token inputs go to the default output (rule 3).
-   **Per-ticker note (audit H-2):** a tx may spend UTXOs of several
+   **Per-ticker note:** a tx may spend UTXOs of several
    tickers; there is no multi-ticker burn. The routing decision is made
    once per tx and applied to every ticker in the pool — only a SEND's
    `AMT` is ticker-specific.
-3. **Default routing** (audit H-1): a tx
+3. **Default routing**: a tx
    that spends token UTXOs and carries **no parseable LUCKY-20 payload**
    (no OP_RETURN, an unparseable push, or another protocol's payload)
    moves its whole input pool — every ticker — to its **default output**:
@@ -528,11 +523,11 @@ table could be read differently, the table is authoritative.
 | `SEND\|T\|AMT\|TO\|CH` | `vout[CH]` missing or an OP_RETURN (applied or not — when applied `AMT` still goes to `vout[TO]`) | residual → default output | → default output |
 | `COMMIT\|H` | recorded `open` or `invalid` | → default output | → default output |
 | `DEPLOY\|T\|SALT` (REVEAL) | applied or not (any `reason`, §2.1) | → default output | → default output |
-| `DEPLOY\|T` (old three-field form) | always `applied:false` (`commit_required`) | → default output | → default output |
-| none | no OP_RETURN, an unparseable push, another protocol's payload, or a `LUCKY-20` push that does not parse (a five-field SEND, a bad ticker, a DEPLOY salt that is not 32 lowercase hex, a COMMIT hash that is not 64 lowercase hex, an opcode other than `COMMIT` / `DEPLOY` / `MINE` / `SEND` such as the withdrawn `AVATAR` of §8, …) | → default output | → default output |
+| `DEPLOY\|T` (three-field form) | always `applied:false` (`commit_required`) | → default output | → default output |
+| none | no OP_RETURN, an unparseable push, another protocol's payload, or a `LUCKY-20` push that does not parse (a five-field SEND, a bad ticker, a DEPLOY salt that is not 32 lowercase hex, a COMMIT hash that is not 64 lowercase hex, an opcode other than `COMMIT` / `DEPLOY` / `MINE` / `SEND` such as `AVATAR`, §8, …) | → default output | → default output |
 | any row that says "default output" | the tx has no non-OP_RETURN output, or its lowest-index one is address-less (P2PK, bare multisig, non-standard) | **burn** | **burn** |
 
-**Per-ticker note (audit H-2):** there is no multi-ticker rule. A tx may
+**Per-ticker note:** there is no multi-ticker rule. A tx may
 spend UTXOs of any number of tickers; the destination is decided once
 per tx and applied to every ticker in the pool, and only a SEND's `AMT`
 is ticker-specific. A mixed UTXO is therefore split by an ordinary SEND
@@ -744,7 +739,7 @@ outpoint can be filled — while it is live, and after the book dropped it
 (its listing floor, §7.4): the seller withdraws first — spends the
 outpoint — and lists the new carrier. The indexer records whatever actually confirms (§7.5).
 
-**`filling` — a spend is in the mempool (audit M-9).** On every poll
+**`filling` — a spend is in the mempool.** On every poll
 tick the indexer asks the node which live listings' outpoints are spent
 by a mempool tx (`gettxspendingprevout`, batched) and, for each such tx,
 its fees and size (`getmempoolentry`, re-read every tick). The order then
@@ -842,7 +837,7 @@ is unchanged:
   (§3.1). The gate is re-checked when the order is inserted all the same.
   A client can hide the market until it opens;
 - PSBT decodes; exactly 1 input, 1 output; `nLockTime == 0`;
-- **the listing can be filled at all** (audit trading-1) — the seller's
+- **the listing can be filled at all** — the seller's
   `0x83` signature commits to the tx version and to input 0's
   `nSequence`, so a fill inherits both:
   - unsigned tx `nVersion` is 1 or 2 — a listing with any other version
@@ -861,23 +856,24 @@ is unchanged:
   price_sats ≥ 546`; **`price_sats ≥ witnessUtxo.value`** (BTC above
   price on the carrier goes to the buyer, §7.1); **`price_sats ≤ amount ×
   1e8`** (at most 1 BTC per whole token); `1 ≤ amount ≤ 21_000_000`;
-- **price band** (audit M-11): when the ticker has at least one other
+- **price band**: when the ticker has at least one other
   `open` ask, the new ask's unit price must be **≤ 100 × the current best
   (lowest) open ask**; a higher one is refused. A new listing of the
   same outpoint is measured against the other asks only, and a ticker
   with no other open ask has no band (only the absolute 1 BTC/token cap
   applies);
 - `input0.sighashType == 0x83`, and the signature **verifies** against
-  the prevout: P2TR key-path → Schnorr over
-  `taproot_key_spend_signature_hash(0, Prevouts::One, SinglePlusAnyoneCanPay)`
-  with the witness-program x-only key; P2WPKH → ECDSA over
-  `p2wpkh_signature_hash(..., SinglePlusAnyoneCanPay)` with the
-  `partial_sigs` key whose hash160 is the witness program. Other script
+  the prevout: P2TR key-path → Schnorr over the BIP-341 key-spend
+  signature hash of input 0 for sighash type 0x83 (`SIGHASH_SINGLE |
+  SIGHASH_ANYONECANPAY`: it commits to input 0's own prevout and to
+  output 0) with the witness-program x-only key; P2WPKH → ECDSA over the
+  BIP-143 signature hash of input 0 for the same type, with the
+  `partialSig` key whose hash160 is the witness program. Other script
   types are rejected;
 - **the seller address has fewer than 10 open orders** (the per-seller
   cap, below); a listing that replaces an open listing of the same
   outpoint is exempt;
-- **not a reserved output** (audit rvs-2): the outpoint is not the
+- **not a reserved output**: the outpoint is not the
   carrier (`txid:0`) of a COMMIT whose record is `open`, or `expired`
   while its last reveal block has fewer than `FINAL_DEPTH` (6)
   confirmations (§2.1). A listing's 0x83 signature covers input 0 and
@@ -885,14 +881,14 @@ is unchanged:
   and publish the ticker with the seller named as its creator (§2.1
   deployer attribution); the seller first moves the output with a SEND to
   self, or publishes the ticker;
-- **one outpoint, the cheapest signed listing** (audit trading-4): when
+- **one outpoint, the cheapest signed listing**: when
   the book holds an `open` listing of the same outpoint at a LOWER unit
   price, the new listing is refused — the cheaper PSBT stays valid until
   the outpoint is spent, so hiding it behind a higher ask would mislead
   buyers and the seller. The same price renews
   the listing; a lower price replaces it. To raise a price the seller
   withdraws first (spends the outpoint, §7.3) and lists the new carrier.
-  **Listing floor** (audit rvs-3): a live listing that leaves the book
+  **Listing floor**: a live listing that leaves the book
   while its outpoint is unspent — expired by the TTL or evicted by a cap,
   below — still counts. The book remembers its unit price as the
   outpoint's listing floor (the lowest such price) and refuses a pricier
@@ -938,17 +934,12 @@ is unchanged:
 Order identity is the outpoint (`id = "txid:vout"`); a new listing of an
 open outpoint at the same or a lower price replaces it, a higher one is
 refused (above). Orders are
-runtime data persisted to `orders.json` next to the snapshot (atomic
-write on every change — while the file cannot be written a new listing is
-refused, since a listing held only in memory would vanish with a restart;
-three rotated generations `.bak` / `.bak.1` /
-`.bak.2`; a corrupt or foreign-version file is moved aside as
-`orders.json.corrupt-<unix>`, never overwritten, and the newest usable
-generation is loaded — audit L-6) — they are NOT part of the
-chain-derived snapshot. The file format stays version 1: the `filling`
-status, the `pending_*` fields and the listing floors (`floors: [{ id,
-ticker, amount, price_sats, dropped_at, gone_since }]`) are additive and
-optional.
+runtime data the indexer keeps outside the chain-derived snapshot — they
+are NOT part of it. While the book cannot be persisted a new listing is
+refused, since a listing held only in memory would vanish with a restart.
+In a persisted book the `filling` status, the `pending_*` fields and the
+listing floors (`floors: [{ id, ticker, amount, price_sats, dropped_at,
+gone_since }]`) are optional.
 
 An order holds its `id`, `ticker`, `amount`, `price_sats`, `unit_price`
 (`price_sats / amount`), `seller`, `carrier_sats` (the listed output's
@@ -961,8 +952,8 @@ otherwise.
 
 ### 7.5 Fill detection and trade history
 
-In `apply_tx`, after the payload is applied, every spent outpoint that
-matches a live (`open` or `filling`) order is settled. Let `i` be the
+When a tx is applied (§5), after its payload has been applied, every
+spent outpoint that matches a live (`open` or `filling`) order is settled. Let `i` be the
 index of the listed outpoint among the tx's inputs — `SIGHASH_SINGLE`
 pairs input `i` with output `i`, so the seller's signature commits to
 `vout[i]`, which is `vout0` only in the reference layout (§7.2, listing
@@ -979,8 +970,8 @@ A tx that spends several listed outpoints settles each of them this way,
 each judged at its own index — a fill of two listings at inputs 0 and 1
 paying their sellers at `vout0` and `vout1` records two trades.
 
-Settlement is re-derivable. `orders.json` outlives a cold rescan, a
-snapshot-version change and a full reorg rebuild, while the trade log
+Settlement is re-derivable. The order book outlives a cold rescan
+and a full rebuild of the chain-derived state, while the trade log
 does not, and the spend an order records may sit in a block the chain has
 since left. So whenever the chain-derived state goes back to an earlier
 height (a reorg, a restart, a rebuild), every order is judged again
@@ -1004,8 +995,8 @@ last trade — a 546-sat wash must not print a price.
 On every restore (reorg, restart, or the empty state a full rebuild
 starts from) every closed order whose outpoint is present again in
 `utxo_balances` **carrying exactly `{ ticker: amount }`** — the whole-UTXO
-balance the listing sells, not merely an entry under that key (audit
-M-12) — reverts to `open`; an order whose outpoint is not present and
+balance the listing sells, not merely an entry under that key —
+reverts to `open`; an order whose outpoint is not present and
 whose fill the trade log holds (at or below the restored height) is
 `filled` by that trade, with its `spent_txid`, `spent_block` and `buyer`
 — the order book is saved apart from the chain-derived state and can be
@@ -1054,13 +1045,10 @@ while it lasts; every single-indexer OP_RETURN meta-protocol shares this
 property, which is also why the protocol is specified in full: anyone can
 run an independent indexer and compare.
 
-## 8. Token avatars — withdrawn before activation (2026-09-27)
+## 8. Token avatars
 
 LUCKY-20 has **no token avatars**: no image, no avatar opcode, no avatar
-fee, no avatar state. An earlier revision of this document defined an
-`AVATAR` opcode and let a DEPLOY carry an inscribed image; both were
-withdrawn on 2026-09-27, before `ACTIVATION_HEIGHT`, so nothing was ever
-indexed under them. What a client shows as a token's picture is drawn
+fee, no avatar state. What a client shows as a token's picture is drawn
 locally from public data (the reference client renders a deterministic
 identicon from the ticker); it is not protocol state and no indexer
 stores or serves it.
@@ -1083,234 +1071,8 @@ The following rules are normative for every implementation:
    is the committer's address). A DEPLOY whose input carries an `ord`
    envelope counts on its own merits exactly as if the envelope were
    absent: registration is decided by its OP_RETURN payload and the §2.1
-   rules — an old client's clear-text three-field DEPLOY is
+   rules — a clear-text three-field DEPLOY is
    `commit_required` and never applies; the image is not validated,
    stored or served, and a malformed or oversized one changes nothing.
 3. **No avatar state.** An indexer keeps and reports no avatar data: no
    avatar field on any token, no avatar count, no avatar to fetch.
-
-## 9. Pre-activation revisions
-
-Every revision below was made before `ACTIVATION_HEIGHT`, while no
-LUCKY-20 transaction had yet been processed. Newest first.
-
-- **2026-09-28** — reorganizations and finality, no consensus change
-  (SNAPSHOT_VERSION stays 17): new constant `FINAL_DEPTH` 6 (§1) and §3.1
-  *Reorganizations and finality* — all state follows the chain Bitcoin
-  keeps, a MINE is credited from the block that confirms it in that chain
-  and its credit is final once that block has 6 confirmations, and
-  `minted` follows the chain like all protocol state: no burn lowers it,
-  a reorg that disconnects credited MINEs does (§3). A token's market
-  opens when the block that minted it out has 6 confirmations (the
-  indexed height reaches `minted_out_height + 5`); until then a listing
-  is refused and the book shows none of the ticker's listings (§7.4), and
-  a buyer checks that the market is open before signing (§7.2 step 3). §5
-  states the block-order rule the reference indexer has always applied:
-  transactions apply in block order and each sees the state the earlier
-  ones left, which decides who receives the last tokens of a ticker (with
-  an example in §3). §7.2 and §7.3 describe racing fills and pinning as
-  nodes relay them (full-RBF): a better-paying fill replaces a pending
-  one, a pinning fill costs its sender something only if it confirms, and
-  a pending cancel can itself be replaced by a better-paying fill. §7.5:
-  when the state goes back to an earlier height, an order whose recorded
-  spend lies above it forgets that spend and is settled again by the
-  spend on the chain the indexer continues on; an order whose outpoint is
-  gone is `filled` when the trade log holds its fill (an order book saved
-  before the state was); and a listing the book cancels after a
-  reorganization stays fillable until the seller spends its outpoint.
-  §7.4: a new listing is refused while the order book cannot be written
-  to disk, and the carrier of an `expired` COMMIT stays reserved until
-  its last reveal block has 6 confirmations (§2.1). Wallet guidance: a
-  wallet publishes a REVEAL once its COMMIT has 2 confirmations (§2.1)
-  and offers MINE once the ticker's DEPLOY has 2 (§2.2) — one sent at the
-  first confirmation can, after a one-block reorganization, confirm in
-  the block of the transaction it depends on and not count; a REVEAL's
-  input 0 carries `nSequence` = 1 (a BIP-68 relative lock of one block),
-  so no reorganization, however deep, can put it in its COMMIT's block
-  (§2.1). Where a
-  reorganization can undo a result, the text says so (§1 ticker
-  registration, §3, §7.4).
-
-- **2026-09-28** — a MINE counts only after its ticker's DEPLOY block,
-  consensus change before activation (SNAPSHOT_VERSION stays 17: nothing
-  below `ACTIVATION_HEIGHT` is processed, so no snapshot of version 17
-  holds a MINE): a MINE in the same block as its ticker's DEPLOY is
-  `invalid` (`reason` `deploy_same_block` when the block lists it after
-  the REVEAL, `not_deployed` before it), and its token inputs route to
-  `vout0` like every invalid MINE's (§2.2, §4.1) — nobody, the deployer
-  included, mines in the block that makes a ticker public (§0). Every
-  `invalid` MINE record names the rule it failed (`not_deployed`,
-  `deploy_same_block`, `fee_missing`, `vout0_unusable`; §2.2).
-
-- **2026-09-28** — order-book capacity, no consensus change
-  (SNAPSHOT_VERSION stays 17: the order book is not part of the
-  chain-derived state, §7.4). The global cap rises from 10,000 to 50,000
-  orders, the per-ticker cap from 1,500 to 7,500 open orders, and the
-  per-seller cap falls from 50 to 10 open orders. A listing that replaces
-  an open listing of the same outpoint counts against none of them, also
-  when an address or a ticker is above its cap (§7.4).
-
-- **2026-09-28** — editorial, no rule change (SNAPSHOT_VERSION stays 17):
-  the reference indexer's query interface is not part of the protocol
-  and this document no longer describes it (§5). The sections that
-  referred to it (§2.1, §3, §4.1, §6, §7.2–§7.5, §8) now refer to the
-  indexer's state, and §7.4 states the order-book acceptance rules as
-  conditions on a listing. Apart from the order-book caps (entry above),
-  no rule or number changed.
-
-- **2026-09-28** — editorial, no rule change (SNAPSHOT_VERSION stays 17):
-  the document is published as `PROTOCOL.md` under the title *LUCKY-20
-  Protocol Specification — v1*; §0 lists the design principles, and this
-  section lists the revisions made before activation. Plainer wording
-  throughout, with no rule or number changed. §7.6 now says what makes
-  an independent check possible: the protocol is specified in full, so
-  anyone can run an independent indexer. An `invalid` COMMIT keeps no
-  carrier script, since nothing ever reads it (§2.1).
-
-- **2026-09-28** — the commit hash binds the committer, consensus change
-  before activation (SNAPSHOT_VERSION stays 17: nothing below
-  `ACTIVATION_HEIGHT` is processed, so no snapshot of version 17 holds a
-  COMMIT):
-  `H` = SHA-256(REVEAL payload ‖ raw scriptPubKey of the COMMIT's `vout0`,
-  the commit carrier), and rule 2 of the REVEAL recomputes it with the
-  script of the carrier that input 0 spends — the recorded `vout0` script
-  of that COMMIT, which the indexer now keeps with each commit record. A
-  copied `H` can never be revealed through the copier's own carrier
-  (§2.1, audit rvs-1). The interim rule of the previous entry — one open
-  COMMIT per `H`, `invalid_reason` `duplicate_hash` — is removed: several
-  COMMITs may carry the same `H` and none of them affects another, so a
-  copy confirmed before the owner's COMMIT no longer makes the owner's
-  COMMIT invalid. New test vectors, including one payload under two
-  scripts (§2.1); a COMMIT's `invalid_reason` is only ever a carrier
-  reason (§2.1); "Why two steps" rewritten.
-
-- **2026-09-27** — review of the commit-reveal revision, consensus change
-  before activation (SNAPSHOT_VERSION stays 17: nothing below
-  `ACTIVATION_HEIGHT` is processed, so no snapshot of version 17 holds a
-  COMMIT):
-  a COMMIT whose `H` is held by an earlier COMMIT that is still `open` is
-  recorded `invalid` and can never be revealed — a copy of a public `H`
-  can no longer race the owner's REVEAL (§2.1, audit rvs-1; "Why two
-  steps" rewritten; a wallet checks its COMMIT's status, hash and
-  committer right before publishing). (Replaced on 2026-09-28 by the
-  commit binding — see the entry above.) The carrier-value wording
-  is made exact: any value, 0 sats included, is a carrier (§1, §2.1, §4
-  rule 5 — what every implementation already did; the earlier "≥ 1 sat"
-  was never enforced). The deployer-attribution rationale is corrected: a
-  0x83 signature of a carrier lets its holder append a REVEAL (§2.1,
-  audit rvs-2). Order book (§7.4, not token consensus): the carrier of
-  an `open` COMMIT cannot be listed (rvs-2), and a listing
-  that left the book by TTL or eviction while its outpoint was unspent
-  keeps guarding the trading-4 rule as the outpoint's listing floor, kept
-  in `orders.json` as the additive `floors` (rvs-3).
-
-- **2026-09-27** — commit-reveal DEPLOY, consensus change before
-  activation (SNAPSHOT_VERSION 16 → 17): new opcode
-  `LUCKY-20|COMMIT|<H>` (80 bytes; `H` = SHA-256 of the exact REVEAL
-  payload — bound to the carrier's script since 2026-09-28; `vout0` is
-  the commit carrier; no fee; token inputs to the default output); DEPLOY becomes the REVEAL
-  `LUCKY-20|DEPLOY|<TICKER>|<SALT>` (32 lowercase hex), valid only when
-  input 0 spends the carrier of a COMMIT with that hash confirmed 1 to
-  2,016 blocks earlier, with the 5,460-sat fee and a free ticker — the
-  first valid reveal by `(height, tx index)` registers the ticker; every
-  failure is recorded with a machine-readable `reason`; the old
-  three-field DEPLOY still
-  parses but is always `commit_required` (§2.1, §4.1). Deployer = the
-  committer (the carrier's address); the witness signature-shape
-  attribution of the previous revision is deleted (and with it the
-  audit finding consensus-2), and the indexer no longer reads input
-  witnesses. Commits are chain state in the snapshot, reverted on a
-  reorg; closed records are kept 2,016 blocks. New constants
-  `MIN_COMMIT_AGE` 1 and `MAX_COMMIT_AGE` 2,016 (§1); a DEPLOY record
-  names the COMMIT its input 0 spent and its `reason` (§2.1). A coinbase
-  tx is never a protocol tx (§2). Order book (§7.4, not token
-  consensus): a listing whose tx version is not 1 or 2 or whose input 0
-  `nSequence` sets a relative timelock is refused (it can never be
-  filled, audit trading-1), and so is a listing priced above a live
-  cheaper listing of the same outpoint (audit trading-4; §7.3). §7.2
-  step 3 accepts a MINE carrier holding the §3
-  partial credit of the cap-crossing block (audit consensus-5) and
-  requires an extra buyer confirmation when the second source cannot
-  confirm the amount (audit trading-2).
-
-- **2026-09-27** — review fixes, no consensus change (SNAPSHOT_VERSION
-  stays 16): §3 states that `block_hash` is the display-order hash and
-  adds real mainnet header vectors; §7.5 states that a fill is judged at
-  the listed input's own index (what the indexer already did) and that a
-  replayed spend re-derives a missing trade exactly once; §4 / §6 raise the
-  non-asset-safe fee-input floor to "≤ 10,000 sats" with largest-first
-  selection and exclude the client's own pending inputs.
-
-- **2026-09-27** — token avatars withdrawn before activation, consensus
-  change (SNAPSHOT_VERSION 15 → 16): the `AVATAR` opcode and the image a
-  DEPLOY could carry are removed (§8). `LUCKY-20|AVATAR|<TICKER>` does not
-  parse and is handled like any other `LUCKY-20` push that does not parse
-  (§2, §4.1 row "none": no record, token inputs to the default output);
-  an inscription envelope in any input witness is ignored, so a DEPLOY
-  that carries one counts on its own merits (§8). §2 now names the three
-  opcodes explicitly; deployer attribution (§2.1) is unchanged, with its
-  rationale restated for the `deployer` an indexer reports. Removed: the
-  avatar registry state and audit log, the 546-sat AVATAR fee, and every
-  avatar field, count and image. A snapshot of any other version is
-  refused before its body is decoded and the indexer rebuilds
-  from `ACTIVATION_HEIGHT`; nothing was indexed under 15 (activation is
-  still ahead of the chain), so the rebuild only costs the block-digit
-  log, which its backfill refills.
-
-- **2026-09-27** — block-digit log by header time, reference indexer
-  only, no consensus change (SNAPSHOT_VERSION stays 15): the digit log
-  (the last hex character of each recent block hash, the yield input of
-  §3) carries each height's header time (additive `digit_log.times`) and
-  its cap rises from 8,640 to 10,080 heights. A snapshot whose log has
-  no `times` loads with an empty log anchored at the restored height (it
-  is no longer seeded from `block_hashes`, which carry no times), and the
-  backfill refills it with one `getblockheader`
-  per height (walking `previousblockhash`) plus one `getblockhash` per
-  tick, within a 20 s budget counted from the step's first call so the
-  partial batch is always kept before the 30 s watchdog.
-
-- **2026-09-27** — block-digit log, reference indexer only, no consensus
-  change (SNAPSHOT_VERSION stays 15): an in-memory digit log holds the
-  last hex character of up to 8,640 recent block hashes as one
-  contiguous run. The log is appended at the block-insert site, carried
-  in the snapshot as the additive `digit_log`
-  field (a pre-field snapshot loads with a log seeded from its stored
-  hashes), reverted with the snapshot on a reorg, and filled backwards by
-  a bounded poll-loop step (≤ 256 `getblockhash` per tick, one RPC call
-  at a time, never on the request path).
-
-- **2026-09-27** — market opens at 100%, no consensus change
-  (SNAPSHOT_VERSION stays 15): `minted` is defined as the cumulative
-  credited yield that no burn lowers (a reorg can — see the 2026-09-28
-  entry on reorganizations and finality), and "minted out" as `minted ==
-  supply` — burns and outputs that can no longer be spent never undo it
-  (§3); additive registry field `minted_out_height` (backfilled from the
-  mines log on restore) and the flag `minted_out` (§3); the order book
-  refuses a listing of a token that is not minted out (§7.4).
-
-- **2026-09-27** — market backend, no consensus change (SNAPSHOT_VERSION
-  stays 15): market figures derived from the trade log and the order
-  book, additive `block_time` on MINE, SEND and DEPLOY records, and a
-  derived activity feed in the snapshot. Order book: `filling` status
-  with `pending_*` fields and cancel-fee guidance (§7.3, audit M-9); a
-  filling outpoint cannot be listed, and a relative price band holds new
-  asks to ≤ 100× the best open ask (§7.4, audit M-11); restore
-  reconciliation requires the exact listed balance and §7.6 states what
-  a buyer trusts the indexer for (audit
-  M-12); `orders.json` quarantine + three rotated generations + hourly
-  off-box backup (§7.4, audit L-6).
-
-- **2026-09-26** — avatar may be embedded in DEPLOY (§2.1 / §8), snapshot
-  version 15. (Withdrawn before activation — see the 2026-09-27 entry on
-  token avatars and §8.)
-
-- **2026-09-26** — audit fixes, all before activation (nothing on chain
-  changed): activation height **969,300**, `SNAPSHOT_VERSION` 14 (§1);
-  **default routing** replaces strict burn (§4 rule 3, audit H-1);
-  **per-ticker routing**, the multi-ticker burn is gone (§2.2, §2.3, §4,
-  audit H-2); dedicated 546-sat residual outputs in the SEND and fill
-  layouts, carrier value ≥ 1 sat is consensus (§2.3, §4 rule 5, §6,
-  §7.2, audit H-1 A); normative routing table (§4.1); §0 describes an
-  open mint.
-- **2026-09-25** — first LUCKY-20 candidate: strict burn, multi-ticker
-  burn, an earlier activation height. Never activated.

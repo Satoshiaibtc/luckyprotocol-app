@@ -32,10 +32,6 @@ import { sha256 } from "@noble/hashes/sha2.js";
 
 export const PROTOCOL_PREFIX = "LUCKY-20";
 export const ACTIVATION_HEIGHT = 969_300;          // spec §1 (owner decision 2026-09-26); protocol txs below this height are ignored
-// The indexer rule-set revision this app builds for (spec §1). Not used at
-// runtime: scripts/check-spec.mjs (every build) and test/web.test.js assert
-// that the served spec's §1 table names exactly these values.
-export const SNAPSHOT_VERSION = 17;
 export const REQUIRED_TOKEN_SUPPLY = 21_000_000;   // implicit on every DEPLOY
 export const DUST_SATS = 546;                      // token-carrier output value
 export const PROJECT_FEE_ADDRESS =

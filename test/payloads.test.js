@@ -13,7 +13,6 @@ import {
   PROTOCOL_LOCKTIME,
   PROTOCOL_PREFIX,
   REQUIRED_TOKEN_SUPPLY,
-  SNAPSHOT_VERSION,
   buildCommitPayload,
   buildMinePayload,
   buildRevealPayload,
@@ -30,7 +29,6 @@ import {
 
 assert.equal(PROTOCOL_PREFIX, "LUCKY-20");
 assert.equal(ACTIVATION_HEIGHT, 969_300, "activation height per the 2026-09-26 owner decision (must match the indexer)");
-assert.equal(SNAPSHOT_VERSION, 17, "commit-reveal deploy (owner decision A, 2026-09-27) is SNAPSHOT_VERSION 17");
 assert.equal(MIN_COMMIT_AGE, 1, "a REVEAL needs its COMMIT in an EARLIER block");
 assert.equal(MAX_COMMIT_AGE, 2_016, "a REVEAL must confirm within 2,016 blocks of its COMMIT");
 assert.equal(PROTOCOL_LOCKTIME, 969_299, "every COMMIT / REVEAL / MINE / SEND the app builds has nLockTime ACTIVATION_HEIGHT − 1 (decision B)");

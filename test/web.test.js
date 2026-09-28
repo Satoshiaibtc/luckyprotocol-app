@@ -8,7 +8,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { buildHeaders, buildMiddleware, buildRoutes, FIXED_HEADERS, SECOND_SOURCE_ORIGIN, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
 import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHost.js";
 import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/specUrl.js";
-import { parseSpecConstants, specConstantMismatches, specUrlProblem } from "../scripts/check-spec.mjs";
+import { parseSpecConstants, specConstantMismatches, specProcessLeaks, specUrlProblem } from "../scripts/check-spec.mjs";
 import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- L-14: _headers generated from VITE_INDEXER_URL ----------------------------------------------------
@@ -190,11 +190,11 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
   assert.deepEqual(specConstantMismatches(served, payloads), [], "public/PROTOCOL.md §1 must match src/lib/payloads.js");
   const parsed = parseSpecConstants(served);
-  assert.equal(parsed.SNAPSHOT_VERSION, payloads.SNAPSHOT_VERSION);
   assert.equal(parsed.ACTIVATION_HEIGHT, 969_300);
-  // A stale copy (the pre-withdrawal revision) is caught by the constant it changed.
-  const stale = served.replace(/\| `SNAPSHOT_VERSION` \| \d+ \|/, "| `SNAPSHOT_VERSION` | 15 |");
-  assert.deepEqual(specConstantMismatches(stale, payloads), [`SNAPSHOT_VERSION: spec 15, code ${payloads.SNAPSHOT_VERSION}`]);
+  assert.ok(!("SNAPSHOT_VERSION" in parsed), "the indexer's internal state-schema number is not a protocol constant and is not in the spec");
+  // A stale copy is caught by the constant it changed.
+  const stale = served.replace(/\| `MAX_COMMIT_AGE` \| [\d_]+ \|/, "| `MAX_COMMIT_AGE` | 144 |");
+  assert.deepEqual(specConstantMismatches(stale, payloads), [`MAX_COMMIT_AGE: spec 144, code ${payloads.MAX_COMMIT_AGE}`]);
   assert.deepEqual(specConstantMismatches(served, { ...payloads, DEPLOY_PROTOCOL_FEE_SATS: 546 }), ["DEPLOY_PROTOCOL_FEE_SATS: spec 5460, code 546"]);
   assert.equal(payloads.FINAL_DEPTH, 6, "the finality depth is checked like every §1 constant");
   assert.deepEqual(specConstantMismatches(served, { ...payloads, FINAL_DEPTH: 3 }), ["FINAL_DEPTH: spec 6, code 3"]);
@@ -223,6 +223,24 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   assert.deepEqual(hits, [], "the served spec names no HTTP route or header");
   assert.ok(served.includes("\n## 5. Indexer interface\n"), "§5 keeps its number and says the interface is not part of the protocol");
   console.log("spec scope: the served spec names no indexer route or HTTP header");
+}
+
+// ---- the served spec states rules, not the project's process ------------------------------------------------
+// A public rulebook names no audit finding, internal schema number,
+// repository, language, file or date, and carries no revision history.
+// scripts/check-spec.mjs applies the same list on every build, and the
+// indexer's own tests hold its copy to it.
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
+  assert.deepEqual(specProcessLeaks(served), [], "the served spec narrates no internal process");
+  assert.ok(!/^## 9\. /m.test(served), "no revision-history section");
+  assert.ok(served.includes("\n## 8. Token avatars\n"), "§8 keeps its number and a timeless title");
+  assert.ok(!/\b(19|20)\d\d-\d\d-\d\d\b/.test(served), "no calendar date");
+  // the gate itself
+  assert.deepEqual(specProcessLeaks("a rule (audit H-1)\nSNAPSHOT_VERSION 17\nthe Rust indexer\nrevised 2026-09-28"), ["1: audit", "2: snapshot_version", "3: Rust", "4: 2026-"]);
+  assert.deepEqual(specProcessLeaks("a buyer trusts the indexer; Trust is not the language"), [], "\"trust\" is not \"Rust\"");
+  console.log("spec process: the served spec names no audit, schema number, repository, language or date");
 }
 
 // ---- the served spec's order-book caps agree with each other and with the app --------------------------------

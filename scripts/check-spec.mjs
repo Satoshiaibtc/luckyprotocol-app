@@ -5,10 +5,15 @@
 //
 // public/PROTOCOL.md is the spec the site serves. Its §1 constants table
 // must name exactly the values src/lib/payloads.js builds transactions with.
-// A code change that bumps a consensus constant (the SNAPSHOT_VERSION of a
-// rule change, a fee, the activation height) without the matching spec copy
+// A code change that bumps a consensus constant (a fee, the activation
+// height, the finality depth) without the matching spec copy
 // — or a spec copy without the code — fails the build instead of shipping a
 // page that documents rules the app does not follow.
+//
+// The served spec must also state rules only: no audit reference, internal
+// schema number, repository, language or date may appear in it
+// (SPEC_PROCESS_DENY) — the indexer's own tests hold its copy to the same
+// list, so the public text stays a timeless rulebook.
 //
 // It also checks where the footer's "Protocol spec" link will point
 // (VITE_SPEC_URL, audit F7). The host answers every unknown path with the
@@ -25,7 +30,6 @@ import { loadEnv } from "./gen-headers.mjs";
 export const SPEC_CONSTANTS = [
   "PROTOCOL_PREFIX",
   "ACTIVATION_HEIGHT",
-  "SNAPSHOT_VERSION",
   "REQUIRED_TOKEN_SUPPLY",
   "DUST_SATS",
   "PROJECT_FEE_ADDRESS",
@@ -74,6 +78,33 @@ export function specConstantMismatches(md, consts) {
 }
 
 /**
+ * Words the served spec must never carry: it states the protocol, not the
+ * project's process. Matched case-insensitively; the implementation
+ * language is matched as a whole word ("trust" is not "Rust").
+ */
+export const SPEC_PROCESS_DENY = [
+  "audit",
+  "snapshot_version",
+  "luckyprotocol-app",
+  "luckyprotocol-indexer",
+  "2026-",
+  "pre-activation",
+  "interim",
+  "editorial",
+];
+
+/** Every line of a spec text that names internal process, as "line: word" entries. */
+export function specProcessLeaks(md) {
+  const out = [];
+  String(md || "").split(/\r?\n/).forEach((line, i) => {
+    const lower = line.toLowerCase();
+    for (const word of SPEC_PROCESS_DENY) if (lower.includes(word)) out.push(`${i + 1}: ${word}`);
+    if (/(^|[^A-Za-z0-9])Rust(?![A-Za-z0-9])/.test(line)) out.push(`${i + 1}: Rust`);
+  });
+  return out;
+}
+
+/**
  * Why a VITE_SPEC_URL value would not open the spec, or null when it is
  * fine. Empty means the default /PROTOCOL.md. A same-origin path must name
  * a file in `publicDir` (query and fragment ignored); an https URL is
@@ -110,7 +141,15 @@ async function main() {
     console.error("Copy the indexer's PROTOCOL.md over public/PROTOCOL.md (and update payloads.js) before building.");
     process.exit(1);
   }
-  console.log(`spec constants: public/PROTOCOL.md §1 matches src/lib/payloads.js (${SPEC_CONSTANTS.length} constants, SNAPSHOT_VERSION ${payloads.SNAPSHOT_VERSION})`);
+  console.log(`spec constants: public/PROTOCOL.md §1 matches src/lib/payloads.js (${SPEC_CONSTANTS.length} constants)`);
+
+  const leaks = specProcessLeaks(md);
+  if (leaks.length) {
+    console.error("spec scope: public/PROTOCOL.md narrates internal process (the spec states rules only):");
+    for (const l of leaks) console.error(`  public/PROTOCOL.md:${l}`);
+    process.exit(1);
+  }
+  console.log("spec scope: public/PROTOCOL.md names no audit, schema number, repository, language or date");
 
   const env = loadEnv(process.env.MODE || "production", root);
   const linkProblem = specUrlProblem(env.VITE_SPEC_URL, join(root, "public"));
