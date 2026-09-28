@@ -331,7 +331,7 @@ const ADDR = MOCK_WALLET.address;
 
 // ---- visit-7 / market-6: plain indexer and order-book errors ----------------------------------------------------------------
 {
-  const off = new Error("Indexer unreachable: https://luckyprotocolai.com/tokens?limit=200 — Failed to fetch");
+  const off = new Error("Indexer unreachable: https://app.luckyprotocolai.com/tokens?limit=200 — Failed to fetch");
   assert.equal(isIndexerOffline(off), true);
   assert.equal(indexerErrorText(off, { retrySec: 15 }), "The indexer is offline. Retrying every 15 s.");
   assert.ok(!/https?:/.test(indexerErrorText(off)), "no raw URL on the page");

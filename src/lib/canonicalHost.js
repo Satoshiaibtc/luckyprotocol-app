@@ -6,7 +6,7 @@
 // *.pages.dev visit to the canonical host before rendering; dev and mock
 // builds are exempt.
 
-export const CANONICAL_HOST = "app.luckyprotocolai.com";
+export const CANONICAL_HOST = "luckyprotocolai.com";
 
 /**
  * The URL to redirect to, or null when the page should render here.

@@ -13,9 +13,9 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- L-14: _headers generated from VITE_INDEXER_URL ----------------------------------------------------
 {
-  const prod = buildHeaders({ indexerUrl: "https://luckyprotocolai.com/", mode: "production", strict: true });
+  const prod = buildHeaders({ indexerUrl: "https://app.luckyprotocolai.com/", mode: "production", strict: true });
   const csp = /Content-Security-Policy: (.*)/.exec(prod)[1];
-  assert.equal(/connect-src ([^;]*)/.exec(csp)[1], "'self' https://luckyprotocolai.com https://mempool.space", "connect-src: self + the indexer + the M-12 second source, nothing else");
+  assert.equal(/connect-src ([^;]*)/.exec(csp)[1], "'self' https://app.luckyprotocolai.com https://mempool.space", "connect-src: self + the indexer + the M-12 second source, nothing else");
   assert.equal(/img-src ([^;]*)/.exec(csp)[1], "'self' data:", "img-src: no remote origin — token pictures are inline SVG identicons (avatars withdrawn, spec §8); neither the indexer nor mempool.space is an image origin");
   assert.equal(/style-src ([^;]*)/.exec(csp)[1], "'self'", "no 'unsafe-inline'");
   assert.equal(/script-src ([^;]*)/.exec(csp)[1], "'self'");
@@ -34,9 +34,9 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   assert.ok(/connect-src 'self' http:\/\/127\.0\.0\.1:8765 https:\/\/mempool\.space;/.test(local));
   assert.throws(() => buildHeaders({ indexerUrl: "", mode: "production", strict: true }), /must name the real indexer/);
   assert.throws(() => buildHeaders({ indexerUrl: "http://evil.example", mode: "production", strict: true }), /must name the real indexer/, "http to a non-loopback host is rejected like the app does");
-  assert.equal(isAllowedIndexerUrl("https://luckyprotocolai.com"), true);
+  assert.equal(isAllowedIndexerUrl("https://app.luckyprotocolai.com"), true);
   assert.equal(isAllowedIndexerUrl("http://localhost:8765"), true);
-  assert.equal(isAllowedIndexerUrl("http://luckyprotocolai.com"), false);
+  assert.equal(isAllowedIndexerUrl("http://app.luckyprotocolai.com"), false);
   assert.equal(isAllowedIndexerUrl("javascript:alert(1)"), false);
   assert.deepEqual(parseDotenv('VITE_INDEXER_URL=https://x.example # c\nVITE_MOCK="1"\n# comment\nBAD LINE\nexport VITE_SPEC_URL=\'/spec.md\''), { VITE_INDEXER_URL: "https://x.example", VITE_MOCK: "1", VITE_SPEC_URL: "/spec.md" });
   console.log("headers: production CSP names the indexer origin in connect-src only (+ mempool.space); img-src same-origin; no loopback, no 'unsafe-inline'");
@@ -44,16 +44,16 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- HTML document: the generated Pages Function = _headers + a per-response script-src nonce ------
 {
-  const opts = { indexerUrl: "https://luckyprotocolai.com/", mode: "production", strict: true };
+  const opts = { indexerUrl: "https://app.luckyprotocolai.com/", mode: "production", strict: true };
   const src = buildMiddleware(opts);
   assert.ok(!src.includes("unsafe-inline") && !src.includes("127.0.0.1") && !src.includes("localhost"), "no 'unsafe-inline', no loopback in the production middleware");
-  assert.ok(src.includes("https://luckyprotocolai.com"), "the indexer origin is baked in at build time");
+  assert.ok(src.includes("https://app.luckyprotocolai.com"), "the indexer origin is baked in at build time");
   assert.deepEqual(JSON.parse(buildRoutes()), { version: 1, include: ["/"], exclude: [] }, "only the document invokes the Function (Pages 308-redirects /index.html to / before routing); assets keep the static _headers");
   assert.throws(() => buildMiddleware({ indexerUrl: "", mode: "production", strict: true }), /must name the real indexer/);
   const mod = await import(`data:text/javascript,${encodeURIComponent(src)}`);
   const seen = [];
   const html = async (req) => { seen.push(req); return new Response("<!doctype html><title>x</title>", { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "public, max-age=10, must-revalidate", "x-upstream": "kept" } }); };
-  const conditional = () => new Request("https://app.luckyprotocolai.com/", { headers: { "if-none-match": '"etag"', "if-modified-since": "Fri, 26 Sep 2026 00:00:00 GMT", "accept": "text/html" } });
+  const conditional = () => new Request("https://luckyprotocolai.com/", { headers: { "if-none-match": '"etag"', "if-modified-since": "Fri, 26 Sep 2026 00:00:00 GMT", "accept": "text/html" } });
   const a = await mod.onRequest({ request: conditional(), next: html });
   const b = await mod.onRequest({ request: conditional(), next: html });
   assert.equal(seen.length, 2);
@@ -86,11 +86,11 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- L-15: *.pages.dev → canonical host ------------------------------------------------------------------
 {
-  assert.equal(CANONICAL_HOST, "app.luckyprotocolai.com");
-  assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", pathname: "/", search: "", hash: "#/token/LUCKY" }), "https://app.luckyprotocolai.com/#/token/LUCKY", "same path + hash on the canonical host");
-  assert.equal(canonicalRedirectTarget({ hostname: "abc123.luckyprotocol-app.pages.dev", pathname: "/", hash: "#/me" }), "https://app.luckyprotocolai.com/#/me", "preview deployments too");
-  assert.equal(canonicalRedirectTarget({ hostname: "LUCKYPROTOCOL-APP.PAGES.DEV", hash: "" }), "https://app.luckyprotocolai.com/", "case-insensitive");
-  assert.equal(canonicalRedirectTarget({ hostname: "app.luckyprotocolai.com", hash: "#/x" }), null, "already canonical");
+  assert.equal(CANONICAL_HOST, "luckyprotocolai.com");
+  assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", pathname: "/", search: "", hash: "#/token/LUCKY" }), "https://luckyprotocolai.com/#/token/LUCKY", "same path + hash on the canonical host");
+  assert.equal(canonicalRedirectTarget({ hostname: "abc123.luckyprotocol-app.pages.dev", pathname: "/", hash: "#/me" }), "https://luckyprotocolai.com/#/me", "preview deployments too");
+  assert.equal(canonicalRedirectTarget({ hostname: "LUCKYPROTOCOL-APP.PAGES.DEV", hash: "" }), "https://luckyprotocolai.com/", "case-insensitive");
+  assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocolai.com", hash: "#/x" }), null, "already canonical");
   assert.equal(canonicalRedirectTarget({ hostname: "localhost", hash: "#/x" }), null);
   assert.equal(canonicalRedirectTarget({ hostname: "evil.pages.dev.example", hash: "" }), null, "suffix match, not substring");
   assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", dev: true }), null, "dev builds never redirect");
