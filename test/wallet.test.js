@@ -1,0 +1,362 @@
+// Pure-part tests for the multi-wallet layer and the fee-rate choice.
+// Plain Node, no framework, no window: exercises src/lib/walletShapes.js
+// (provider argument shapes), src/lib/feechoice.js (persistence format,
+// clamping, resolution against /fees) and src/lib/retry.js (the seeding-503
+// retry wallet.getBitcoinUtxos wraps /btc-utxos in).
+import assert from "node:assert/strict";
+import {
+  PROVIDER_IDS,
+  PROVIDER_META,
+  WALLET_STORAGE_KEY,
+  chipLabel,
+  collectInscriptionOutpoints,
+  defaultProviderId,
+  inscriptionOutpoints,
+  intersectConfirmed,
+  firstAccount,
+  isConflictError,
+  isMainnetAddress,
+  normalizeBalance,
+  normalizePubkey,
+  normalizeTxid,
+  normalizeUtxo,
+  normalizeUtxoList,
+  pushTxArgs,
+  shouldRestore,
+  signPsbtArgs,
+  toSignInputs,
+} from "../src/lib/walletShapes.js";
+import {
+  DEFAULT_PRESET,
+  FEE_CHOICE_KEY,
+  FEE_PRESETS,
+  clampCustomFee,
+  isUsableFeeRate,
+  parseFeeChoice,
+  presetRows,
+  presetUnavailableReason,
+  presetUnavailableText,
+  resolveFeeRate,
+  serializeFeeChoice,
+  missingFeeHint,
+  HIGH_FEE_MIN_SAT_VB,
+  highFeeThreshold,
+  needsHighFeeAck,
+} from "../src/lib/feechoice.js";
+import { MAX_FEE_RATE_SAT_VB } from "../src/lib/psbt.js";
+import { isSeedingError, retryOn503 } from "../src/lib/retry.js";
+
+const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
+const TXID = "ab".repeat(32);
+const PSBT = "70736274ff01000a0200000000000000000000";
+
+// ---- provider metadata ---------------------------------------------------------------------
+assert.deepEqual(PROVIDER_IDS, ["unisat", "okx"]);
+assert.equal(PROVIDER_META.unisat.installUrl, "https://unisat.io");
+assert.equal(PROVIDER_META.okx.installUrl, "https://web3.okx.com/download");
+assert.equal(PROVIDER_META.okx.name, "OKX Wallet");
+assert.equal(WALLET_STORAGE_KEY, "lp.wallet");
+assert.equal(chipLabel("okx", "bc1p…62s"), "OKX · bc1p…62s");
+assert.equal(chipLabel("unisat", "bc1p…62s"), "UniSat · bc1p…62s");
+assert.equal(chipLabel("nope", "bc1p…62s"), "bc1p…62s");
+for (const id of PROVIDER_IDS) {
+  assert.ok(PROVIDER_META[id].description.length > 20, `${id}: card description`);
+  assert.ok(PROVIDER_META[id].mobileHint.includes("app"), `${id}: phone guidance names the app`);
+}
+
+// ---- mainnet-only account guard (wallet dialog / connect) -------------------------------------------
+assert.equal(isMainnetAddress(ADDR), true, "bc1p taproot");
+assert.equal(isMainnetAddress("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), true, "bc1q native segwit");
+assert.equal(isMainnetAddress("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"), true, "upper-case bech32 is still mainnet");
+assert.equal(isMainnetAddress("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), false, "testnet tb1 refused");
+assert.equal(isMainnetAddress("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"), false, "regtest refused");
+assert.equal(isMainnetAddress("1BoatSLRHtKNngkdXEeobR76b53LETtpyT"), false, "legacy P2PKH refused");
+assert.equal(isMainnetAddress("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), false, "P2SH refused");
+assert.equal(isMainnetAddress("0x52908400098527886E0F7030069857D2E4169EE7"), false, "an EVM account (wrong OKX provider) refused");
+assert.equal(isMainnetAddress("bc1Qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), false, "mixed case refused");
+assert.equal(isMainnetAddress(""), false);
+assert.equal(isMainnetAddress(null), false);
+
+// ---- signPsbt argument mapping ----------------------------------------------------------------
+{
+  const rows = toSignInputs({ inputIndexes: [0, 2], address: ADDR });
+  assert.deepEqual(rows, [{ index: 0, address: ADDR }, { index: 2, address: ADDR }]);
+  const withSighash = toSignInputs({ inputIndexes: [0], address: ADDR, sighashTypes: [0x83] });
+  assert.deepEqual(withSighash, [{ index: 0, address: ADDR, sighashTypes: [0x83] }]);
+  assert.throws(() => toSignInputs({ inputIndexes: [-1], address: ADDR }), /bad input index/);
+  assert.throws(() => toSignInputs({ inputIndexes: [0], address: "" }), /address is required/);
+
+  for (const id of ["unisat", "okx", "mock"]) {
+    const [hex, opts] = signPsbtArgs(id, PSBT, { inputIndexes: [1, 2], address: ADDR });
+    assert.equal(hex, PSBT, `${id}: psbt hex passed through`);
+    assert.deepEqual(opts, { autoFinalized: true, toSignInputs: [{ index: 1, address: ADDR }, { index: 2, address: ADDR }] }, `${id}: default autoFinalized:true`);
+  }
+  // §7.1 listing shape: un-finalized, SINGLE|ANYONECANPAY declared.
+  const [, listing] = signPsbtArgs("okx", PSBT, { inputIndexes: [0], address: ADDR, autoFinalized: false, sighashTypes: [0x83] });
+  assert.deepEqual(listing, { autoFinalized: false, toSignInputs: [{ index: 0, address: ADDR, sighashTypes: [0x83] }] });
+  assert.throws(() => signPsbtArgs("ledger", PSBT, { inputIndexes: [0], address: ADDR }), /unknown wallet provider/);
+  assert.throws(() => signPsbtArgs("unisat", "zz", { inputIndexes: [0], address: ADDR }), /hex/);
+}
+
+// ---- pushTx argument shapes -------------------------------------------------------------------
+{
+  const raw = "0200000001" + "00".repeat(40);
+  assert.deepEqual(pushTxArgs("unisat", raw), [{ rawtx: raw }], "UniSat: pushTx({ rawtx })");
+  assert.deepEqual(pushTxArgs("okx", raw), [raw], "OKX: pushTx(rawHex)");
+  assert.deepEqual(pushTxArgs("mock", raw), [raw]);
+  assert.throws(() => pushTxArgs("unisat", "abc"), /even-length hex/);
+  assert.throws(() => pushTxArgs("other", raw), /unknown wallet provider/);
+}
+
+// ---- result normalizers -----------------------------------------------------------------------
+{
+  assert.equal(firstAccount([ADDR]), ADDR, "requestAccounts() → [address]");
+  assert.equal(firstAccount({ address: ADDR, publicKey: "02" + "ab".repeat(32) }), ADDR, "OKX connect() → { address }");
+  assert.equal(firstAccount([]), null);
+  assert.equal(firstAccount(null), null);
+  assert.equal(normalizePubkey("02" + "AB".repeat(32)), "02" + "ab".repeat(32));
+  assert.equal(normalizePubkey("ab".repeat(32)), null, "x-only is not accepted (need 33 bytes)");
+  assert.equal(normalizeTxid(TXID.toUpperCase()), TXID);
+  assert.equal(normalizeTxid("not a txid"), null);
+  assert.deepEqual(normalizeBalance({ confirmed: "10", unconfirmed: 2.9, total: 12 }), { confirmed: 10, unconfirmed: 2, total: 12 });
+  assert.deepEqual(normalizeBalance(null), { confirmed: 0, unconfirmed: 0, total: 0 });
+  assert.deepEqual(normalizeUtxo({ txid: TXID.toUpperCase(), vout: 1, satoshis: 5000 }), { txid: TXID, vout: 1, sats: 5000 });
+  assert.deepEqual(normalizeUtxo({ txid: TXID, vout: 0, value: 700 }), { txid: TXID, vout: 0, sats: 700 });
+  assert.equal(normalizeUtxo({ txid: "xx", vout: 0, satoshis: 1 }), null);
+  assert.equal(normalizeUtxo({ txid: TXID, vout: -1, satoshis: 1 }), null);
+  assert.deepEqual(normalizeUtxoList({ list: [{ txid: TXID, vout: 3, satoshis: 900 }, { bogus: true }] }), [{ txid: TXID, vout: 3, sats: 900 }]);
+  assert.deepEqual(normalizeUtxoList(undefined), []);
+}
+
+// ---- silent-restore + default-provider policy --------------------------------------------------
+{
+  assert.equal(shouldRestore("okx", ["unisat", "okx"]), true);
+  assert.equal(shouldRestore("okx", ["unisat"]), false, "stored provider not injected → no restore");
+  assert.equal(shouldRestore("ledger", ["unisat", "okx"]), false, "unknown id → no restore");
+  assert.equal(shouldRestore(null, ["unisat"]), false);
+  assert.equal(defaultProviderId(null, ["okx"]), "okx", "one injected → pick it");
+  assert.equal(defaultProviderId(null, ["unisat", "okx"]), null, "two injected → user must choose");
+  assert.equal(defaultProviderId("unisat", ["unisat", "okx"]), "unisat", "connected one wins");
+  assert.equal(defaultProviderId(null, []), null);
+}
+
+// ---- M-8: inscription outpoints from getInscriptions pages ------------------------------------------
+{
+  const A = "aa".repeat(32);
+  const B = "bb".repeat(32);
+  const C = "cc".repeat(32);
+  assert.deepEqual(
+    inscriptionOutpoints({ total: 3, list: [{ inscriptionId: `${A}i0`, output: `${A.toUpperCase()}:1` }, { location: `${B}:0:333` }, { utxo: { txid: C, vout: "2" } }, { output: "nope" }, null] }),
+    [`${A}:1`, `${B}:0`, `${C}:2`],
+    "output / location / utxo shapes, malformed rows skipped",
+  );
+  assert.deepEqual(inscriptionOutpoints([{ output: `${A}:0` }]), [`${A}:0`], "bare array page");
+  assert.deepEqual(inscriptionOutpoints(undefined), []);
+  // paging: 2 full pages + 1 short page, cursor advances by list length
+  const pages = [
+    { total: 5, list: [{ output: `${A}:0` }, { output: `${A}:1` }] },
+    { total: 5, list: [{ output: `${B}:0` }, { output: `${B}:1` }] },
+    { total: 5, list: [{ output: `${C}:0` }] },
+  ];
+  const calls = [];
+  const set = await collectInscriptionOutpoints((cursor, size) => { calls.push([cursor, size]); return pages[calls.length - 1]; }, { size: 2 });
+  assert.deepEqual([...set].sort(), [`${A}:0`, `${A}:1`, `${B}:0`, `${B}:1`, `${C}:0`]);
+  assert.deepEqual(calls, [[0, 2], [2, 2], [4, 2]]);
+  // total reached exactly at a page boundary → no extra call
+  const calls2 = [];
+  await collectInscriptionOutpoints((cursor) => { calls2.push(cursor); return { total: 2, list: [{ output: `${A}:0` }, { output: `${A}:1` }] }; }, { size: 2 });
+  assert.deepEqual(calls2, [0]);
+  // maxPages bounds a runaway provider
+  let n = 0;
+  await collectInscriptionOutpoints(() => { n += 1; return { total: 1e9, list: [{ output: `${A}:${n}` }, { output: `${B}:${n}` }] }; }, { size: 2, maxPages: 3 });
+  assert.equal(n, 3);
+  // a throwing pager rejects (the wallet layer then falls back to assetSafe:false)
+  await assert.rejects(collectInscriptionOutpoints(() => { throw new Error("provider down"); }), /provider down/);
+}
+
+// ---- UniSat path: provider list ∩ indexer CONFIRMED rows ----------------------------------------------
+{
+  const A = "aa".repeat(32);
+  const B = "bb".repeat(32);
+  const C = "cc".repeat(32);
+  const D = "dd".repeat(32);
+  const provider = [
+    { txid: A, vout: 0, sats: 50_000 }, // confirmed, same value → kept
+    { txid: B, vout: 1, sats: 20_000 }, // indexer: unconfirmed (a just-broadcast SEND change) → excluded
+    { txid: C, vout: 0, sats: 9_000 },  // not listed by the indexer (scan behind / spent) → excluded
+    { txid: D, vout: 2, sats: 7_000 },  // listed confirmed but at another value → excluded
+  ];
+  const rows = [
+    { txid: A, vout: 0, sats: 50_000, confirmed: true },
+    { txid: B, vout: 1, sats: 20_000, confirmed: false },
+    { txid: D, vout: 2, sats: 7_500, confirmed: true },
+    { txid: "zz", vout: 0, sats: 1, confirmed: true }, // malformed indexer row ignored
+  ];
+  const r = intersectConfirmed(provider, rows);
+  assert.deepEqual(r.utxos, [{ txid: A, vout: 0, sats: 50_000 }], "only confirmed, value-matched outputs survive");
+  assert.deepEqual(r.unconfirmedOutpoints, [{ txid: B, vout: 1 }]);
+  assert.deepEqual(r.unlistedOutpoints, [{ txid: C, vout: 0 }]);
+  assert.deepEqual(r.mismatchedOutpoints, [{ txid: D, vout: 2 }]);
+  assert.deepEqual(intersectConfirmed(provider, []).utxos, [], "no indexer rows → nothing spendable (fails closed)");
+  assert.deepEqual(intersectConfirmed([], rows).utxos, []);
+  assert.deepEqual(intersectConfirmed(undefined, undefined), { utxos: [], unconfirmedOutpoints: [], unlistedOutpoints: [], mismatchedOutpoints: [] });
+}
+
+// ---- conflict detection ------------------------------------------------------------------------
+assert.equal(isConflictError(new Error("txn-mempool-conflict")), true);
+assert.equal(isConflictError(new Error("bad-txns-inputs-missingorspent")), true);
+assert.equal(isConflictError(new Error("Signature declined")), false);
+assert.equal(isConflictError(Object.assign(new Error("x"), { conflict: true })), true);
+
+// ---- fee choice: presets ------------------------------------------------------------------------
+assert.equal(FEE_CHOICE_KEY, "lp.feeChoice");
+assert.equal(DEFAULT_PRESET, "normal");
+assert.deepEqual(FEE_PRESETS.map((p) => p.id), ["fast", "normal", "slow", "economy"]);
+assert.deepEqual(FEE_PRESETS.map((p) => p.key), ["fastestFee", "halfHourFee", "hourFee", "economyFee"]);
+
+const FEES = { fastestFee: 12, halfHourFee: 8, hourFee: 5, economyFee: 3, minimumFee: 1 };
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, FEES), 12);
+assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, FEES), 8);
+assert.equal(resolveFeeRate({ kind: "preset", id: "slow" }, FEES), 5);
+assert.equal(resolveFeeRate({ kind: "preset", id: "economy" }, FEES), 3);
+assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, null), null, "no /fees → preset resolves to null (action disabled)");
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: 50_000 }), null, "a /fees value above the cap is REJECTED, not clamped (L-11)");
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: MAX_FEE_RATE_SAT_VB + 1 }), null);
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: MAX_FEE_RATE_SAT_VB }), MAX_FEE_RATE_SAT_VB, "exactly the cap is allowed");
+assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, { fastestFee: 12, halfHourFee: null }), null, "a missing key is unavailable, never a default");
+assert.equal(presetUnavailableReason("fast", { fastestFee: 50_000 }), "over-cap");
+assert.equal(presetUnavailableReason("fast", { fastestFee: 12 }), null);
+assert.equal(presetUnavailableReason("fast", null), "missing");
+assert.equal(presetUnavailableReason("normal", { fastestFee: 12 }), "missing");
+assert.deepEqual(presetRows({ fastestFee: 50_000, halfHourFee: 8 }).map((p) => [p.id, p.satVb, p.reason]), [["fast", null, "over-cap"], ["normal", 8, null], ["slow", null, "missing"], ["economy", null, "missing"]]);
+assert.match(presetUnavailableText("over-cap"), /safety cap/);
+assert.equal(presetUnavailableText("missing"), "estimate unavailable");
+assert.equal(presetUnavailableText(null), null);
+assert.equal(resolveFeeRate({ kind: "custom", value: 27 }, null), 27, "custom works without /fees");
+assert.equal(resolveFeeRate({ kind: "custom", value: null }, FEES), null);
+assert.deepEqual(
+  presetRows(null).map((p) => p.satVb),
+  [null, null, null, null],
+  "presets disabled without /fees",
+);
+assert.deepEqual(presetRows(FEES).map((p) => [p.id, p.satVb]), [["fast", 12], ["normal", 8], ["slow", 5], ["economy", 3]]);
+assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.length > 0));
+
+// A saved preset follows each new quote; an explicit custom rate does not.
+{
+  const updated = { fastestFee: 7, halfHourFee: 4, hourFee: 2, economyFee: 1 };
+  assert.deepEqual(presetRows(updated).map((p) => p.satVb), [7, 4, 2, 1]);
+  const normal = parseFeeChoice("normal");
+  assert.equal(resolveFeeRate(normal, FEES), 8);
+  assert.equal(resolveFeeRate(normal, updated), 4);
+  assert.equal(resolveFeeRate(normal, null), null, "failed quote must not preserve a spendable estimate");
+  assert.equal(resolveFeeRate(parseFeeChoice("27"), updated), 27);
+  const fractional = { fastestFee: 3.75, halfHourFee: 2.5, hourFee: 1.25, economyFee: 1.01 };
+  assert.deepEqual(presetRows(fractional).map((p) => p.satVb), [3.75, 2.5, 1.25, 1.01]);
+  assert.equal(missingFeeHint({ kind: "custom", value: 1.25 }, 1.25), null);
+}
+
+// ---- fee choice: the one spend gate (fractional rates are usable; an integer check is not) ----------
+{
+  for (const ok of [1, 1.02, 1.25, 2.38, MAX_FEE_RATE_SAT_VB]) assert.equal(isUsableFeeRate(ok), true, `usable: ${ok}`);
+  for (const bad of [0, 0.99, NaN, Infinity, null, undefined, MAX_FEE_RATE_SAT_VB + 0.01]) assert.equal(isUsableFeeRate(bad), false, `not usable: ${bad}`);
+  assert.equal(isUsableFeeRate("2"), false, "a string is not a rate");
+}
+
+// ---- fee choice: custom validation — out of range is unusable, never clamped (audit usertx-8) -------
+{
+  assert.deepEqual(clampCustomFee("27"), { value: 27, error: null });
+  assert.deepEqual(clampCustomFee(" 1 "), { value: 1, error: null });
+  assert.deepEqual(clampCustomFee("1000"), { value: 1000, error: null });
+  const over = clampCustomFee("1001");
+  assert.equal(over.value, null, "above the cap is unusable, not clamped to it");
+  assert.match(over.error, /1,000 sat\/vB safety cap — not used/);
+  const typo = clampCustomFee("5000"); // meant 50
+  assert.equal(typo.value, null);
+  assert.equal(isUsableFeeRate(typo.value), false, "the typo cannot reach a builder");
+  assert.equal(clampCustomFee("999999").value, null);
+  const zero = clampCustomFee("0");
+  assert.equal(zero.value, null);
+  assert.match(zero.error, /minimum/);
+  assert.equal(clampCustomFee("-5").value, null);
+  const frac = clampCustomFee("12.7");
+  assert.deepEqual(frac, { value: 12.7, error: null }, "fractional rates are never floored");
+  assert.deepEqual(clampCustomFee("1.25"), { value: 1.25, error: null });
+  assert.deepEqual(clampCustomFee("1."), { value: 1, error: null }, "typing a decimal separator is allowed");
+  assert.deepEqual(clampCustomFee("1000.00"), { value: 1000, error: null });
+  assert.equal(clampCustomFee("1000.01").value, null);
+  assert.equal(clampCustomFee("1.234").value, null);
+  assert.match(clampCustomFee("1.234").error, /2 decimal/);
+  for (const bad of ["1.2.3", "1e3", "NaN", "Infinity", "."]) assert.equal(clampCustomFee(bad).value, null);
+  const empty = clampCustomFee("");
+  assert.equal(empty.value, null);
+  assert.match(empty.error, /1–1,000/);
+  assert.equal(clampCustomFee("abc").value, null);
+  assert.equal(clampCustomFee(undefined).value, null);
+}
+
+// ---- fee choice: persistence round-trip -----------------------------------------------------------
+{
+  assert.deepEqual(parseFeeChoice(null), { kind: "preset", id: "normal" }, "first visit → Normal");
+  assert.deepEqual(parseFeeChoice("garbage"), { kind: "preset", id: "normal" });
+  assert.deepEqual(parseFeeChoice("fast"), { kind: "preset", id: "fast" });
+  assert.deepEqual(parseFeeChoice("economy"), { kind: "preset", id: "economy" });
+  assert.deepEqual(parseFeeChoice("27"), { kind: "custom", value: 27 });
+  assert.deepEqual(parseFeeChoice("1.25"), { kind: "custom", value: 1.25 });
+  assert.deepEqual(parseFeeChoice(2.5), { kind: "custom", value: 2.5 });
+  assert.deepEqual(parseFeeChoice("1.234"), { kind: "preset", id: DEFAULT_PRESET });
+  assert.deepEqual(parseFeeChoice("5000"), { kind: "preset", id: DEFAULT_PRESET }, "a stale over-cap value from an older build is dropped on load, never clamped");
+  assert.deepEqual(parseFeeChoice("0"), { kind: "preset", id: DEFAULT_PRESET });
+  assert.equal(resolveFeeRate({ kind: "custom", value: 5000 }, null), null, "an out-of-range custom value resolves to no rate");
+  assert.equal(serializeFeeChoice({ kind: "preset", id: "slow" }), "slow");
+  assert.equal(serializeFeeChoice({ kind: "custom", value: 42 }), "42");
+  assert.equal(serializeFeeChoice({ kind: "custom", value: null }), "normal", "an unusable custom falls back to the default");
+  assert.equal(serializeFeeChoice({ kind: "preset", id: "bogus" }), "normal");
+  for (const c of [{ kind: "preset", id: "fast" }, { kind: "custom", value: 250 }, { kind: "custom", value: 1.25 }]) {
+    assert.deepEqual(parseFeeChoice(serializeFeeChoice(c)), c, "round-trip");
+  }
+}
+
+// ---- high custom rates need an explicit confirmation (audit usertx-8) -----------------------------------
+{
+  assert.equal(highFeeThreshold(null), HIGH_FEE_MIN_SAT_VB, "no estimates → the absolute floor");
+  assert.equal(highFeeThreshold({ fastestFee: 12 }), HIGH_FEE_MIN_SAT_VB, "2 × 12 is below the floor");
+  assert.equal(highFeeThreshold({ fastestFee: 80 }), 160);
+  assert.equal(highFeeThreshold({ fastestFee: 5000 }), HIGH_FEE_MIN_SAT_VB, "an over-cap estimate is ignored");
+  assert.equal(needsHighFeeAck(50, { fastestFee: 12 }), false);
+  assert.equal(needsHighFeeAck(500, { fastestFee: 12 }), true, "a 500 sat/vB typo for 50 asks first");
+  assert.equal(needsHighFeeAck(150, { fastestFee: 80 }), false, "inside 2 × a busy mempool's fastest rate");
+  assert.equal(needsHighFeeAck(null, { fastestFee: 12 }), false);
+  assert.match(missingFeeHint({ kind: "custom", value: 500 }, null, "mine", { awaitingAck: true }), /Confirm the high custom fee rate/);
+}
+
+// ---- 503-while-seeding retry (src/lib/retry.js) ---------------------------------------------------------
+{
+  const seeding = () => Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 503: seeding"), { status: 503 });
+  assert.equal(isSeedingError(seeding()), true);
+  assert.equal(isSeedingError(new Error("Indexer /x -> HTTP 503")), true, "status-less 503 message");
+  assert.equal(isSeedingError(new Error("HTTP 500")), false);
+  assert.equal(isSeedingError(null), false);
+  const noSleep = async () => {};
+  // two seeding answers then rows: rows returned, onRetry fired twice
+  {
+    let calls = 0;
+    const retries = [];
+    const out = await retryOn503(async () => (++calls < 3 ? (() => { throw seeding(); })() : ["row"]), { attempts: 3, sleep: noSleep, onRetry: (n) => retries.push(n) });
+    assert.deepEqual([out, calls, retries], [["row"], 3, [1, 2]]);
+  }
+  // still seeding after the last attempt → the 503 is thrown
+  {
+    let calls = 0;
+    await assert.rejects(retryOn503(async () => { calls += 1; throw seeding(); }, { attempts: 3, sleep: noSleep }), /HTTP 503/);
+    assert.equal(calls, 3);
+  }
+  // any other error is thrown at once, no retry
+  {
+    let calls = 0;
+    await assert.rejects(retryOn503(async () => { calls += 1; throw new Error("Indexer unreachable"); }, { attempts: 3, sleep: noSleep }), /unreachable/);
+    assert.equal(calls, 1);
+  }
+}
+
+console.log("wallet: provider shapes + fee choice + seeding retry ok");

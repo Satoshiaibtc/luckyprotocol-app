@@ -1,0 +1,2 @@
+# Any earlier spec path (a versioned file name) now lives at /PROTOCOL.md.
+/PROTOCOL-*.md /PROTOCOL.md 301

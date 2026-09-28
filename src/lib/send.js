@@ -1,0 +1,248 @@
+// The Send page's pure logic (owner decision G, audits portfolio-2 /
+// portfolio-3) — unit-tested in test/send.test.js.
+//
+// A SEND moves `AMT` of ONE ticker from the tx's input pool (the carriers
+// it spends) to vout0; the residual of that ticker AND every other ticker
+// on those carriers go to vout3, the sender's own 546-sat residual slot
+// (§2.3 / §4.1). So the same page that sends tokens to someone else also
+// splits a multi-ticker carrier: send the ticker to yourself and it lands
+// alone on vout0, the other tickers together on vout3.
+//
+//   sendCarrierRows   the address's carriers of a ticker, with why a row
+//                     cannot be spent right now (listed / fill pending /
+//                     already spent by your own pending tx)
+//   autoPickCarriers  which carriers to spend for an amount
+//   sendAmountError   whole tokens, 1 … what the chosen carriers hold
+//   recipientState    the recipient check + the self / fee-address warnings
+//   sendLayout        the §2.3 reference layout, as the confirm screen shows it
+//   parseSendAmount   the amount field → whole tokens ("1,000" allowed)
+//   sendFormHint      the one line saying why Review is still off
+//   sendReviewModel   what the confirm screen shows — frozen at signing (ux-2)
+//   pendingSendsOf    this browser's unconfirmed sends of a ticker
+
+import { checkRecipientAddress } from "./psbt.js";
+import { DUST_SATS, PROJECT_FEE_ADDRESS, SEND_PROTOCOL_FEE_SATS } from "./payloads.js";
+
+const key = (u) => `${String(u.txid).toLowerCase()}:${Number(u.vout)}`;
+
+/** Your token outputs of a SEND just broadcast: vout3 (residual slot) always, vout0 too when it pays you. */
+export function sendPendingOutpoints(txid, { toSelf = false } = {}) {
+  return toSelf ? [{ txid, vout: 0 }, { txid, vout: 3 }] : [{ txid, vout: 3 }];
+}
+
+/**
+ * The carriers of `ticker` at this address, largest amount first:
+ *   { key, txid, vout, amount, balances, others: [[ticker, amount]], sats,
+ *     listing, blocked: null | "listed" | "filling" | "pending", note }
+ * `tokenUtxos` = /utxos/:addr rows, `btcUtxos` = /btc-utxos rows (for the
+ * carrier's BTC value), `orders` = this address's OrderViews (live ones mark
+ * a carrier listed / filling), `pendingSpent` = Set of "txid:vout" your own
+ * unconfirmed broadcasts already spend (txrecords.pendingSpentOutpoints).
+ */
+export function sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent, ticker }) {
+  const sats = new Map((btcUtxos || []).map((u) => [key(u), Number(u.sats)]));
+  const live = new Map((orders || []).filter((o) => o && (o.status === "open" || o.status === "filling")).map((o) => [String(o.id).toLowerCase(), o]));
+  const spent = pendingSpent instanceof Set ? pendingSpent : new Set(pendingSpent || []);
+  return (tokenUtxos || [])
+    .filter((u) => Number(u.balances?.[ticker]) > 0)
+    .map((u) => {
+      const k = key(u);
+      const listing = live.get(k) || null;
+      const others = Object.entries(u.balances).filter(([t, a]) => t !== ticker && Number(a) > 0);
+      let blocked = null;
+      if (spent.has(k)) blocked = "pending";
+      else if (listing?.status === "filling") blocked = "filling";
+      else if (listing) blocked = "listed";
+      return {
+        key: k,
+        txid: String(u.txid).toLowerCase(),
+        vout: Number(u.vout),
+        amount: Number(u.balances[ticker]),
+        balances: u.balances,
+        others,
+        sats: sats.has(k) ? sats.get(k) : null,
+        listing,
+        blocked,
+      };
+    })
+    .sort((a, b) => b.amount - a.amount || a.key.localeCompare(b.key));
+}
+
+/** Plain words for a row's state (never shown for a free row). */
+export function carrierNote(row, ticker) {
+  if (row.blocked === "pending") return "already spent by one of your transactions that has not confirmed yet";
+  if (row.blocked === "filling") return "a fill of its listing is in the mempool — it cannot be spent until that confirms or drops";
+  if (row.blocked === "listed") return `listed for sale — sending it withdraws that listing (its signed listing can no longer be filled)`;
+  if (row.others.length) return `also carries ${row.others.map(([t, a]) => `${Number(a).toLocaleString("en-US")} ${t}`).join(", ")} — those go to your residual carrier (vout3), not to the recipient`;
+  if (Number.isInteger(row.sats) && row.sats > DUST_SATS) return `also holds ${row.sats.toLocaleString("en-US")} sats of BTC — they come back to you as change`;
+  return `${ticker} only`;
+}
+
+/** Rows that may be picked automatically: free, and never a listed carrier. */
+const autoEligible = (r) => !r.blocked;
+
+/**
+ * Which carriers (keys) to spend for `amount` of the ticker, or null when
+ * the free carriers do not hold that much. Preference: one single-ticker
+ * carrier holding exactly the amount; else the smallest single-ticker
+ * carrier that covers it; else single-ticker carriers largest-first; only
+ * then carriers that also hold other tickers (they drag those tickers
+ * into the residual slot — harmless, but not what a plain send expects).
+ */
+export function autoPickCarriers(rows, amount) {
+  const a = Number(amount);
+  if (!Number.isInteger(a) || a < 1) return [];
+  const free = (rows || []).filter(autoEligible);
+  const single = free.filter((r) => r.others.length === 0);
+  const exact = single.find((r) => r.amount === a);
+  if (exact) return [exact.key];
+  const cover = single.filter((r) => r.amount >= a).sort((x, y) => x.amount - y.amount)[0];
+  if (cover) return [cover.key];
+  const picked = [];
+  let sum = 0;
+  for (const r of [...single].sort((x, y) => y.amount - x.amount).concat([...free.filter((r) => r.others.length)].sort((x, y) => y.amount - x.amount))) {
+    if (sum >= a) break;
+    picked.push(r.key);
+    sum += r.amount;
+  }
+  return sum >= a ? picked : null;
+}
+
+/** Sum of the ticker held by the rows whose key is in `keys`. */
+export function pickedAmount(rows, keys) {
+  const set = new Set(keys || []);
+  return (rows || []).filter((r) => set.has(r.key)).reduce((s, r) => s + r.amount, 0);
+}
+
+/** How much of the ticker the rows could send at most (free rows + listed ones, never pending / filling). */
+export function spendableAmount(rows) {
+  return (rows || []).filter((r) => r.blocked !== "pending" && r.blocked !== "filling").reduce((s, r) => s + r.amount, 0);
+}
+
+/**
+ * The whole-token amount the field text means, or null: plain digits, or
+ * digits grouped by commas in threes ("1,000" — how the page itself prints
+ * amounts, so a pasted figure works; audit ux-7). Anything else is null.
+ */
+export function parseSendAmount(text) {
+  const t = String(text ?? "").trim();
+  if (/^\d+$/.test(t)) return Number(t);
+  if (/^\d{1,3}(,\d{3})+$/.test(t)) return Number(t.replace(/,/g, ""));
+  return null;
+}
+
+/**
+ * Why `text` is not a usable amount (whole tokens, 1 … `max`), or null.
+ * `max` = what the chosen carriers hold (or the free balance).
+ */
+export function sendAmountError(text, max, ticker) {
+  const t = String(text ?? "").trim();
+  if (t === "") return null;
+  const cap = Number(max) || 0;
+  if (cap < 1) return `No ${ticker} available to send right now.`;
+  const range = `Enter a whole number of ${ticker} from 1 to ${cap.toLocaleString("en-US")}`;
+  const n = parseSendAmount(t);
+  if (n === null) {
+    return t.includes(",") && !/[.]/.test(t)
+      ? `${range} — digits only, for example 1500 (commas only between groups of three digits).`
+      : `${range} — whole tokens only, digits only (for example 1500).`;
+  }
+  if (n < 1) return `${range} (not zero).`;
+  if (n > cap) return `${range} — you have ${cap.toLocaleString("en-US")} available here.`;
+  return null;
+}
+
+/**
+ * The recipient check for the form: `{ state: "empty" | "invalid" | "ok",
+ * address, label, error, self, feeAddress }`. The address rules are the
+ * SEND builder's own (psbt.checkRecipientAddress: legacy 1…, P2SH 3…,
+ * bc1q…, bc1p…); bech32 is lower-cased first (it is case-insensitive).
+ */
+export function recipientState(text, self) {
+  const raw = String(text ?? "").trim();
+  if (!raw) return { state: "empty", address: "", label: null, error: null, self: false, feeAddress: false };
+  const address = /^bc1/i.test(raw) ? raw.toLowerCase() : raw;
+  const r = checkRecipientAddress(address, self || null);
+  if (!r.ok) return { state: "invalid", address, label: null, error: r.error, self: false, feeAddress: false };
+  return { state: "ok", address, label: r.label, error: null, self: !!self && address === self, feeAddress: address === PROJECT_FEE_ADDRESS };
+}
+
+/**
+ * The one line under the form saying why Review is still off, or null when
+ * nothing (or a message already on screen) explains it. A specific amount
+ * error is shown by the field itself, so no second, contradicting line is
+ * added for it (audit ux-7).
+ */
+export function sendFormHint({ connected, indexerOk, lagText, rcptState, amount, amountErr, keysCount, pickedTotal, mode, freeTotal, ticker, feeHint }) {
+  if (!connected) return null;
+  if (!indexerOk) return "Indexer offline — sending is paused until it is reachable.";
+  if (lagText) return lagText;
+  if (rcptState === "empty") return "Enter the recipient's address.";
+  if (rcptState === "invalid") return null;
+  if (amountErr) return null;
+  if (!amount) return `Enter how many ${ticker} to send.`;
+  if (!keysCount || pickedTotal < amount) {
+    return mode === "auto"
+      ? `Your free ${ticker} carriers hold ${Number(freeTotal).toLocaleString("en-US")} — not enough for ${Number(amount).toLocaleString("en-US")}.`
+      : "Tick the carriers to spend — together they must hold the amount.";
+  }
+  return feeHint || null;
+}
+
+/**
+ * What the confirm screen shows for a SEND of `amount` from the carriers
+ * `keys` of `rows` to `toAddress` (`self` = your address): the §2.3 layout,
+ * the other tickers riding along and the listed carriers it withdraws. The
+ * page freezes this at signing (audit ux-2): afterwards the live rows no
+ * longer hold the spent carriers, so a model rebuilt from them would
+ * describe a transaction that was never sent.
+ */
+export function sendReviewModel({ rows, keys, ticker, amount, toAddress, self, payloadText, feeRateSatVb = null }) {
+  const set = new Set(keys || []);
+  const picked = (rows || []).filter((r) => set.has(r.key)).map((r) => ({ ...r, balances: { ...r.balances }, others: r.others.map(([t, a]) => [t, a]) }));
+  return {
+    ticker,
+    amount: Number(amount) || 0,
+    toAddress,
+    toSelf: !!self && toAddress === self,
+    keys: picked.map((r) => r.key),
+    layout: sendLayout({ rows: picked, keys: picked.map((r) => r.key), ticker, amount, toAddress, self, payloadText }),
+    others: picked.filter((r) => r.others.length),
+    listed: picked.filter((r) => r.blocked === "listed"),
+    feeRateSatVb,
+  };
+}
+
+/** This browser's unconfirmed SEND records of `ticker` (txrecords rows). */
+export function pendingSendsOf(records, ticker) {
+  return (records || []).filter((r) => !r.confirmed && r.kind === "send" && r.ticker === ticker);
+}
+
+/**
+ * What each output of the SEND carries, for the confirm screen:
+ * `[{ vout, sats, to, carries }]` in the §2.3 reference layout, from the
+ * picked rows' balances (the input pool) — vout0 gets `amount` of the
+ * ticker, vout3 the rest of it plus every other ticker. `changeSats` null
+ * = "BTC change, if ≥ 546 sats".
+ */
+export function sendLayout({ rows, keys, ticker, amount, toAddress, self, payloadText, changeSats = null }) {
+  const set = new Set(keys || []);
+  const pool = {};
+  for (const r of rows || []) {
+    if (!set.has(r.key)) continue;
+    for (const [t, a] of Object.entries(r.balances || {})) pool[t] = (pool[t] || 0) + Number(a);
+  }
+  const amt = Number(amount) || 0;
+  const residual = { ...pool, [ticker]: Math.max(0, (pool[ticker] || 0) - amt) };
+  const residualText = Object.entries(residual)
+    .filter(([, a]) => a > 0)
+    .map(([t, a]) => `${a.toLocaleString("en-US")} ${t}`)
+    .join(" + ");
+  return [
+    { vout: 0, sats: DUST_SATS, to: toAddress === self ? "you (new carrier)" : toAddress, carries: `${amt.toLocaleString("en-US")} ${ticker}` },
+    { vout: 1, sats: SEND_PROTOCOL_FEE_SATS, to: "protocol fee address", carries: "—" },
+    { vout: 2, sats: 0, to: "OP_RETURN", carries: payloadText || "" },
+    { vout: 3, sats: DUST_SATS, to: "you (residual carrier)", carries: residualText || "nothing (this output is always there)" },
+    { vout: 4, sats: changeSats, to: "you (BTC change)", carries: "— never tokens" },
+  ];
+}
