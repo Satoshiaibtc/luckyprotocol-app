@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as indexer from "./lib/indexer.js";
-import { syncStateOf } from "./lib/sync.js";
+import { chainTipOf, syncStateOf, syncWarningText } from "./lib/sync.js";
+import { NETWORK_POLL_MS, confirmedNetworkLag, fetchNetworkFees, fetchNetworkTip, mergeFeeSources, networkLag } from "./lib/network.js";
+import { setIndexedTip, setUnseenTrusted } from "./lib/txrecords.js";
+import { mockNetworkFees, mockNetworkTip } from "./lib/mock.js";
 import { usePoll } from "./hooks/usePoll.js";
 import { useWallet } from "./hooks/useWallet.js";
 import { useFeeRate } from "./hooks/useFeeRate.js";
@@ -47,6 +50,20 @@ function ActivationBanner({ tip }) {
   );
 }
 
+/**
+ * The site-wide line under the top bar while our data may be out of date:
+ * a rebuild, a stalled indexer, a node without peers or behind the network
+ * (src/lib/sync.js syncWarningText). Hidden while everything is current.
+ */
+function SyncBanner({ sync, tipTime }) {
+  const text = syncWarningText(sync, { tipTime });
+  if (!text) return null;
+  return (
+    <div className="activation-banner sync-banner" role="alert">
+      <span>{text}</span>
+    </div>
+  );
+}
 
 export default function App() {
   const { route, navigate } = useHashRoute();
@@ -60,13 +77,50 @@ export default function App() {
   // ---- app-wide indexer reads ----------------------------------------------------------
   const [statusPollMs, setStatusPollMs] = useState(STATUS_POLL_MS);
   const health = usePoll((s) => indexer.health(s), statusPollMs, []);
-  const sync = useMemo(() => syncStateOf(health.error ? null : health.data), [health.data, health.error]);
+  // The second source's tip, every NETWORK_POLL_MS (src/lib/network.js): a
+  // node that lost its peers or was fed an old chain still calls itself
+  // synced — only an independent tip shows it. The URL carries no user data.
+  const netTip = usePoll(() => (MOCK ? mockNetworkTip() : fetchNetworkTip()), NETWORK_POLL_MS, []);
+  // The node's tip, never below what the indexer has applied (it reads 0 for
+  // a moment after an indexer restart, which is no lag behind the network).
+  const nodeTip = chainTipOf(health.data);
+  const lagTrackerRef = useRef({ read: null, tracker: null });
+  const [netLag, setNetLag] = useState(0);
+  useEffect(() => {
+    const t = lagTrackerRef.current;
+    const now = Date.now();
+    if (netTip.updatedAt !== null && netTip.updatedAt !== t.read) {
+      t.read = netTip.updatedAt;
+      t.tracker = networkLag(t.tracker, { networkTip: netTip.error ? null : netTip.data, tip: nodeTip, now });
+    }
+    setNetLag(confirmedNetworkLag(t.tracker, nodeTip, now));
+  }, [netTip.updatedAt, netTip.data, netTip.error, nodeTip]);
+  const sync = useMemo(() => syncStateOf(health.error ? null : health.data, { networkLag: netLag }), [health.data, health.error, netLag]);
+  // Records of this browser's broadcasts drop a tx the node "does not know"
+  // only while that answer means something (src/lib/txrecords.js).
+  useEffect(() => {
+    setUnseenTrusted(sync.trustUnseen);
+    setIndexedTip(sync.indexed);
+  }, [sync.trustUnseen, sync.indexed]);
   useEffect(() => {
     setStatusPollMs(sync.lag > 0 ? LAGGING_POLL_MS : STATUS_POLL_MS);
   }, [sync.lag]);
   const tokens = usePoll((s) => indexer.tokens({ limit: 200 }, s), 30_000, []);
-  const tipHeight = health.data?.tip_height ?? null;
-  const fees = usePoll((s) => indexer.fees(s), 30_000, [tipHeight]);
+  const tipHeight = chainTipOf(health.data);
+  const feesPoll = usePoll((s) => indexer.fees(s), 30_000, [tipHeight]);
+  // The second source's recommended rates: the Fast tier follows it when it
+  // is higher, and it stands in when the indexer's node has no estimate —
+  // estimates the indexer marks `ok: false` are never used (network.js).
+  const netFees = usePoll(() => (MOCK ? mockNetworkFees() : fetchNetworkFees()), NETWORK_POLL_MS, []);
+  const mergedFees = useMemo(
+    () => mergeFeeSources(feesPoll.error ? null : feesPoll.data, netFees.error ? null : netFees.data),
+    [feesPoll.data, feesPoll.error, netFees.data, netFees.error],
+  );
+  const hasFees = mergedFees.source !== null;
+  const fees = useMemo(
+    () => ({ ...feesPoll, data: feesPoll.data || hasFees ? mergedFees : null, error: hasFees ? null : feesPoll.error }),
+    [feesPoll, mergedFees, hasFees],
+  );
   // One fee choice (preset from /fees or custom sat/vB) for every builder.
   const fee = useFeeRate(fees.error ? null : fees.data);
   const tipBlock = usePoll(tipHeight ? (s) => indexer.blockInfo(tipHeight, s) : null, 0, [tipHeight]);
@@ -162,6 +216,7 @@ export default function App() {
       <div className={`app${mobile ? " app-mobile" : ""}`}>
         <TopBar />
         <ActivationBanner tip={tipHeight} />
+        {!health.error && health.data && <SyncBanner sync={sync} tipTime={health.data.tip_time ?? null} />}
         <MineTicker />
         {page}
         <Footer />

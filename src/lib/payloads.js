@@ -48,6 +48,10 @@ export const MAX_OUT_IDX = 255;
 // MIN_COMMIT_AGE and at most MAX_COMMIT_AGE blocks after its COMMIT's block.
 export const MIN_COMMIT_AGE = 1;
 export const MAX_COMMIT_AGE = 2_016;
+// Confirmations after which a block's effects are final (§1, §3.1). Defined
+// with the other depth helpers; re-exported here so the §1 gate
+// (scripts/check-spec.mjs) compares it with the spec like every constant.
+export { FINAL_DEPTH } from "./finality.js";
 export const MAX_PAYLOAD_BYTES = 80;
 export const TICKER_RE = /^[A-Z0-9]{1,8}$/;
 /** REVEAL salt: exactly 16 bytes as 32 lowercase hex characters. */

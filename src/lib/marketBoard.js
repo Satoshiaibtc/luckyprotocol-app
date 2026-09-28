@@ -1,11 +1,13 @@
 // Pure helpers for the #/market page and the board's market gating.
 //
-// Owner's rule (2026-09-27): a token's market opens only once the token is
-// fully minted. "Minted" is the CUMULATIVE credited MINE yield — it never
-// decreases (burns, unspendable outputs and anything else never lower it),
-// so once a token is minted out it stays minted out forever. The indexer
-// says so with `minted_out` on every token row; `isMintedOut` also accepts
-// the raw `minted >= supply` reading for rows that predate the field.
+// Owner's rules (2026-09-27, 2026-09-28): a token's market opens only once
+// the token is fully minted AND the block that completed the supply has
+// FINAL_DEPTH (6) confirmations (src/lib/finality.js). "Minted" is the
+// CUMULATIVE credited MINE yield — burns and unspendable outputs never
+// lower it; only a chain reorganization that replaces the blocks of its
+// MINEs can. The indexer says so with `minted_out` and `market_open` on
+// every token row; `isMintedOut` also accepts the raw `minted >= supply`
+// reading for rows that predate the field.
 
 export const NEXT_LIMIT = 6;
 
@@ -23,6 +25,20 @@ export function isMintedOut(t) {
   const supply = Number(t.supply);
   const minted = Number(t.minted);
   return Number.isFinite(supply) && supply > 0 && Number.isFinite(minted) && minted >= supply;
+}
+
+/**
+ * Is the token's market open (minted out, and the completing block is
+ * FINAL_DEPTH deep)? The indexer's `market_open` flag decides — the
+ * sanitizer fills it for rows that predate it; only an explicit true opens.
+ */
+export function isMarketOpen(t) {
+  return !!t && t.market_open === true;
+}
+
+/** Minted out, but the block that completed the supply is not deep enough yet: no market so far. */
+export function isMarketPending(t) {
+  return isMintedOut(t) && !isMarketOpen(t);
 }
 
 /** Minted share in percent, 0–100 (a minted-out token is exactly 100). */
@@ -60,23 +76,24 @@ export function sortOpenMarkets(rows, sort = "volume") {
 }
 
 /**
- * Split the token registry into `open` (minted out, sorted by `sort`) and
- * `next` (not yet minted out, highest minted share first, at most
- * `nextLimit` rows — the "Next to open" strip).
+ * Split the token registry into `open` (market open, sorted by `sort`) and
+ * `next` (no market yet, highest minted share first — a minted-out token
+ * waiting for its completing block to be deep enough leads — at most
+ * `nextLimit` rows: the "Next to open" strip).
  */
 export function partitionMarkets(items, { sort = "volume", nextLimit = NEXT_LIMIT } = {}) {
   const rows = Array.isArray(items) ? items.filter(Boolean) : [];
-  const open = sortOpenMarkets(rows.filter(isMintedOut), sort);
+  const open = sortOpenMarkets(rows.filter(isMarketOpen), sort);
   const next = rows
-    .filter((t) => !isMintedOut(t))
+    .filter((t) => !isMarketOpen(t))
     .sort((a, b) => mintedPct(b) - mintedPct(a) || (b.mine_count ?? 0) - (a.mine_count ?? 0) || byTicker(a, b))
     .slice(0, Math.max(0, nextLimit));
   return { open, next };
 }
 
-/** Minted-out tokens first, everything else after in its existing order (stable). */
+/** Tokens with an open market first, everything else after in its existing order (stable). */
 export function mintedOutFirst(rows) {
-  return [...rows.filter(isMintedOut), ...rows.filter((t) => !isMintedOut(t))];
+  return [...rows.filter(isMarketOpen), ...rows.filter((t) => !isMarketOpen(t))];
 }
 
 /**

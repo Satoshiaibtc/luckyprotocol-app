@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { isAllowedSpecUrl } from "../src/lib/specUrl.js";
 import { loadEnv } from "./gen-headers.mjs";
 
-/** §1 row name → payloads.js export. */
+/** §1 row name → payloads.js export (FINAL_DEPTH is re-exported there from finality.js). */
 export const SPEC_CONSTANTS = [
   "PROTOCOL_PREFIX",
   "ACTIVATION_HEIGHT",
@@ -35,6 +35,7 @@ export const SPEC_CONSTANTS = [
   "MAX_OUT_IDX",
   "MIN_COMMIT_AGE",
   "MAX_COMMIT_AGE",
+  "FINAL_DEPTH",
 ];
 
 /**

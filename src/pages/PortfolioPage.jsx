@@ -15,7 +15,7 @@ import Panel from "../components/hud/Panel.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
 import { txRecords } from "../lib/txrecords.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
-import { listingRefusalText } from "../lib/market.js";
+import { WITHDRAW_CONFIRMED_TEXT, WITHDRAW_PENDING_TEXT, listingRefusalText } from "../lib/market.js";
 import { fmtInt, fmtMintedPct, fmtPct, fmtUnit, shortAddr, shortTxid, addrUrl, walletBalanceText } from "../lib/format.js";
 
 const POLL_MS = 15_000;
@@ -226,15 +226,16 @@ export default function PortfolioPage() {
                 onReset={reset}
                 labels={{
                   building: "Building the withdrawal — a SEND of the listed UTXO to yourself.",
-                  pending: "Withdrawal broadcast. Pending confirmation — checking every 15 s.",
-                  confirmed: "Withdrawn on-chain. The old signed listing can no longer be filled.",
+                  pending: WITHDRAW_PENDING_TEXT,
+                  confirmed: WITHDRAW_CONFIRMED_TEXT,
+                  final: "Withdrawn on-chain and final. The old signed listing can no longer be filled.",
                 }}
               />
             </>
           )}
           <OrdersTable q={{ ...orders, rows: listings }} showTicker onCancel={cancelOrder} onRenew={renewOrder} busy={busy || renew.phase === "busy"} records={records} empty="No listings from this address. List a carrier on a token's Market tab." />
           <p className="fineprint">
-            A listing expires 14 days after it was (re)published; <strong>Renew</strong> re-POSTs the same signed PSBT for free. <strong>Withdraw</strong> is a SEND to yourself — the only thing that voids a signed listing. A <em>filling</em> row has someone else&apos;s fill in the mempool: if it confirms you are paid, and withdrawing it must out-bid that fill. A <em>withdrawing</em> row is your own withdrawal waiting for a block.
+            A listing expires 14 days after it was (re)published; <strong>Renew</strong> re-POSTs the same signed PSBT for free. <strong>Withdraw</strong> is a SEND to yourself — the only thing that voids a signed listing. A <em>filling</em> row has someone else&apos;s fill in the mempool: if it confirms you are paid, and withdrawing it must out-bid that fill. A <em>withdrawing</em> row is your own withdrawal waiting for a block — until it confirms, the listing can still be bought.
           </p>
         </Panel>
 

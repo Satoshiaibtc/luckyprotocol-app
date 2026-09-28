@@ -13,6 +13,7 @@
 import { DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "./payloads.js";
 import { MAX_FEE_RATE_SAT_VB } from "./psbt.js";
 import { estimateFillCost } from "./swap.js";
+import { FINAL_DEPTH } from "./finality.js";
 import { COMMIT_CARRIER_PLAIN_TEXT, SELLER_CAP_RE, listingCapText } from "./listingRules.js";
 
 export const WINDOWS = [
@@ -23,6 +24,20 @@ export const INTERVALS = [
   { id: "1h", label: "1h", limit: 168 },
   { id: "1d", label: "1d", limit: 90 },
 ];
+
+// ---- withdrawal wording --------------------------------------------------------------------
+
+/**
+ * The withdrawal's pending line (audit: withdrawals racing fills): until the
+ * SEND-to-self confirms, the old signed listing is still a valid fill —
+ * anyone who saved it can pay a higher fee and replace the withdrawal.
+ */
+export const WITHDRAW_PENDING_TEXT =
+  "Withdrawal broadcast. Until it confirms, anyone who saved the old signed listing can still fill it — a fill that pays a higher fee can replace this withdrawal. Checking every 15 s.";
+
+/** The withdrawal confirmed but is not final: a chain reorganization could still bring the old listing back. */
+export const WITHDRAW_CONFIRMED_TEXT =
+  `Withdrawal confirmed — final after ${FINAL_DEPTH} confirmations. Until then a chain reorganization could put it back in the mempool, and the old listing with it; this page keeps checking.`;
 
 // ---- axis ticks -------------------------------------------------------------------------
 
@@ -355,16 +370,31 @@ export const RAISE_PRICE_TEXT =
   "To raise the price, withdraw this listing first. Your earlier listing is already signed at the lower price, and anyone who saved it can still complete it on-chain at that price — so the order book keeps the cheaper one. Withdraw moves these tokens to a new carrier of yours on-chain (a send to yourself), which voids the old signature for good; then list the new carrier at the higher price.";
 
 /**
+ * The order book could not save a listing to disk (a 503 that says so): it
+ * is not confirmed — it may not be listed at all, or only until the indexer
+ * restarts, and while it is shown a buyer can fill it. Posting the same
+ * listing again is safe (the same price renews it).
+ */
+export const BOOK_NOT_SAVED_TEXT =
+  "The order book could not save this listing right now: it may not be listed, or only until the indexer restarts — and while it is shown, it can be filled at your price. Try again in a few minutes; posting the same listing again is safe.";
+
+/** The sell form's pause while the order book reports that it cannot save listings. */
+export const BOOK_UNSAVED_PAUSE_TEXT =
+  "The order book cannot save new listings right now, so listing is paused until it can. Withdrawing still works.";
+
+/**
  * A POST /orders refusal (indexer.orderHttpError: the server's sentence +
  * `status`) → one sentence for the sell form, or null when `e` is not a
  * refusal of the book (a wallet or network error keeps its own text).
- * Band / cap / pending-spend refusals get short plain words; anything else
- * is the book's own sentence behind "The order book refused this listing".
+ * Band / cap / pending-spend refusals get short plain words, as does a book
+ * that cannot save listings (503); anything else is the book's own
+ * sentence behind "The order book refused this listing".
  */
 export function listingRefusalText(e) {
   const status = Number(e?.status);
-  if (!Number.isInteger(status) || status < 400 || status >= 500) return null;
   const msg = String(e?.message || "").trim();
+  if (status === 503 && /cannot be saved/i.test(msg)) return BOOK_NOT_SAVED_TEXT;
+  if (!Number.isInteger(status) || status < 400 || status >= 500) return null;
   // §7.4 per-ticker cap: "<TICKER> has N open orders (cap N); a new ask must
   // undercut the worst one (…)" is the book's own sentence, kept whole. It
   // names the ticker, so it is settled first: no rule below may read a

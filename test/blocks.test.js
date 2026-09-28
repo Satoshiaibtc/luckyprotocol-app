@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { blockStats, blockFullness, visibleBlockCount, MAX_BLOCK_WEIGHT } from "../src/lib/blocks.js";
+import { hashesDisagree } from "../src/hooks/useRecentBlocks.js";
 
 assert.deepEqual(blockStats({ weight: 3_200_000, tx_count: 2_500 }), { weight: 3_200_000, tx_count: 2_500 });
 assert.equal(blockFullness(1_000_000), 25);
@@ -23,3 +24,17 @@ assert.equal(visibleBlockCount(1194), 20);
 assert.equal(visibleBlockCount(1230), 20);
 assert.equal(visibleBlockCount(600), 9);
 console.log("blocks: true weight occupancy, unknown data, full labels and bounded tile count passed");
+
+// The block tape compares the WHOLE /blocks/recent window with its cache: the
+// usual chain reorganization replaces h and adds h+1 in one step, so only
+// the ceiling moves — h must still be noticed (its hash changed).
+{
+  const A = "0".repeat(63) + "a";
+  const B = "0".repeat(63) + "b";
+  const cache = new Map([[969_800, { hash: A }], [969_799, { hash: "0".repeat(64) }], [969_798, { missing: true }]]);
+  assert.equal(hashesDisagree(cache, new Map([[969_801, { hash: B }], [969_800, { hash: B }]])), true, "h replaced while h+1 arrived");
+  assert.equal(hashesDisagree(cache, new Map([[969_801, { hash: B }], [969_800, { hash: A }]])), false, "the same chain, one more block");
+  assert.equal(hashesDisagree(cache, new Map([[969_798, { hash: B }]])), false, "a height cached as missing is not a disagreement");
+  assert.equal(hashesDisagree(new Map(), new Map([[1, { hash: A }]])), false);
+  console.log("blocks: a replaced block anywhere in the window resets the tape");
+}

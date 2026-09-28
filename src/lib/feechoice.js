@@ -12,7 +12,8 @@ export const MIN_FEE_RATE_SAT_VB = 1;
 export const DEFAULT_PRESET = "normal";
 
 export const FEE_PRESETS = [
-  { id: "fast", label: "Fast", key: "fastestFee", eta: "~10 min" },
+  // Fast aims at the next block or two (the node's estimator targets 2 blocks at best).
+  { id: "fast", label: "Fast", key: "fastestFee", eta: "~10–20 min" },
   { id: "normal", label: "Normal", key: "halfHourFee", eta: "~30 min" },
   { id: "slow", label: "Slow", key: "hourFee", eta: "~1 h" },
   { id: "economy", label: "Economy", key: "economyFee", eta: "> 1 h" },
@@ -118,7 +119,7 @@ export function missingFeeHint(choice, satVb, action = "continue", { awaitingAck
   if (Number.isFinite(satVb) && satVb >= MIN_FEE_RATE_SAT_VB) return null;
   if (choice && choice.kind === "custom" && awaitingAck) return `Confirm the high custom fee rate under "Fee rate" to ${action}.`;
   if (choice && choice.kind === "custom") return `Enter a custom fee rate (${MIN_FEE_RATE_SAT_VB}–${MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB) to ${action}.`;
-  return `No fee estimate from the indexer — choose Custom and enter a sat/vB to ${action}.`;
+  return `No fee estimate from the indexer or mempool.space — choose Custom and enter a sat/vB to ${action}.`;
 }
 
 /** Preset rows for the selector: `{ id, label, eta, satVb | null, reason: null | 'missing' | 'over-cap' }`. */
@@ -156,7 +157,9 @@ export function highFeeThreshold(feesData) {
 /**
  * Does this custom `value` need an explicit "use it anyway"? Only for a
  * usable rate above highFeeThreshold — presets never do (they are the
- * indexer's own estimates, rejected above the cap).
+ * indexer's own estimates, rejected above the cap; a Fast raised to the
+ * second source's rate is bounded where this confirmation would start,
+ * see mergeFeeSources in network.js).
  */
 export function needsHighFeeAck(value, feesData) {
   return isUsableFeeRate(value) && value > highFeeThreshold(feesData);

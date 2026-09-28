@@ -19,7 +19,7 @@ import { summarizeMix } from "../lib/mix.js";
 import { BUCKETS, probabilityPct, yieldDigit } from "../lib/yield.js";
 import { fmtAgo, fmtCompact, fmtDec, fmtInt, fmtMintedPct, blockUrl } from "../lib/format.js";
 import { ALL_TABS, TAB_LABEL, defaultTab, mintedOutFlipNotice, mintedProgressNote, resolveTab, tabsFor } from "../lib/tokenTabs.js";
-import { isMintedOut } from "../lib/marketBoard.js";
+import { isMarketOpen } from "../lib/marketBoard.js";
 import { syncPauseText } from "../lib/sync.js";
 import { UNLOCK_HEIGHT, activationState, countdownText } from "../lib/activation.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
@@ -63,9 +63,9 @@ export default function TokenPage({ ticker, params, navigate }) {
   // token that becomes minted out mid-visit would switch its default to
   // Market on the next poll and unmount a MINE in flight. `pinned` is the
   // default seen on the first load (and whatever tab the user picks since).
-  const [pinned, setPinned] = useState(null); // { tab, mintedOut } | null
+  const [pinned, setPinned] = useState(null); // { tab, marketOpen } | null
   useEffect(() => {
-    if (token && pinned === null) setPinned({ tab: defaultTab(token), mintedOut: isMintedOut(token) });
+    if (token && pinned === null) setPinned({ tab: defaultTab(token), marketOpen: isMarketOpen(token) });
   }, [token, pinned]);
 
   const [dataTab, setDataTab] = useState("mines");
@@ -138,7 +138,7 @@ export default function TokenPage({ ticker, params, navigate }) {
   const tabs = tabsFor(token);
   const flipNotice = tab === "mine" && !params.tab ? mintedOutFlipNotice(pinned, token) : null;
   const setTab = (id) => {
-    setPinned((p) => ({ tab: id, mintedOut: p?.mintedOut ?? isMintedOut(token) }));
+    setPinned((p) => ({ tab: id, marketOpen: p?.marketOpen ?? isMarketOpen(token) }));
     navigate(tokenHref(ticker, id === defaultTab(token) ? undefined : id));
   };
   const age = deployBlock.data?.time ? fmtAgo(deployBlock.data.time) : tip ? `${fmtInt(Math.max(0, tip - token.deploy_block))} blocks ago` : null;
@@ -173,7 +173,7 @@ export default function TokenPage({ ticker, params, navigate }) {
           </button>
         ))}
       </div>
-      {!token.minted_out && <div className="tab-note">{mintedProgressNote(token)}</div>}
+      {!isMarketOpen(token) && <div className="tab-note">{mintedProgressNote(token)}</div>}
     </div>
   );
 

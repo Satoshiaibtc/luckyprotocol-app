@@ -27,7 +27,10 @@ authoritative.
   has), but nothing limits who may mine or how much. A large miner can
   exhaust a ticker's supply quickly — about 80,000 MINEs empty it (§3) —
   so the reference client shows the remaining supply, and every
-  participant can see how close the cap is.
+  participant can see how close the cap is. Mining starts in the block
+  after a ticker's DEPLOY: a MINE in the DEPLOY's own block does not count,
+  so nobody — the deployer included — mines in the block that makes a
+  ticker public (§2.2).
 - **UTXO-bound tokens.** Tokens are bound to UTXOs, residual tokens are
   routed by vout index, the protocol fee outputs are enforced by
   consensus, and the supply of each ticker is fixed.
@@ -53,7 +56,8 @@ authoritative.
 | `MAX_OUT_IDX` | 255 | |
 | `MIN_COMMIT_AGE` | 1 | A REVEAL is valid only at a height ≥ its COMMIT's height + 1, i.e. the COMMIT confirmed in an earlier block (§2.1). |
 | `MAX_COMMIT_AGE` | 2_016 | A REVEAL is valid only at a height ≤ its COMMIT's height + 2,016 (two weeks); after that the COMMIT is expired (§2.1). |
-| Ticker grammar | `[A-Z0-9]{1,8}` | The first valid registration of a ticker is final (§2.1). |
+| `FINAL_DEPTH` | 6 | Confirmations after which a block's effects are final (§3.1). A block has 1 confirmation while it is the newest indexed block and one more for each block on top of it, so it is final once 5 blocks are on top of it. A token's market opens once the block that minted it out has 6 (§7.4). |
+| Ticker grammar | `[A-Z0-9]{1,8}` | The first valid registration of a ticker is final on the chain Bitcoin keeps (§2.1, §3.1). |
 
 ## 2. Payload encoding
 
@@ -202,11 +206,14 @@ append a REVEAL payload and the fee output and name the carrier's owner as
 the deployer of a ticker that owner never chose. The COMMIT's author picks
 the carrier's address, so this needs no cooperation beyond such a
 signature. The reference order book therefore never lists the carrier of
-an `open` COMMIT (§7.4), and a wallet should sign an output it received
-from a COMMIT only with `SIGHASH_ALL` / `SIGHASH_DEFAULT` until that
-COMMIT is closed. A DEPLOY row that is not applied names the committer of
-the carrier its input 0 spent, or no one when input 0 spent no recorded
-carrier.
+an `open` COMMIT, nor of an `expired` one while its last reveal block
+(commit height + `MAX_COMMIT_AGE`) has fewer than `FINAL_DEPTH` (6)
+confirmations: a reorganization that replaces that block reopens the
+COMMIT (§3.1, §7.4). A wallet should sign an output it received from a
+COMMIT only with `SIGHASH_ALL` / `SIGHASH_DEFAULT` until that COMMIT is
+closed, and after an expiry only once that last reveal block is final. A
+DEPLOY row that is not applied names the committer of the carrier its
+input 0 spent, or no one when input 0 spent no recorded carrier.
 
 Reference REVEAL layout: `input0` = the commit carrier, then funding
 inputs; `vout0` 546 → deployer (proof), `vout1` 5,460 → fee, `vout2`
@@ -260,8 +267,17 @@ the payload it is about to send under its own carrier script, and its
 committer its own address; an `invalid` COMMIT is never published — the
 wallet reserves again with a new salt. It publishes the REVEAL with a fast
 fee, keeps it replaceable (RBF) so it can be sped up, checks that the
-ticker is still free, and never publishes before its COMMIT has one
-confirmation.
+ticker is still free, and builds it as a version-2 transaction whose
+input 0 has `nSequence` = 1, a BIP-68 relative lock of one block: no
+chain, not even one rebuilt by a reorganization (§3.1), can then confirm
+it in the COMMIT's own block, where it would fail `commit_too_recent`
+(rule 4), use the COMMIT up and leave the ticker public. Nodes refuse
+such a REVEAL until its COMMIT has confirmed and drop it when a
+reorganization puts the COMMIT back in the mempool; the wallet then
+publishes it again, with the same salt, once the COMMIT confirms again.
+The reference client publishes only once its COMMIT has 2 confirmations,
+and stops offering the REVEAL when fewer than 6 blocks of the
+2,016-block window remain.
 
 ### 2.2 MINE — `LUCKY-20|MINE|<TICKER>`
 
@@ -272,12 +288,33 @@ The yield output index and the change output index are both `0` and
 Consensus fee rule: at least one output paying **exactly 546 sats** to
 `PROJECT_FEE_ADDRESS`.
 
-Validity: ticker must be deployed at apply time; the exact 546-sat fee
-output must be present; `vout0` must exist and must not be an OP_RETURN.
-Invalid → recorded with `status:"invalid"`, yield 0, nothing minted.
+Validity — the rules are checked in this order, and the first one that
+fails is recorded as the MINE's `reason`:
+
+1. the ticker is registered at apply time — else `not_deployed`;
+2. the ticker was registered in an EARLIER block: the MINE's height is
+   greater than the ticker's DEPLOY height — else `deploy_same_block`. A
+   MINE in the DEPLOY's own block does not count, whether it comes before
+   or after the REVEAL in that block (one the block lists before the
+   REVEAL already fails rule 1 and is `not_deployed`): nobody, the
+   deployer included, mines in the block that makes the ticker public
+   (§0);
+3. an output pays exactly 546 sats to `PROJECT_FEE_ADDRESS` — else
+   `fee_missing`;
+4. `vout0` exists and is not an OP_RETURN — else `vout0_unusable`.
+
+Invalid → recorded with `status:"invalid"` and its `reason`, yield 0,
+nothing minted.
+
+A wallet offers MINE once the ticker's DEPLOY has 2 confirmations. A
+MINE sent at its first confirmation can, after a one-block
+reorganization (§3.1), confirm before the DEPLOY or in the DEPLOY's own
+block (`not_deployed` or `deploy_same_block`), and it pays its fees
+either way.
 
 **Residual routing is independent of validity:** for EVERY parseable
-MINE — valid or `invalid` (undeployed ticker, missing fee) — any token
+MINE — valid or `invalid` (undeployed ticker, ticker deployed in the same
+block, missing fee) — any token
 input pool routes to `vout0`, exactly as a SEND's residual routes to
 `CHANGE_OUT` whether or not the SEND is `applied`. Only when `vout0`
 itself is missing or an OP_RETURN does the residual burn (§4) — there is
@@ -353,17 +390,28 @@ The probabilities climb in a 1 / 3 / 5 / 7 staircase as the tier drops
 **80,000** MINEs exhaust a ticker exactly. Every tier and the
 supply are multiples of 100, so the MINE that crosses the cap is credited a
 multiple of 100 (`min(tier, remaining)`); later MINEs in that block credit 0.
+"Later" is block order (§5): with 700 tokens left and three valid MINEs of
+the ticker in one block whose hash ends in `c` (tier 500), the first MINE
+the block lists is credited 500, the second 200 — that block is the
+`minted_out_height` — and the third 0 with `cap_exhausted:true`. The
+Bitcoin miner who builds the block sets that order (usually by feerate),
+so near the cap an earlier broadcast does not mean an earlier place.
 
 **`minted` and "minted out".** The registry's `minted` is the
 **cumulative credited yield** — the sum of every settled
-MINE's `yield_smallest` — and it **never decreases**. A token is **minted
+MINE's `yield_smallest` — and **no burn lowers it**. A token is **minted
 out** (100%) the moment `minted == supply`; the height of the MINE whose
 credit completed it is recorded once as `minted_out_height`. Tokens that
 are later burned by the routing rules (§4), sent to an unspendable output
 or otherwise destroyed do **not** lower `minted` and do not reopen the mint:
 minted out is judged on `minted` alone — never on circulating balances or
-holder counts — so once true it stays true. It is the condition under
-which a token's market opens (§7.4).
+holder counts — so no burn or unspendable output undoes it. Like all protocol
+state, `minted`, "minted out" and `minted_out_height` follow the chain: a
+reorg that disconnects credited MINEs takes them back with their blocks,
+and a token whose crossing MINE is disconnected is minting again until the
+new chain crosses (§7.4). Minted out is the condition under which a
+token's market opens, once the block that completed the supply has 6
+confirmations (§7.4).
 
 Golden vectors (`tests/yield_vectors.json`, shared byte-identical by
 indexer and web; both test suites assert them):
@@ -385,6 +433,38 @@ display hash from the header and assert it):
 | 1 | `00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048` | 200 |
 | 2 | `000000006a625f06636b8bb6ac7b960a8d03705d1ace08b1a19da3fdcc99ddbd` | 500 |
 | 4 | `000000004ebadb55ee9096c9a2f8880e09da59c0d68b1c228da88e48844a1485` | 100 |
+
+### 3.1 Reorganizations and finality
+
+LUCKY-20 state is a function of the chain Bitcoin keeps, the best chain.
+Now and then Bitcoin replaces its newest blocks with a competing branch (a
+reorganization). An indexer then takes back every effect of the blocks
+that left the chain — credits, balances, registrations, commit records,
+fills — and applies the blocks of the new branch by the same rules, in
+their order (§5). Nothing carries over from a disconnected block:
+
+- a MINE that confirms again in another block is credited from **that**
+  block's hash (§3): its tier can change, and near the cap its credit can
+  change or become 0, because the new block may hold other MINEs or list
+  them in another order;
+- `minted` and "minted out" follow (§3): a reorganization can lower
+  `minted`, and a token whose crossing MINE is disconnected is minting
+  again until the new chain crosses;
+- registrations, SENDs and fills follow the block order of the new chain
+  (§2.1, §7.5), and a transaction that does not confirm again has no
+  effect at all.
+
+A block's effects are **final** once it has `FINAL_DEPTH` (6)
+confirmations; a reorganization that deep is not expected on Bitcoin outside
+a failure of the network itself. Until then every result in it is
+provisional: the reference
+client shows a MINE's credit, a registration, a fill or a withdrawal with
+its confirmation count (for example "1/6 confirmations") until it is final,
+keeps checking it meanwhile, and explains a changed result as a
+reorganization. A wallet should treat a result as settled at 6
+confirmations, about an hour. A token's market opens only when the block
+that minted it out is final (§7.4), so a reorganization shallower than
+that can no longer change the amount any listing sells.
 
 ## 4. Token routing rules
 
@@ -441,7 +521,7 @@ table could be read differently, the table is authoritative.
 | Payload | Case | `<TICKER>` named by the payload | Every other ticker in the pool |
 |---|---|---|---|
 | `MINE\|T` | valid (settled; includes `cap_exhausted`) | yield + residual → `vout0` | → `vout0` |
-| `MINE\|T` | invalid: undeployed ticker, or no exact 546-sat fee output | residual → `vout0` (no yield) | → `vout0` |
+| `MINE\|T` | invalid: undeployed ticker, ticker deployed in this same block, or no exact 546-sat fee output | residual → `vout0` (no yield) | → `vout0` |
 | `MINE\|T` | `vout0` missing or an OP_RETURN (also invalid) | **burn** | **burn** |
 | `SEND\|T\|AMT\|TO\|CH` | applied: pool ≥ `AMT`, fee output present, `vout[TO]` real and not OP_RETURN | `AMT` → `vout[TO]`, residual → `vout[CH]` | → `vout[CH]` |
 | `SEND\|T\|AMT\|TO\|CH` | not applied: pool < `AMT`, no fee output, or `vout[TO]` missing / OP_RETURN | whole pool → `vout[CH]` | → `vout[CH]` |
@@ -484,10 +564,21 @@ output: it is never the lowest-index output in a reference layout.
 An indexer applies §2–§4 and §7 to the chain and keeps the state they
 define: token balances per UTXO, the token registry with its `minted`
 count (§3), the commit records (§2.1), the order book and the trade
-history (§7). How an indexer makes that state available is not part of
-the protocol. The reference indexer's HTTP interface serves the reference
-web app only; it is not published and may change without a revision of
-this document.
+history (§7).
+
+**Block order.** Transactions apply in chain order: block by block, and
+inside a block in the order the block lists them (position 0 is the
+coinbase, never a protocol tx, §2). Every transaction sees the state that
+every earlier one left — balances, `minted`, the registry, the commit
+records, the order book — so which of two MINEs receives the last tokens
+of a ticker (§3) and which of two REVEALs registers a ticker (§2.1) are
+decided by that order and by nothing else. An implementation that reorders
+a block's transactions (by txid, by fee, …) diverges. After a
+reorganization the new blocks apply in their own order (§3.1).
+
+How an indexer makes that state available is not part of the protocol.
+The reference indexer's HTTP interface serves the reference web app only;
+it is not published and may change without a revision of this document.
 
 Nothing in this document depends on that interface. Every rule is stated
 in terms of Bitcoin transactions and the state derived from them, so an
@@ -594,15 +685,24 @@ added by mistake) lands on a 546-sat carrier the buyer controls, not on
 the buyer's BTC change. The buyer
 signs inputs `1..n` (UniSat, `autoFinalized: true`), then the app
 finalizes `input0` from the seller's signature, extracts the raw tx and
-broadcasts it. If two buyers race, exactly one tx confirms; the other is
-rejected by the mempool as a double-spend and that buyer spends nothing.
+broadcasts it. If two buyers race, exactly one tx can confirm. Nodes relay
+replacements by fee (full-RBF): the later fill replaces the earlier one in
+the mempool when it pays enough more (BIP125 rules 3 and 4) and is refused
+otherwise. The buyer whose fill does not confirm spends nothing, but a fill
+that was accepted can still leave the mempool, replaced — a client shows
+it as replaced, not as filled, and nothing is filled until a fill
+confirms.
 
 **Buyer-side verification (mandatory, client-side, before signing):**
 1. the listing PSBT has exactly 1 input + 1 output;
 2. `input0.sighashType == 0x83` and a signature is present
    (`tapKeySig` for P2TR, `partialSig` for P2WPKH);
-3. the indexer still shows the order `open` (not `filling`, §7.3) and
-   still lists the outpoint among the seller's token UTXOs with
+3. the indexer still shows the order `open` (not `filling`, §7.3), the
+   ticker's market is open (§7.4: the block that minted it out has 6
+   confirmations — the indexer can still hand out a listing of a ticker
+   whose market is closed, for example after the state went back to an
+   earlier height), and the indexer still lists the outpoint among the
+   seller's token UTXOs with
    `{ TICKER: amount }` — **and the outpoint is re-checked against a
    second source** the indexer does not control (the creating tx from
    the wallet's own node or an explorer: its output script and value
@@ -678,8 +778,9 @@ order:
 
 A buyer's fill that pays a fee too low for the current market can sit in
 the mempool for up to two weeks (default mempool expiry), and while it
-does every other fill of that listing is a double-spend the network
-rejects — the seller's tokens are pinned. This is inherent to
+does another fill of that listing replaces it only by paying for
+everything it evicts plus the incremental relay fee (BIP125 rules 3
+and 4) — the seller's tokens are pinned. This is inherent to
 SINGLE|ANYONECANPAY listings (Ordinals markets have it too); the
 `pending_*` fields exist so the seller can get out. **Cancel fee
 guidance:** the cancel (a SEND-to-self of the outpoint, §2.3) is a BIP125
@@ -699,8 +800,21 @@ node's `insufficient fee, rejecting replacement` is the message to map
 when it is still too low. Because a pending fill's absolute fee can be
 large (a ~99 kvB tx at 1 sat/vB is ~100,000 sats), short-lived listings
 and re-listing rather than leaving asks up for the full 14 days limit the
-exposure. An attacker who pins a listing pays that same absolute fee
-either way: it is a paid option, not a free one.
+exposure. A pinning fill costs its sender something only if it confirms:
+then the attacker pays the listed price plus that fee and receives the
+tokens. If the seller's cancel replaces it, or it is evicted or expires,
+the attacker pays nothing and the seller has paid for the replacement —
+pinning is a nearly free way to delay a seller, which is one more reason
+for short-lived listings.
+
+The race runs the other way too: a cancel waiting in the mempool is
+itself replaceable. Whoever saved the signed listing can replace the
+cancel with a fill of it that pays more (full-RBF, the same BIP125
+rules), and the order then shows that fill's `pending_spend_txid`. The
+transaction that confirms decides (§7.5); if the fill does, the seller is
+paid the listed price. A higher cancel fee only raises what such a fill
+must pay; it cannot rule it out. A seller who sees their cancel replaced
+can cancel again at a higher fee (the guidance above).
 
 ### 7.4 Indexer order book
 
@@ -709,18 +823,24 @@ its `ticker`, `amount` and `price_sats`. The indexer accepts it only if
 ALL of the following hold; otherwise the listing is refused and the book
 is unchanged:
 
-- **the token is minted out** — `minted == supply` (§3). A listing for a
-  ticker that is still minting is refused before the PSBT is even
-  parsed. Rationale: the market opens when minting is complete — while
+- **the token's market is open** — the token is minted out, `minted ==
+  supply` (§3), and the block of the MINE that completed the supply
+  (`minted_out_height`) has at least **6 confirmations**: the market opens
+  when the indexed chain reaches height `minted_out_height + 5`. A listing
+  for a ticker whose market is not open is refused before the PSBT is even
+  parsed, and while it is not open the book shows none of the ticker's
+  listings. Rationale: the market opens when minting is complete — while
   supply can still be mined at the fee, a listing would price something
   anyone can mint instead, and it would let a deployer sell into a
-  distribution that is not finished.
+  distribution that is not finished — and once the blocks that completed
+  it are deep enough that a reorg is unlikely to change the amounts the
+  listings sell (a reorg can change the yield of every MINE it moves).
   The gate is judged on the cumulative `minted`, so once a token's market
-  is open it never closes again (later burns or unspendable outputs do not
-  count; a reorg that un-mints the crossing MINE is the one exception,
-  and it is re-checked when the order is inserted). The indexer reports
-  the same flag as `minted_out` so a client can hide the market until
-  then;
+  is open it does not close again: later burns or unspendable outputs do
+  not count, and a reorganization would have to replace at least
+  `FINAL_DEPTH` (6) blocks to take back the MINE that minted it out
+  (§3.1). The gate is re-checked when the order is inserted all the same.
+  A client can hide the market until it opens;
 - PSBT decodes; exactly 1 input, 1 output; `nLockTime == 0`;
 - **the listing can be filled at all** (audit trading-1) — the seller's
   `0x83` signature commits to the tx version and to input 0's
@@ -758,12 +878,13 @@ is unchanged:
   cap, below); a listing that replaces an open listing of the same
   outpoint is exempt;
 - **not a reserved output** (audit rvs-2): the outpoint is not the
-  carrier (`txid:0`) of a COMMIT whose record is `open` (§2.1). A
-  listing's 0x83 signature covers input 0 and output 0 only, so a buyer
-  could complete it into that COMMIT's REVEAL and publish the ticker
-  with the seller named as its creator (§2.1 deployer attribution); the
-  seller first moves the output with a SEND to self, or publishes the
-  ticker;
+  carrier (`txid:0`) of a COMMIT whose record is `open`, or `expired`
+  while its last reveal block has fewer than `FINAL_DEPTH` (6)
+  confirmations (§2.1). A listing's 0x83 signature covers input 0 and
+  output 0 only, so a buyer could complete it into that COMMIT's REVEAL
+  and publish the ticker with the seller named as its creator (§2.1
+  deployer attribution); the seller first moves the output with a SEND to
+  self, or publishes the ticker;
 - **one outpoint, the cheapest signed listing** (audit trading-4): when
   the book holds an `open` listing of the same outpoint at a LOWER unit
   price, the new listing is refused — the cheaper PSBT stays valid until
@@ -818,7 +939,9 @@ Order identity is the outpoint (`id = "txid:vout"`); a new listing of an
 open outpoint at the same or a lower price replaces it, a higher one is
 refused (above). Orders are
 runtime data persisted to `orders.json` next to the snapshot (atomic
-write on every change, three rotated generations `.bak` / `.bak.1` /
+write on every change — while the file cannot be written a new listing is
+refused, since a listing held only in memory would vanish with a restart;
+three rotated generations `.bak` / `.bak.1` /
 `.bak.2`; a corrupt or foreign-version file is moved aside as
 `orders.json.corrupt-<unix>`, never overwritten, and the newest usable
 generation is loaded — audit L-6) — they are NOT part of the
@@ -856,12 +979,17 @@ A tx that spends several listed outpoints settles each of them this way,
 each judged at its own index — a fill of two listings at inputs 0 and 1
 paying their sellers at `vout0` and `vout1` records two trades.
 
-Settlement is re-derivable: a closed order whose recorded `spent_txid`
-is the tx being applied (a replay — `orders.json` outlives a cold
-rescan, a snapshot-version change or a full reorg rebuild, while the
-trade log does not) is settled again, and its trade is recorded
-unless the log already holds one for that txid and order. A replayed
-spend never downgrades a closed order.
+Settlement is re-derivable. `orders.json` outlives a cold rescan, a
+snapshot-version change and a full reorg rebuild, while the trade log
+does not, and the spend an order records may sit in a block the chain has
+since left. So whenever the chain-derived state goes back to an earlier
+height (a reorg, a restart, a rebuild), every order is judged again
+against it (last paragraph): an order whose recorded spend lies above
+that height forgets the spend, and the blocks that follow re-open it when
+they re-create the outpoint with the listed balance and settle it by the
+spend they contain — the same fill (its trade recorded again), another
+buyer's fill, the seller's cancel, or none, and then the order stays
+`open`. A trade is never recorded twice for one txid and order.
 
 A trade (chain-derived; it lives in the snapshot and is rolled back with
 it on reorg) holds the fill's `txid`, `block_height`, `block_hash` and
@@ -873,14 +1001,29 @@ listing). Such fills are recorded and listed like any other, but they do
 not count toward a ticker's trade count or volume and never become its
 last trade — a 546-sat wash must not print a price.
 
-On `restore_from_snapshot` (reorg or restart) every closed order whose
-outpoint is present again in `utxo_balances` **carrying exactly
-`{ ticker: amount }`** — the whole-UTXO balance the listing sells, not
-merely an entry under that key (audit M-12) — reverts to `open`; a live
-order whose outpoint is not present with that exact balance is
-`cancelled` (`spent_txid: null`) and re-opened only if the replay
-re-creates the outpoint with it. A `filling` order whose outpoint is
-present stays `filling` until the next tick re-checks the mempool.
+On every restore (reorg, restart, or the empty state a full rebuild
+starts from) every closed order whose outpoint is present again in
+`utxo_balances` **carrying exactly `{ ticker: amount }`** — the whole-UTXO
+balance the listing sells, not merely an entry under that key (audit
+M-12) — reverts to `open`; an order whose outpoint is not present and
+whose fill the trade log holds (at or below the restored height) is
+`filled` by that trade, with its `spent_txid`, `spent_block` and `buyer`
+— the order book is saved apart from the chain-derived state and can be
+older than it; otherwise a closed order whose recorded spend is above the
+restored height and whose outpoint is not present becomes `cancelled`
+with `spent_txid`, `spent_block` and `buyer` cleared, and a live order
+whose outpoint is not present with that exact balance is `cancelled`
+(`spent_txid: null`). An order cancelled with `spent_txid: null` is
+re-opened only if the replay re-creates the outpoint with that exact
+balance. A `filling` order whose outpoint is present stays `filling` until
+the next tick re-checks the mempool.
+
+An order the book cancels this way while its outpoint is still unspent —
+the reorganization changed what the outpoint carries — is out of the book,
+not out of reach: its signed PSBT still fills on-chain, now for whatever
+the outpoint carries, until the seller spends the outpoint (§7.3). A
+seller whose listing was cancelled by the book, not by a spend of their own,
+moves the tokens to end it.
 
 ### 7.6 What this is not (trading)
 
@@ -950,6 +1093,54 @@ The following rules are normative for every implementation:
 
 Every revision below was made before `ACTIVATION_HEIGHT`, while no
 LUCKY-20 transaction had yet been processed. Newest first.
+
+- **2026-09-28** — reorganizations and finality, no consensus change
+  (SNAPSHOT_VERSION stays 17): new constant `FINAL_DEPTH` 6 (§1) and §3.1
+  *Reorganizations and finality* — all state follows the chain Bitcoin
+  keeps, a MINE is credited from the block that confirms it in that chain
+  and its credit is final once that block has 6 confirmations, and
+  `minted` follows the chain like all protocol state: no burn lowers it,
+  a reorg that disconnects credited MINEs does (§3). A token's market
+  opens when the block that minted it out has 6 confirmations (the
+  indexed height reaches `minted_out_height + 5`); until then a listing
+  is refused and the book shows none of the ticker's listings (§7.4), and
+  a buyer checks that the market is open before signing (§7.2 step 3). §5
+  states the block-order rule the reference indexer has always applied:
+  transactions apply in block order and each sees the state the earlier
+  ones left, which decides who receives the last tokens of a ticker (with
+  an example in §3). §7.2 and §7.3 describe racing fills and pinning as
+  nodes relay them (full-RBF): a better-paying fill replaces a pending
+  one, a pinning fill costs its sender something only if it confirms, and
+  a pending cancel can itself be replaced by a better-paying fill. §7.5:
+  when the state goes back to an earlier height, an order whose recorded
+  spend lies above it forgets that spend and is settled again by the
+  spend on the chain the indexer continues on; an order whose outpoint is
+  gone is `filled` when the trade log holds its fill (an order book saved
+  before the state was); and a listing the book cancels after a
+  reorganization stays fillable until the seller spends its outpoint.
+  §7.4: a new listing is refused while the order book cannot be written
+  to disk, and the carrier of an `expired` COMMIT stays reserved until
+  its last reveal block has 6 confirmations (§2.1). Wallet guidance: a
+  wallet publishes a REVEAL once its COMMIT has 2 confirmations (§2.1)
+  and offers MINE once the ticker's DEPLOY has 2 (§2.2) — one sent at the
+  first confirmation can, after a one-block reorganization, confirm in
+  the block of the transaction it depends on and not count; a REVEAL's
+  input 0 carries `nSequence` = 1 (a BIP-68 relative lock of one block),
+  so no reorganization, however deep, can put it in its COMMIT's block
+  (§2.1). Where a
+  reorganization can undo a result, the text says so (§1 ticker
+  registration, §3, §7.4).
+
+- **2026-09-28** — a MINE counts only after its ticker's DEPLOY block,
+  consensus change before activation (SNAPSHOT_VERSION stays 17: nothing
+  below `ACTIVATION_HEIGHT` is processed, so no snapshot of version 17
+  holds a MINE): a MINE in the same block as its ticker's DEPLOY is
+  `invalid` (`reason` `deploy_same_block` when the block lists it after
+  the REVEAL, `not_deployed` before it), and its token inputs route to
+  `vout0` like every invalid MINE's (§2.2, §4.1) — nobody, the deployer
+  included, mines in the block that makes a ticker public (§0). Every
+  `invalid` MINE record names the rule it failed (`not_deployed`,
+  `deploy_same_block`, `fee_missing`, `vout0_unusable`; §2.2).
 
 - **2026-09-28** — order-book capacity, no consensus change
   (SNAPSHOT_VERSION stays 17: the order book is not part of the
@@ -1090,7 +1281,8 @@ LUCKY-20 transaction had yet been processed. Newest first.
 
 - **2026-09-27** — market opens at 100%, no consensus change
   (SNAPSHOT_VERSION stays 15): `minted` is defined as the cumulative
-  credited yield that never decreases, and "minted out" as `minted ==
+  credited yield that no burn lowers (a reorg can — see the 2026-09-28
+  entry on reorganizations and finality), and "minted out" as `minted ==
   supply` — burns and outputs that can no longer be spent never undo it
   (§3); additive registry field `minted_out_height` (backfilled from the
   mines log on restore) and the flag `minted_out` (§3); the order book

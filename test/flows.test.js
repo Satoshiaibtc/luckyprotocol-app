@@ -7,13 +7,16 @@
 import assert from "node:assert/strict";
 import { syncPauseText, syncStateOf } from "../src/lib/sync.js";
 import {
+  CONFIRMED_RECHECK_MS,
   DROP_GRACE_MS,
+  FINAL_GUARD_MS,
   TXREC_MAX,
   TXREC_TTL_MS,
   classifyTxStatus,
   createTxRecordStore,
   parseTxRecords,
   pendingSpentOutpoints,
+  recordIsFinal,
   refreshTxRecords,
   txRecordKey,
 } from "../src/lib/txrecords.js";
@@ -29,7 +32,17 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
 
 // ---- usertx-1: the lag gate ------------------------------------------------------------------------------
 {
-  assert.deepEqual(syncStateOf({ indexed_height: 969_310, tip_height: 969_310, stalled: false }), { indexed: 969_310, tip: 969_310, lag: 0, stalled: false, synced: true });
+  assert.deepEqual(syncStateOf({ indexed_height: 969_310, tip_height: 969_310, stalled: false }), {
+    indexed: 969_310,
+    tip: 969_310,
+    lag: 0,
+    stalled: false,
+    rebuilding: false,
+    noPeers: false,
+    networkLag: 0,
+    synced: true,
+    trustUnseen: true,
+  });
   const cold = syncStateOf({ indexed_height: 969_300, tip_height: 969_812, stalled: false });
   assert.equal(cold.synced, false, "a cold scan is not synced even while it makes progress");
   assert.equal(cold.lag, 512);
@@ -63,14 +76,15 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   assert.equal(classifyTxStatus(rec, { confirmed: false, seen: false }, now + DROP_GRACE_MS + 1), "dropped");
   assert.equal(classifyTxStatus(rec, { confirmed: true, seen: true }, now), "confirmed");
   assert.equal(classifyTxStatus(rec, null, now), "unknown");
-  // refresh: the DEPLOY and the MINE confirmed — both kept (marked confirmed, inputs released)
-  // until the page that shows their result forgets them (audit mine-4: "tracking resumes when you return")
+  // refresh: the DEPLOY and the MINE confirmed — both kept (marked confirmed, their
+  // inputs still guarded until final) until the page that shows their result
+  // forgets them (audit mine-4: "tracking resumes when you return")
   now += 10_000;
-  const answers = { [TX("a")]: { confirmed: true, seen: true }, [TX("b")]: { confirmed: true, seen: true } };
-  const after = await refreshTxRecords(ADDR, async (t) => answers[t], { store, now: () => now });
+  const answers = { [TX("a")]: { confirmed: true, seen: true, block_height: 969_400 }, [TX("b")]: { confirmed: true, seen: true, block_height: 969_400 } };
+  const after = await refreshTxRecords(ADDR, async (t) => answers[t], { store, now: () => now, tip: 969_400 });
   assert.deepEqual(after.map((r) => [r.kind, r.state]), [["deploy", "confirmed"], ["mine", "confirmed"]]);
-  assert.ok(store.list(ADDR).every((r) => r.confirmed), "both marked confirmed in the store");
-  assert.equal(pendingSpentOutpoints(store.list(ADDR)).size, 0, "confirmed txs exclude no inputs");
+  assert.ok(store.list(ADDR).every((r) => r.confirmed && r.blockHeight === 969_400), "both marked confirmed in the store, with their block");
+  assert.equal(pendingSpentOutpoints(store.list(ADDR)).size, 3, "a confirmed tx keeps its inputs excluded until its block is final");
   // a pending tx whose status cannot be read keeps its inputs excluded (fail closed)
   store.add(ADDR, { txid: TX("c"), kind: "send", ticker: "MOON", inputs: [`${TX("5")}:0`] });
   const unknown = await refreshTxRecords(ADDR, async () => {
@@ -80,14 +94,146 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   assert.ok(pendingSpentOutpoints(store.list(ADDR)).has(`${TX("5")}:0`));
   // dropped after the grace → forgotten, its inputs spendable again
   now += DROP_GRACE_MS + 1;
-  await refreshTxRecords(ADDR, async (t) => (t === TX("c") ? { confirmed: false, seen: false } : answers[t]), { store, now: () => now });
+  await refreshTxRecords(ADDR, async (t) => (t === TX("c") ? { confirmed: false, seen: false } : answers[t]), { store, now: () => now, trustUnseen: true });
   assert.ok(!store.list(ADDR).some((r) => r.txid === TX("c")), "a dropped tx is forgotten");
   // TTL + cap
   assert.equal(parseTxRecords(JSON.stringify([{ txid: TX("d"), kind: "mine", inputs: [], at: 0 }]), TXREC_TTL_MS + 1).length, 0, "expired after the TTL");
   const many = Array.from({ length: TXREC_MAX + 5 }, (_, i) => ({ txid: i.toString(16).padStart(64, "0"), kind: "other", inputs: [], at: 10 + i }));
   assert.equal(parseTxRecords(JSON.stringify(many), 1_000).length, TXREC_MAX, "newest TXREC_MAX kept");
   assert.deepEqual(parseTxRecords("{not json", 1), []);
-  console.log("txrecords: inputs of pending broadcasts are excluded until they confirm or drop; DEPLOYs stay remembered by ticker");
+  console.log("txrecords: inputs of pending broadcasts are excluded until they are final or drop; DEPLOYs stay remembered by ticker");
+}
+
+// ---- reorg audit: a confirmed tx guards its inputs until final; back in the mempool it is pending again ---------------
+{
+  const mem = new Map();
+  const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+  let now = 5_000_000;
+  const store = createTxRecordStore({ storage, now: () => now });
+  const IN = `${TX("a")}:0`;
+  store.add(ADDR, { txid: TX("1"), kind: "send", ticker: "MOON", inputs: [IN] });
+  let answer = { confirmed: true, seen: true, block_height: 969_500 };
+  const refresh = (tip) => refreshTxRecords(ADDR, async () => answer, { store, now: () => now, tip, trustUnseen: true });
+  await refresh(969_500);
+  let r = store.list(ADDR)[0];
+  assert.deepEqual([r.confirmed, r.blockHeight, r.confirmedAt], [true, 969_500, now]);
+  assert.ok(pendingSpentOutpoints(store.list(ADDR)).has(IN), "1 confirmation: the input stays excluded (a withdrawal cannot be undone by the next MINE)");
+  // a chain reorganization puts it back in the mempool (seen at the next re-check)
+  answer = { confirmed: false, seen: true, in_mempool: true };
+  now += CONFIRMED_RECHECK_MS;
+  const back = await refresh(969_501);
+  assert.equal(back[0].state, "pending");
+  r = store.list(ADDR)[0];
+  assert.deepEqual([r.confirmed, r.blockHeight], [false, null], "unconfirmed again");
+  assert.ok(pendingSpentOutpoints(store.list(ADDR)).has(IN));
+  // confirms again in another block; kept until that block is 6 deep, then forgotten (a send has no result page)
+  answer = { confirmed: true, seen: true, block_height: 969_502 };
+  await refresh(969_502);
+  await refresh(969_506);
+  assert.equal(store.list(ADDR).length, 1, "5 confirmations: still guarding");
+  await refresh(969_507);
+  assert.equal(store.list(ADDR).length, 0, "6 confirmations: final, forgotten");
+  // unknown to the indexer while confirmed (it may be mid-reorganization): kept as it is
+  store.add(ADDR, { txid: TX("2"), kind: "fill", inputs: [IN] });
+  answer = { confirmed: true, seen: true, block_height: 969_600 };
+  await refresh(969_600);
+  answer = { confirmed: false, seen: false };
+  now += CONFIRMED_RECHECK_MS;
+  await refresh(969_601);
+  assert.equal(store.list(ADDR)[0].confirmed, true, "an unknown answer does not unconfirm");
+  // forget: a confirmed record is only marked done — it keeps guarding until final
+  store.forget(ADDR, TX("2"));
+  assert.deepEqual([store.list(ADDR)[0].done, pendingSpentOutpoints(store.list(ADDR)).has(IN)], [true, true]);
+  // no tip: the time guard, from when it was first seen confirmed
+  const since = store.list(ADDR)[0].confirmedAt;
+  assert.equal(recordIsFinal(store.list(ADDR)[0], null, since + FINAL_GUARD_MS - 1), false);
+  assert.equal(recordIsFinal(store.list(ADDR)[0], null, since + FINAL_GUARD_MS), true);
+  assert.equal(recordIsFinal(store.list(ADDR)[0], 969_605, now), true, "the depth, when known, decides");
+  // an unconfirmed record is deleted by forget
+  store.add(ADDR, { txid: TX("3"), kind: "send", inputs: [`${TX("b")}:1`] });
+  store.forget(ADDR, TX("3"));
+  assert.ok(!store.list(ADDR).some((x) => x.txid === TX("3")));
+  // a done MINE is forgotten once final; one not shown yet stays for its result page
+  store.add(ADDR, { txid: TX("4"), kind: "mine", ticker: "MOON", inputs: [] });
+  store.markConfirmed(ADDR, TX("4"), 969_600);
+  await refreshTxRecords(ADDR, async () => ({ confirmed: true, seen: true, block_height: 969_600 }), { store, now: () => now, tip: 969_610 });
+  assert.deepEqual(store.list(ADDR).map((x) => x.txid), [TX("4")], "the final done fill is forgotten; the unshown MINE stays");
+  console.log("txrecords: confirmed txs guard their inputs until final; a reorganization back to the mempool unconfirms; forget keeps a confirmed guard");
+}
+
+// ---- reorg audit: a confirmed record is re-checked at most every CONFIRMED_RECHECK_MS, not on every build ---------------
+{
+  const mem = new Map();
+  const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+  let now = 7_000_000;
+  const store = createTxRecordStore({ storage, now: () => now });
+  for (const c of ["1", "2", "3"]) store.add(ADDR, { txid: TX(c), kind: "mine", ticker: "MOON", inputs: [`${TX(c)}:0`] });
+  let calls = 0;
+  let answer = { confirmed: true, seen: true, block_height: 969_700 };
+  const refresh = () =>
+    refreshTxRecords(ADDR, async () => {
+      calls += 1;
+      return answer;
+    }, { store, now: () => now, tip: 969_701, trustUnseen: true });
+  await refresh();
+  assert.equal(calls, 3, "pending records are asked every time");
+  calls = 0;
+  now += CONFIRMED_RECHECK_MS - 1;
+  const quick = await refresh();
+  assert.equal(calls, 0, "a build within the window does not ask about confirmed records again");
+  assert.ok(quick.every((r) => r.state === "confirmed"));
+  assert.equal(pendingSpentOutpoints(store.list(ADDR)).size, 3, "their inputs stay excluded in between");
+  now += 1;
+  await refresh();
+  assert.equal(calls, 3, "after the window each is asked again");
+  calls = 0;
+  await refresh();
+  assert.equal(calls, 0, "a still-confirmed answer is stamped: the next window starts");
+  // an answer that could not be read is not stamped — asked again at the next build
+  now += CONFIRMED_RECHECK_MS;
+  const failing = () =>
+    refreshTxRecords(ADDR, async () => {
+      calls += 1;
+      throw new Error("HTTP 502");
+    }, { store, now: () => now, tip: 969_701 });
+  await failing();
+  calls = 0;
+  await failing();
+  assert.equal(calls, 3, "no answer: asked again next time");
+  // a reorganization is still caught at the next re-check
+  answer = { confirmed: false, seen: true };
+  now += 1;
+  await refresh();
+  assert.ok(store.list(ADDR).every((r) => !r.confirmed), "back in the mempool: unconfirmed again");
+  console.log("txrecords: confirmed records are re-checked at most once a minute; a build does not wait on dozens of serial reads");
+}
+
+// ---- reorg audit: a tx is dropped only after DROP_GRACE_MS since it was LAST seen, and only while that answer means something ----
+{
+  const rec = { txid: TX("5"), kind: "send", inputs: [], at: 0, confirmed: false, seenAt: 60 * 60 * 1000 };
+  const unseen = { confirmed: false, seen: false };
+  assert.equal(classifyTxStatus(rec, unseen, rec.seenAt + DROP_GRACE_MS - 1), "pending", "seen an hour after broadcast: the grace runs from then");
+  assert.equal(classifyTxStatus(rec, unseen, rec.seenAt + DROP_GRACE_MS + 1), "dropped");
+  assert.equal(classifyTxStatus(rec, unseen, rec.seenAt + 10 * DROP_GRACE_MS, DROP_GRACE_MS, { trustUnseen: false }), "pending", "the indexer lags / its node has no peers: never dropped");
+  assert.ok(DROP_GRACE_MS >= 10 * 60 * 1000, "a generous grace: a node can miss a tx the network holds");
+  // the store remembers the last sighting
+  const mem = new Map();
+  const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+  let now = 1_000;
+  const store = createTxRecordStore({ storage, now: () => now });
+  store.add(ADDR, { txid: TX("6"), kind: "send", inputs: [] });
+  now += DROP_GRACE_MS;
+  await refreshTxRecords(ADDR, async () => ({ confirmed: false, seen: true }), { store, now: () => now, trustUnseen: true });
+  assert.equal(store.list(ADDR)[0].seenAt, now);
+  now += DROP_GRACE_MS - 1;
+  await refreshTxRecords(ADDR, async () => unseen, { store, now: () => now, trustUnseen: true });
+  assert.equal(store.list(ADDR).length, 1, "still inside the grace since it was last seen");
+  now += 2;
+  await refreshTxRecords(ADDR, async () => unseen, { store, now: () => now, trustUnseen: false });
+  assert.equal(store.list(ADDR).length, 1, "not dropped while untrusted");
+  await refreshTxRecords(ADDR, async () => unseen, { store, now: () => now, trustUnseen: true });
+  assert.equal(store.list(ADDR).length, 0, "dropped once trusted and past the grace");
+  console.log("txrecords: drops count from the last sighting, never while the node's answer cannot be trusted");
 }
 
 // ---- api-1 (client side): 503 and 429 both mean "not yet", with the server's Retry-After -----------------
@@ -184,7 +330,12 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const deployed = (t) => t === "LUCKY";
   // MINE: valid needs the fee; the residual goes to vout0 either way; no vout0 → burn
   const mine = { payload: { op: "MINE", ticker: "LUCKY" }, outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true })] };
-  assert.deepEqual(routeDecision(mine, { isDeployed: deployed }), { op: "MINE", valid: true, applied: true, yieldVout: 0, send: null, residualVout: 0 });
+  assert.deepEqual(routeDecision(mine, { isDeployed: deployed }), { op: "MINE", valid: true, applied: true, reason: null, yieldVout: 0, send: null, residualVout: 0 });
+  // D1: a MINE in its ticker's DEPLOY block is invalid (deploy_same_block); its residual still goes to vout0
+  const sameBlock = routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_400, height: 969_400 });
+  assert.deepEqual([sameBlock.valid, sameBlock.reason, sameBlock.yieldVout, sameBlock.residualVout], [false, "deploy_same_block", null, 0]);
+  assert.equal(routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_400, height: 969_401 }).valid, true, "the block after the DEPLOY: valid");
+  assert.equal(routeDecision(mine, { isDeployed: () => false }).reason, "not_deployed");
   const feeless = { ...mine, outputs: [out(0, { address: ADDR }), out(1, { opReturn: true })] };
   assert.equal(routeDecision(feeless, { isDeployed: deployed }).valid, false, "no exact 546-sat fee output → invalid");
   assert.equal(routeDecision(feeless, { isDeployed: deployed }).residualVout, 0, "…but its residual still goes to vout0");

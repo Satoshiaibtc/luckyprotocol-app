@@ -16,6 +16,7 @@
 
 import { fmtInt, shortTxid } from "./format.js";
 import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS } from "./payloads.js";
+import { FINAL_DEPTH } from "./finality.js";
 import { formatTime } from "./minerlog.js";
 
 export { walletLine, feeQuoteLine, tipLine, signLine, broadcastingLine, acceptedLine, blockFoundLine, errorLine } from "./minerlog.js";
@@ -79,19 +80,62 @@ export function deployHeartbeatLine(nextHeight, sinceMs, at = Date.now()) {
   return line({ key: `hb:${nextHeight}:${Math.floor(Number(at) / 60_000)}`, kind: "sys", text: `awaiting block${h}${since}`, ts: at });
 }
 
-/** `DEPLOY LUCKY confirmed  block 969,802  ·  awaiting the indexer's verdict` — tx-status says confirmed; registration is still the indexer's call. */
+/**
+ * `DEPLOY LUCKY confirmed  block 969,802  ·  awaiting the indexer's verdict` — tx-status says confirmed; registration is still the indexer's call.
+ * Keyed by block height too: after a chain reorganization took it out of its block, its confirmation in a new one is logged again.
+ */
 export function deployConfirmedLine(ticker, height, txid, at = Date.now()) {
   return line({
-    key: `dconfirmed:${txid ?? height}`,
+    key: `dconfirmed:${txid ?? ""}:${height}`,
     kind: "ok",
     text: `DEPLOY ${ticker} confirmed  block ${fmtInt(height)}  ·  awaiting the indexer's verdict`,
     ts: at,
   });
 }
 
-/** Banner: `LUCKY deployed  block 969,802  ✓ yours` (kind ok, no tier — styled by .ln.yours.ln-ok). */
-export function deployedLine(ticker, height, txid, at = Date.now()) {
-  return line({ key: `deployed:${txid ?? height}`, kind: "ok", yours: true, text: `${ticker} deployed  block ${fmtInt(height)}  ✓ yours`, ts: at });
+/**
+ * Banner: `LUCKY deployed  block 969,802  ✓ yours` (kind ok, no tier — styled
+ * by .ln.yours.ln-ok); `provisional` adds that it is final only after
+ * FINAL_DEPTH confirmations.
+ */
+export function deployedLine(ticker, height, txid, at = Date.now(), { provisional = false } = {}) {
+  const note = provisional ? `  ·  provisional until ${FINAL_DEPTH} confirmations` : "";
+  return line({ key: `deployed:${txid ?? height}`, kind: "ok", yours: true, text: `${ticker} deployed  block ${fmtInt(height)}  ✓ yours${note}`, ts: at });
+}
+
+/** `LUCKY final  block 969,802  6 confirmations  ·  the name is yours` — a created name whose block is final. */
+export function createdFinalLine(ticker, height, txid, at = Date.now()) {
+  const block = Number.isInteger(height) ? `  block ${fmtInt(height)}` : "";
+  return line({ key: `cr:final:${txid ?? ticker}`, kind: "ok", text: `${ticker} final${block}  ${FINAL_DEPTH} confirmations  ·  the name is yours`, ts: at });
+}
+
+/**
+ * A chain reorganization changed a created name that was not final yet
+ * (settlingVerdict): another publish holds it now, or ours left its block —
+ * or it is ours again. One line per change: `change` (the note's count of
+ * changes) keeps a second flip to the same verdict from reading as a repeat.
+ */
+export function createdReorgLine(ticker, verdict, txid, otherTxid = null, at = Date.now(), { change = 0 } = {}) {
+  const key = `cr:reorg:${txid}:${verdict}:${otherTxid || ""}:${change}`;
+  if (verdict === "changed-taken") {
+    const other = otherTxid ? ` (tx ${short(otherTxid)})` : "";
+    return line({ key, kind: "err", text: `chain reorganization  ${ticker} is now registered to another publish${other}  ·  still checking until final`, ts: at });
+  }
+  if (verdict === "changed-missing") {
+    return line({ key, kind: "err", text: `chain reorganization  your publish of ${ticker} left its block  ·  still checking — it usually confirms again`, ts: at });
+  }
+  return line({ key, kind: "sys", text: `${ticker} is registered to your publish again  ·  still provisional`, ts: at });
+}
+
+/**
+ * `COMMIT a3f9c…21e left block #969,810 (chain reorganization) · waiting for it to confirm again` [err]
+ * — a confirmed step the indexer no longer shows in that block. Its callers
+ * emit it once per event, so the key carries the second: a step that leaves
+ * the same height a second time (a reorganization back and forth) is logged again.
+ */
+export function stepLeftBlockLine(what, txid, height, at = Date.now()) {
+  const block = Number.isInteger(height) ? `block #${fmtInt(height)}` : "its block";
+  return line({ key: `cr:left:${txid}:${height ?? ""}:${secondBucket(at)}`, kind: "err", text: `${what} ${short(txid)} left ${block} (chain reorganization)  ·  waiting for it to confirm again`, ts: at });
 }
 
 /**
@@ -168,7 +212,8 @@ export function reserveMempoolLine(nextHeight, txid, at = Date.now()) {
 /** `COMMIT confirmed  block 969,802  ·  publish from block #969,803, by block #971,818` */
 export function reserveConfirmedLine(height, window, txid, at = Date.now()) {
   const w = window ? `  ·  publish from block #${fmtInt(window.revealFrom)}, by block #${fmtInt(window.expiresAt)}` : "";
-  return line({ key: `cr:confirmed:${txid ?? height}`, kind: "ok", text: `COMMIT confirmed  block ${fmtInt(height)}${w}`, ts: at });
+  // keyed by height too: a COMMIT that confirms again in a new block after a reorganization is logged again
+  return line({ key: `cr:confirmed:${txid ?? ""}:${height}`, kind: "ok", text: `COMMIT confirmed  block ${fmtInt(height)}${w}`, ts: at });
 }
 
 /** `indexer: reservation recorded · step 2 (publish) is open` */

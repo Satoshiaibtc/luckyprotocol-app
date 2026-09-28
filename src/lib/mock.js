@@ -19,6 +19,13 @@
 // That is what lets the whole listing → fill → trade loop run end-to-end
 // without a node.
 //
+// Depth and finality (the indexer API): every mine view, /tx-status and
+// the token rows carry the confirmation depth the live indexer serves
+// (`confirmations`, `final`, `market_open`, `market_opens_at_height`), and
+// the simulated chain keeps growing — one block every CONFIRM_AFTER_MS for
+// MOCK_TRAILING_BLOCKS blocks after each simulated confirmation — so a
+// result visibly goes from provisional to final.
+//
 // The seeded order book carries REAL signed listings: each seller is a
 // deterministic secp256k1 key and its PSBT is signed with
 // SINGLE|ANYONECANPAY at first access, so `verifyListing` passes exactly as
@@ -39,10 +46,15 @@ import { compareSecondSource } from "./secondSource.js";
 import { isFillOf, isOpReturnOut, routeDecision } from "./mockRouting.js";
 import { MAX_COMMIT_AGE, MIN_COMMIT_AGE } from "./payloads.js";
 import { serverErrorText } from "./httpError.js";
+import { FINAL_DEPTH, MARKET_OPEN_DELAY, confirmationsAt } from "./finality.js";
 import { COMMIT_CARRIER_LISTING_TEXT, MAX_OPEN_LISTINGS_PER_ADDRESS, WITHDRAW_FIRST_TEXT, sellerCapError } from "./listingRules.js";
 
 const BASE_TIP = 969_800;
 const CONFIRM_AFTER_MS = 20_000;
+// After a simulated tx confirms, the simulated chain keeps growing — one
+// block per CONFIRM_AFTER_MS — for this many blocks, so its confirmations
+// reach FINAL_DEPTH (and a little beyond) without further broadcasts.
+const MOCK_TRAILING_BLOCKS = FINAL_DEPTH + 2;
 const LATENCY_MS = 120;
 const LOAD_TS = Math.floor(Date.now() / 1000);
 const ORDER_TTL_SEC = 14 * 86400;      // §7.4: an open order expires 14 days after updated_at
@@ -171,6 +183,9 @@ const TOKEN_SEEDS = [
   { ticker: "NODE", minted: 620_500, deploy_block: 969_530, holders: 233, base: 85, deployerType: "tr" },
   { ticker: "GRID", minted: 210_000, deploy_block: 969_600, holders: 120, base: 140, deployerType: "tr" },
   { ticker: "PIXEL", minted: 3_150, deploy_block: 969_790, holders: 9, base: 1_200, deployerType: "wpkh" },
+  // DUNE was minted out two blocks before the tip: its market opens once that
+  // block has FINAL_DEPTH confirmations (no fills or asks until then).
+  { ticker: "DUNE", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: BASE_TIP - 2, deploy_block: 969_700, holders: 880, base: 0, deployerType: "wpkh" },
   { ticker: "VOLT", minted: 0, deploy_block: 969_799, holders: 0, base: 0, deployerType: "tr" }, // brand-new: no mines, no trades, no asks
 ];
 
@@ -467,11 +482,11 @@ function readSimLog() {
   }
 }
 
-function appendSimLog(raw, at) {
+function appendSimLog(raw, at, height) {
   try {
     if (typeof sessionStorage === "undefined") return;
     const list = readSimLog();
-    list.push({ raw, at });
+    list.push({ raw, at, height });
     sessionStorage.setItem(SIM_LOG_KEY, JSON.stringify(list.slice(-200)));
   } catch {
     /* no storage — the simulated chain simply resets on reload */
@@ -484,7 +499,7 @@ function replaySimLog() {
   try {
     for (const e of readSimLog()) {
       try {
-        simulateBroadcast(e.raw, { at: e.at });
+        simulateBroadcast(e.raw, { at: e.at, height: Number.isInteger(e.height) ? e.height : null });
       } catch {
         /* a logged tx that no longer applies is skipped */
       }
@@ -569,12 +584,45 @@ function holdersFor(t) {
 function simConfirmed(e, now = Date.now()) {
   return now - e.at >= CONFIRM_AFTER_MS;
 }
-function tipHeight() {
+/**
+ * The simulated tip: the highest confirmed simulated block, grown by one
+ * block per CONFIRM_AFTER_MS after each confirmation (MOCK_TRAILING_BLOCKS
+ * at most) — but never past a block a still-pending simulated tx is due in.
+ */
+function tipHeight(now = Date.now()) {
   const w = world();
   let tip = BASE_TIP;
-  for (const e of w.sim.values()) if (simConfirmed(e) && e.height > tip) tip = e.height;
-  return tip;
+  let cap = Infinity;
+  for (const e of w.sim.values()) {
+    if (!simConfirmed(e, now)) {
+      cap = Math.min(cap, e.height - 1);
+      continue;
+    }
+    const grown = Math.min(MOCK_TRAILING_BLOCKS, Math.floor((now - e.at - CONFIRM_AFTER_MS) / CONFIRM_AFTER_MS));
+    tip = Math.max(tip, e.height + Math.max(0, grown));
+  }
+  let confirmedTop = BASE_TIP;
+  for (const e of w.sim.values()) if (simConfirmed(e, now) && e.height > confirmedTop) confirmedTop = e.height;
+  return Math.max(confirmedTop, Math.min(tip, cap));
 }
+
+/**
+ * The height the simulated indexer has applied: the simulated tip, less the
+ * `lp.mock.indexerLag` knob. Depth and the market gate are measured from it,
+ * as the live indexer measures them from its indexed height.
+ */
+function indexedHeight() {
+  return tipHeight() - mockIndexerLag();
+}
+
+/** `{ confirmations, final }` of a block at `height` against the indexed height (the live indexer's fields). */
+function depthOf(height) {
+  const n = confirmationsAt(height, indexedHeight()) ?? 0;
+  return { confirmations: n, final: n >= FINAL_DEPTH };
+}
+
+/** A MineView as the live indexer serves it: `reason` always present, with its depth at response time. */
+const mineView = (r) => ({ reason: null, ...r, ...depthOf(r.block_height) });
 
 function lookupUtxo(k) {
   const w = world();
@@ -620,7 +668,7 @@ function evictSim(txid) {
  * pays a higher fee (BIP125 as modern nodes apply it — full RBF), which is
  * what "Speed up" relies on. `at` is only set when replaying the log.
  */
-export function simulateBroadcast(rawHex, { at = null } = {}) {
+export function simulateBroadcast(rawHex, { at = null, height: loggedHeight = null } = {}) {
   const w = world();
   let d;
   try {
@@ -660,7 +708,12 @@ export function simulateBroadcast(rawHex, { at = null } = {}) {
     }
     for (const t of conflicts) evictSim(t);
   }
-  if (!w.replaying) appendSimLog(rawHex, Date.now());
+  // Its block: the next one after everything simulated so far (a replay
+  // keeps the height it was first given, so its block hash — and a MINE's
+  // yield — stay the same across a reload).
+  w.simOrder += 1;
+  const height = Number.isInteger(loggedHeight) ? loggedHeight : Math.max(BASE_TIP + w.simOrder, tipHeight() + 1, ...[...w.sim.values()].map((e) => e.height));
+  if (!w.replaying) appendSimLog(rawHex, Date.now(), height);
   for (const i of d.inputs) w.spent.add(key(i));
   // §7.3: the live indexer marks a listing `filling` for ANY mempool spend
   // of its outpoint — a buyer's fill or the seller's own withdrawal alike.
@@ -670,8 +723,6 @@ export function simulateBroadcast(rawHex, { at = null } = {}) {
     if (!o || (o.status !== "open" && o.status !== "filling")) continue;
     Object.assign(o, { status: "filling", pending_spend_txid: d.txid, pending_fee_sats: null, pending_vsize: null, pending_feerate: null, updated_at: now() });
   }
-  w.simOrder += 1;
-  const height = BASE_TIP + w.simOrder;
   for (const o of d.outputs) {
     // Every non-OP_RETURN output can carry tokens (§4 rule 5) — an
     // address-less one too; it just never shows under any address.
@@ -755,7 +806,7 @@ function applyTx(txid, e) {
     const c = w.commitByCarrier.get(k);
     return c && (c.status === "open" || c.status === "invalid") && !c.spent_txid ? c : null;
   };
-  const dec = routeDecision(d, { pool, isDeployed: (t) => w.tokens.has(t), commitAt, height });
+  const dec = routeDecision(d, { pool, isDeployed: (t) => w.tokens.has(t), deployBlockOf: (t) => w.tokens.get(t)?.deploy_block ?? null, commitAt, height });
   // Spending a COMMIT carrier consumes that commit, whether or not this tx
   // is a REVEAL that applies (§2.1) — after the decision, which needed it open.
   for (const [idx, i] of d.inputs.entries()) {
@@ -806,6 +857,7 @@ function applyTx(txid, e) {
       status: valid ? "settled" : "invalid",
       yield_smallest: y,
       cap_exhausted: capExhausted,
+      reason: valid ? null : dec.reason,
     });
   } else if (p && p.op === "SEND") {
     const to = d.outputs[p.toOutIdx];
@@ -976,6 +1028,60 @@ function mockHealthTip() {
   }
 }
 
+/**
+ * Dev knob for the node-health warnings: `sessionStorage["lp.mock.health"]
+ * = '{"node_peers":0,"stalled":true}'` (any of node_peers, stalled,
+ * rebuilding, tip_time, persist_ok) overrides those /health fields in THIS tab.
+ */
+function mockHealthOverride() {
+  try {
+    const raw = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("lp.mock.health") : null;
+    const o = raw ? JSON.parse(raw) : null;
+    if (!o || typeof o !== "object") return {};
+    const out = {};
+    for (const k of ["node_peers", "stalled", "rebuilding", "tip_time", "persist_ok"]) if (k in o) out[k] = o[k];
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Dev knob: `sessionStorage["lp.mock.feesDown"] = "1"` makes /fees answer `ok: false` with 1 sat/vB floors (the node could not estimate). */
+function mockFeesDown() {
+  try {
+    return typeof sessionStorage !== "undefined" && sessionStorage.getItem("lp.mock.feesDown") === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Dev knob: `sessionStorage["lp.mock.networkAhead"] = "N"` makes the mock
+ * second source's tip N blocks above the simulated one (our node behind
+ * the network).
+ */
+function mockNetworkAhead() {
+  try {
+    const n = Number(typeof sessionStorage !== "undefined" ? sessionStorage.getItem("lp.mock.networkAhead") : 0);
+    return Number.isInteger(n) && n > 0 && n < 10_000 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** The mock second source's chain tip (src/lib/network.js) — nothing leaves the browser. */
+export async function mockNetworkTip() {
+  await sleep(LATENCY_MS);
+  world();
+  return (mockHealthTip() ?? tipHeight()) + mockNetworkAhead();
+}
+
+/** The mock second source's recommended fee rates (whole sat/vB, like mempool.space). */
+export async function mockNetworkFees() {
+  await sleep(LATENCY_MS);
+  return { fastestFee: 3, halfHourFee: 2, hourFee: 2, economyFee: 1, minimumFee: 1 };
+}
+
 function senderOf(d) {
   for (const i of d.inputs) {
     const u = lookupUtxo(key(i));
@@ -1002,7 +1108,8 @@ function marketFor(ticker, windowId) {
   const all = priceTrades(ticker);
   const inWin = all.filter((x) => x.block_time >= since);
   const selfExcluded = w.trades.filter((x) => x.ticker === ticker && x.self_trade && x.block_time >= since).length;
-  const open = [...w.orders.values()].filter((o) => o.ticker === ticker && o.status === "open");
+  // The book shows no ask of a ticker whose market is not open (0 / null figures).
+  const open = isMarketOpen(w.tokens.get(ticker)) ? [...w.orders.values()].filter((o) => o.ticker === ticker && o.status === "open") : [];
   const first = inWin.length ? inWin[0].unit_price : null;
   const lastIn = inWin.length ? inWin[inWin.length - 1].unit_price : null;
   return {
@@ -1024,12 +1131,26 @@ function marketFor(ticker, windowId) {
     change_pct: inWin.length >= 2 && first ? Math.round(((lastIn - first) / first) * 10000) / 100 : null, // null with fewer than two fills, two decimals
     self_trades_excluded: selfExcluded,
     minted_out: isMintedOut(w.tokens.get(ticker)),
+    market_open: isMarketOpen(w.tokens.get(ticker)),
+    market_opens_at_height: marketOpensAt(w.tokens.get(ticker)),
   };
 }
 
-/** The market gate: cumulative credited yield reached the supply (never comes back down). */
+/** Cumulative credited yield reached the supply. */
 function isMintedOut(t) {
   return !!t && t.minted >= t.supply;
+}
+
+/** The block from which the market of a minted-out token is open (its completing block FINAL_DEPTH deep), or null. */
+function marketOpensAt(t) {
+  return isMintedOut(t) && Number.isInteger(t.minted_out_height) ? t.minted_out_height + MARKET_OPEN_DELAY : null;
+}
+
+/** The market gate: minted out AND the completing block FINAL_DEPTH deep (a row without the height counts as open). */
+function isMarketOpen(t) {
+  if (!isMintedOut(t)) return false;
+  const at = marketOpensAt(t);
+  return at === null || indexedHeight() >= at;
 }
 
 /** `GET /tokens/:ticker/candles?interval=&limit=` — OHLC buckets of non-self trades, empty buckets omitted. */
@@ -1059,6 +1180,8 @@ function tokenView(t) {
     ...t,
     minted_out: isMintedOut(t),
     minted_out_height: isMintedOut(t) ? t.minted_out_height ?? null : null,
+    market_open: isMarketOpen(t),
+    market_opens_at_height: marketOpensAt(t),
     open_orders: m.open_orders,
     floor_unit_price: m.floor_unit_price,
     last_trade: m.last_trade,
@@ -1187,7 +1310,7 @@ export async function mockCheckSecondSource(listing) {
 
 const PARTY_KEYS = ["from", "to", "sender", "deployer", "buyer", "seller"];
 
-const publicOrder = ({ psbt: _psbt, ...rest }) => rest;
+const publicOrder = ({ psbt: _psbt, ...rest }) => ({ ...rest, market_open: isMarketOpen(world().tokens.get(rest.ticker)) });
 
 // ---- route table -----------------------------------------------------------------------------
 
@@ -1222,7 +1345,14 @@ export async function mockGet(path) {
       mine_count: [...w.tokens.values()].reduce((s, t) => s + t.mine_count, 0),
       filling_order_count: [...w.orders.values()].filter((o) => o.status === "filling").length,
       last_progress_at: Math.floor(Date.now() / 1000) - 12,
+      last_poll_at: Math.floor(Date.now() / 1000) - 5,
+      node_peers: 8,
+      tip_time: blockTimeAt(tip),
+      rebuilding: false,
+      final_depth: FINAL_DEPTH,
+      persist_ok: true,
       stalled: false,
+      ...mockHealthOverride(),
     };
   }
   if ((m = p.match(/^\/balances\/([^/]+)$/))) {
@@ -1249,7 +1379,10 @@ export async function mockGet(path) {
   if ((m = p.match(/^\/mines\/by-txid\/([^/]+)$/))) {
     const txid = decodeURIComponent(m[1]).toLowerCase();
     const row = w.simMines.find((r) => r.txid === txid) || w.feed.find((r) => r.txid === txid);
-    if (row) return row;
+    if (row) return mineView(row);
+    // A SEND with that txid: its transfer row, with the same depth fields.
+    const send = [...w.simSends, ...w.history.sends].find((r) => r.txid === txid);
+    if (send) return { ...send, ...depthOf(send.block_height) };
     throw notFound(p);
   }
   if ((m = p.match(/^\/mines\/([^/]+)$/))) {
@@ -1257,13 +1390,14 @@ export async function mockGet(path) {
     const addr = decodeURIComponent(m[1]);
     const sim = w.simMines.filter((r) => r.sender === addr).sort((a, b) => b.block_height - a.block_height);
     const pg = page([...sim, ...MY_SEEDED_MINES(addr)], q, 50);
-    return { address: addr, mines: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset };
+    return { address: addr, mines: pg.items.map(mineView), total: pg.total, limit: pg.limit, offset: pg.offset };
   }
   if (p === "/mines") {
     const ticker = q.get("ticker");
     let all = [...w.simMines].sort((a, b) => b.block_height - a.block_height).concat(w.feed, w.history.mines);
     if (ticker) all = all.filter((r) => r.ticker === ticker);
-    return page(all, q, 20);
+    const pg = page(all, q, 20);
+    return { ...pg, items: pg.items.map(mineView) };
   }
   if (p === "/tokens") {
     const deployer = q.get("deployer");
@@ -1340,14 +1474,14 @@ export async function mockGet(path) {
     const txid = decodeURIComponent(m[1]).toLowerCase();
     const e = w.sim.get(txid);
     if (e) {
-      if (!simConfirmed(e)) return { txid, confirmed: false, seen: true, in_mempool: true, block_height: null, block_hash: null, block_time: null };
-      return { txid, confirmed: true, block_height: e.height, block_hash: blockHashAt(e.height), block_time: Math.floor((e.at + CONFIRM_AFTER_MS) / 1000) };
+      if (!simConfirmed(e)) return { txid, confirmed: false, seen: true, in_mempool: true, block_height: null, block_hash: null, block_time: null, confirmations: 0, final: false };
+      return { txid, confirmed: true, seen: true, in_mempool: false, block_height: e.height, block_hash: blockHashAt(e.height), block_time: Math.floor((e.at + CONFIRM_AFTER_MS) / 1000), ...depthOf(e.height) };
     }
     const row = w.feed.find((r) => r.txid === txid) || w.trades.find((r) => r.txid === txid);
     if (row) {
-      return { txid, confirmed: true, block_height: row.block_height, block_hash: row.block_hash, block_time: row.block_time ?? blockTimeAt(row.block_height) };
+      return { txid, confirmed: true, seen: true, in_mempool: false, block_height: row.block_height, block_hash: row.block_hash, block_time: row.block_time ?? blockTimeAt(row.block_height), ...depthOf(row.block_height) };
     }
-    return { txid, confirmed: false, seen: false, in_mempool: false, block_height: null, block_hash: null, block_time: null };
+    return { txid, confirmed: false, seen: false, in_mempool: false, block_height: null, block_hash: null, block_time: null, confirmations: 0, final: false };
   }
   if (p === "/blocks/recent") {
     const tip = tipHeight();
@@ -1418,7 +1552,9 @@ export async function mockGet(path) {
   if (p === "/fees") {
     // Fractional like the real indexer (f64 rounded up to hundredths) so
     // mock mode exercises decimal rates end to end.
-    return { fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
+    // `ok: false` (the node could not estimate) serves 1 sat/vB floors, like the live indexer.
+    if (mockFeesDown()) return { ok: false, fastestFee: 1, halfHourFee: 1, hourFee: 1, economyFee: 1, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
+    return { ok: true, fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
   }
   if ((m = p.match(/^\/orders\/by-address\/([^/]+)$/))) {
     // Paged like the live indexer (indexer API: limit default 50, max 200).
@@ -1430,7 +1566,7 @@ export async function mockGet(path) {
   if ((m = p.match(/^\/orders\/([^/]+)$/))) {
     const o = w.orders.get(decodeURIComponent(m[1]).toLowerCase());
     if (!o) throw notFound(p);
-    return { ...o };
+    return { ...o, market_open: isMarketOpen(w.tokens.get(o.ticker)) };
   }
   if (p === "/orders") {
     const ticker = q.get("ticker");
@@ -1440,6 +1576,9 @@ export async function mockGet(path) {
     let all = [...w.orders.values()];
     if (ticker) all = all.filter((o) => o.ticker === ticker);
     if (status !== "all") all = all.filter((o) => o.status === status);
+    // No live orders (open or filling) of a ticker whose market is not open,
+    // whatever `status` asks (the live book's rule); closed ones stay listed.
+    all = all.filter((o) => (o.status !== "open" && o.status !== "filling") || isMarketOpen(w.tokens.get(o.ticker)));
     all = status === "open" || status === "filling"
       ? all.sort((a, b) => a.unit_price - b.unit_price || a.created_at - b.created_at)
       : all.sort((a, b) => b.updated_at - a.updated_at);
@@ -1490,14 +1629,15 @@ export async function mockPostJson(path, body) {
   if (!body || typeof body !== "object") throw bad("body must be JSON");
   const { psbt, ticker, amount, price_sats } = body;
   if (!w.tokens.has(ticker)) throw bad(`unknown ticker ${ticker}`);
+  // The market gate comes first, before anything in the listing is read — as the live book checks it.
+  const tok = w.tokens.get(ticker);
+  if (!isMintedOut(tok)) throw bad(`market opens when ${ticker} is fully minted (minted ${tok.minted} of ${tok.supply})`, 409);
+  if (!isMarketOpen(tok)) throw bad(`market opens at block ${marketOpensAt(tok)}`, 409);
   // §7.4: price_sats ≤ amount × 1 BTC (at most 1 BTC per whole token).
   const maxPrice = Number(amount) * 100_000_000;
   if (!(Number(price_sats) >= DUST_SATS && Number(price_sats) <= maxPrice)) {
     throw bad(`price_sats must be in [${DUST_SATS}, ${maxPrice}] (≤ 1 BTC per whole token × ${amount})`);
   }
-  const tok = w.tokens.get(ticker);
-  if (!isMintedOut(tok)) throw bad(`market opens when ${ticker} is fully minted (minted ${tok.minted} of ${tok.supply})`, 409);
-
   let L;
   try {
     L = parseListing(psbt);
@@ -1590,5 +1730,5 @@ export async function mockPostJson(path, body) {
     psbt: String(psbt).toLowerCase(),
   };
   w.orders.set(outpoint, row);
-  return { ...publicOrder(row), ...(existing && existing.status === "open" ? { replaced: true } : {}) };
+  return { ...publicOrder(row), replaced: !!existing && existing.status === "open" };
 }

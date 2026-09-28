@@ -7,12 +7,13 @@ import { useSendToSelf } from "../hooks/useSendToSelf.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { buildListingPsbt, LISTING_SIGHASH, MIN_PRICE_SATS, maxPriceSats } from "../lib/swap.js";
 import { estimateSendFeeSats } from "../lib/psbt.js";
-import { RAISE_PRICE_TEXT, cancelFeeRate, listingRefusalText, parseUnitInput, splitAmountError } from "../lib/market.js";
+import { BOOK_UNSAVED_PAUSE_TEXT, RAISE_PRICE_TEXT, WITHDRAW_CONFIRMED_TEXT, WITHDRAW_PENDING_TEXT, cancelFeeRate, listingRefusalText, parseUnitInput, splitAmountError } from "../lib/market.js";
 import { commitCarrierProblem, listingCapDecision, listingCapText, listingQuota, listingQuotaText, listingShapeProblems, readSellerOrders, relistDecision } from "../lib/listingRules.js";
 import { ownPendingSpendOf, txRecords } from "../lib/txrecords.js";
 import { DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
 import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, fmtUsd, shortTxid, subUnitDecimals } from "../lib/format.js";
-import { isMintedOut } from "../lib/marketBoard.js";
+import { isMarketOpen } from "../lib/marketBoard.js";
+import { syncPauseText } from "../lib/sync.js";
 import { marketClosedNotice } from "../lib/tokenTabs.js";
 import TxProgress, { ConnectPrompt } from "./TxProgress.jsx";
 import { OrdersTable } from "./Tables.jsx";
@@ -37,7 +38,7 @@ const RELIST_WARNING =
  * notices and the progress labels all say "withdraw".
  */
 export default function SellPanel({ ticker, token, onSettled, usd = null }) {
-  const { wallet: w, address, pubkeyHex, fees, fee, indexerOk } = useApp();
+  const { wallet: w, address, pubkeyHex, fees, fee, indexerOk, sync, health } = useApp();
   const connected = w.status === "connected";
 
   const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
@@ -169,9 +170,14 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
   const selFilling = !!sel && sel.listing?.status === "filling";
   const fatCarrier = !!sel && Number.isInteger(sel.sats) && sel.sats > DUST_SATS;
   const listBusy = listFlow.phase === "checking" || listFlow.phase === "signing" || listFlow.phase === "posting";
-  // The market gate: a listing is accepted only once the token is minted out
-  // (the indexer answers 409 otherwise — this is the same rule, said first).
-  const mintedOut = isMintedOut(token);
+  // The market gate: a listing is accepted only once the token's market is
+  // open — minted out AND the block that completed the supply FINAL_DEPTH
+  // deep (the indexer answers 409 otherwise — this is the same rule, said first).
+  const marketOpen = isMarketOpen(token);
+  // A new listing pauses while the indexer's view may be stale (lagging,
+  // stalled, rebuilding, or its node behind the network), and while the
+  // order book reports that it cannot save listings — Withdraw never does.
+  const listPause = indexerOk ? syncPauseText(sync, "listing") ?? (health?.data?.persist_ok === false ? BOOK_UNSAVED_PAUSE_TEXT : null) : null;
   const marketClosed = marketClosedNotice(ticker, token);
   // §7.4 price band: the indexer refuses an ask above 100× the ticker's best
   // OTHER open ask. Said here, before the wallet is opened, rather than only
@@ -218,7 +224,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
   const capBlocked = !!capCheck && !capCheck.ok && !selFilling;
 
   const signListing = async () => {
-    if (!connected || !sel || sel.multi || selFilling || !priceOk || sel.sats === null || !mintedOut || raiseBlocked || reservedCarrier || capBlocked) return;
+    if (!connected || !sel || sel.multi || selFilling || !priceOk || sel.sats === null || !marketOpen || listPause || raiseBlocked || reservedCarrier || capBlocked) return;
     // "checking" = the reads made before the wallet is opened (cap, rvs-2).
     setListFlow({ phase: "checking" });
     try {
@@ -258,9 +264,10 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
       setListFlow({ phase: "listed", order: view });
       settled();
     } catch (e) {
-      // 409 `market opens when TICKER is fully minted (minted X of Y)` → the same one-line notice the tabs show;
+      // 409 `market opens when TICKER is fully minted (minted X of Y)` or
+      // `market opens at block N` → the same one-line notice the tabs show;
       // every other refusal of the book → one plain sentence (audit market-6).
-      const closed = e?.status === 409 && /market opens when/i.test(String(e?.message || ""));
+      const closed = e?.status === 409 && /market opens (when|at block)/i.test(String(e?.message || ""));
       setListFlow({ phase: "error", error: closed ? marketClosed : listingRefusalText(e) ?? friendlyError(e) });
     }
   };
@@ -432,7 +439,8 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
             </span>
             <span className="muted">whole UTXO — the listing sells its entire balance</span>
           </div>
-          {!mintedOut && <div className="notice">{marketClosed}</div>}
+          {!marketOpen && <div className="notice">{marketClosed}</div>}
+          {marketOpen && listPause && <div className="notice">{listPause}</div>}
           <div className="price-grid">
             <label>
               <span className="label">Sats per token</span>
@@ -540,7 +548,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
           )}
 
           <div className="sheet-actions">
-            <button className="btn btn-primary btn-lg" type="button" onClick={signListing} disabled={!mintedOut || !priceOk || selFilling || raiseBlocked || reservedCarrier || capBlocked || sel.sats === null || listBusy || !indexerOk || chainBusy}>
+            <button className="btn btn-primary btn-lg" type="button" onClick={signListing} disabled={!marketOpen || !!listPause || !priceOk || selFilling || raiseBlocked || reservedCarrier || capBlocked || sel.sats === null || listBusy || !indexerOk || chainBusy}>
               {listFlow.phase === "checking" ? "Checking…" : listFlow.phase === "signing" ? "Awaiting signature…" : listFlow.phase === "posting" ? "Publishing…" : sel.listing ? "Sign new listing" : "Sign listing"}
             </button>
           </div>
@@ -619,11 +627,12 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
             onReset={reset}
             labels={{
               building: chain.kind === "cancel" ? "Building the withdrawal — a SEND of the listed UTXO to yourself." : "Building the split — a SEND to yourself.",
-              pending: `${chain.kind === "cancel" ? "Withdrawal" : "Split"} broadcast. Pending confirmation — checking every 15 s.`,
-              confirmed:
+              pending: chain.kind === "cancel" ? WITHDRAW_PENDING_TEXT : "Split broadcast. Pending confirmation — checking every 15 s.",
+              confirmed: chain.kind === "cancel" ? WITHDRAW_CONFIRMED_TEXT : "Split confirmed. The new vout0 is listable above.",
+              final:
                 chain.kind === "cancel"
-                  ? "Withdrawn on-chain. The old signed listing can no longer be filled. The tokens are on a new carrier (listed above once the indexer shows it) — select it to list at any price."
-                  : "Split confirmed. The new vout0 is listable above.",
+                  ? "Withdrawn on-chain and final. The old signed listing can no longer be filled. The tokens are on a new carrier (listed above once the indexer shows it) — select it to list at any price."
+                  : "Split confirmed and final. The new vout0 is listable above.",
             }}
           />
         </>
@@ -638,7 +647,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
         </div>
         {fillingNotes.map(({ order: o, rule }) => (
           <div className="notice" key={o.id}>
-            <strong>Fill pending.</strong> {fmtInt(o.amount)} {ticker} @ {fmtUnit(o.unit_price)}: a fill sits in the mempool at {o.pending_feerate ?? "?"} sat/vB{o.pending_fee_sats !== null ? ` (${fmtInt(o.pending_fee_sats)} sats${o.pending_vsize !== null ? ` over ${fmtInt(o.pending_vsize)} vB` : ""})` : ""}. Nobody else can fill it now; if it confirms you are paid. Withdraw would have to replace it and will use{" "}
+            <strong>Fill pending.</strong> {fmtInt(o.amount)} {ticker} @ {fmtUnit(o.unit_price)}: a fill sits in the mempool at {o.pending_feerate ?? "?"} sat/vB{o.pending_fee_sats !== null ? ` (${fmtInt(o.pending_fee_sats)} sats${o.pending_vsize !== null ? ` over ${fmtInt(o.pending_vsize)} vB` : ""})` : ""}. If it confirms you are paid. Withdraw would have to replace it and will use{" "}
             {rule.overCap ? <span className="err">more than the {fmtInt(1000)} sat/vB safety cap — not possible until it confirms or drops</span> : <span className="mono">≥ {rule.floorSatVb ?? rule.satVb} sat/vB</span>}
             {rule.raised && !rule.overCap ? ` (raised from your ${fee.satVb} sat/vB)` : ""}.
           </div>

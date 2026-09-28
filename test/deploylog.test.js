@@ -8,6 +8,8 @@ import {
   PLAIN_BUSY,
   PLAIN_PHASES,
   abandonedLine,
+  createdFinalLine,
+  createdReorgLine,
   publishBuildLine,
   reservationExpiredLine,
   reservationResumedLine,
@@ -18,6 +20,7 @@ import {
   speedUpLine,
   stepDroppedLine,
   stepFoundLine,
+  stepLeftBlockLine,
   stepUnseenLine,
   takenBeforePublishLine,
   acceptedLine,
@@ -39,7 +42,18 @@ import {
 } from "../src/lib/deploylog.js";
 import { DEPLOY_PROTOCOL_FEE_SATS, commitHashFor } from "../src/lib/payloads.js";
 import {
+  DEAD_END_PHASES,
   DRAFT_STALE_MS,
+  PUBLISH_CUTOFF_BLOCKS,
+  PUBLISH_MIN_CONFIRMATIONS,
+  commitAfterRecheck,
+  commitRecheckNeeded,
+  createSettlingStore,
+  publishMissedBlock,
+  normalizeSettlingNote,
+  revealLeftBlock,
+  settlingKey,
+  settlingVerdict,
   commitMismatch,
   commitStatusText,
   createDeployRecordStore,
@@ -60,6 +74,7 @@ import {
   switchStepTo,
 } from "../src/lib/commitReveal.js";
 import { _sanitizeCommit } from "../src/lib/indexer.js";
+import { appendLine } from "../src/lib/minerlog.js";
 
 // Same gate as test/vocab.test.js — no formatter may emit a denied word.
 const DENY =
@@ -152,7 +167,8 @@ const keep = (l) => {
   const c = keep(deployConfirmedLine("NEW", 969_802, TXID, T0));
   assert.equal(c.kind, "ok");
   assert.equal(c.text, "DEPLOY NEW confirmed  block 969,802  ·  awaiting the indexer's verdict");
-  assert.equal(c.key, `dconfirmed:${TXID}`);
+  assert.equal(c.key, `dconfirmed:${TXID}:969802`);
+  assert.notEqual(deployConfirmedLine("NEW", 969_803, TXID, T0).key, c.key, "confirmed again in a new block after a reorganization: logged again");
 
   const y = keep(deployedLine("NEW", 969_802, TXID, T0));
   assert.equal(y.kind, "ok");
@@ -343,7 +359,8 @@ const keep = (l) => {
   const conf = { txid: TX_A, sentAt: T0, height: 969_400 };
   const rv = { txid: TX_B, sentAt: T0 + 5, height: null, unseenAt: T0 + 300_000 };
   assert.equal(ph(rec(conf, rv), { row: null }), "publish-unseen");
-  assert.equal(ph(rec(conf, { ...rv, replaces: [TX_C] }), { row: { deploy_txid: TX_C } }), "registered", "the replaced publish confirmed");
+  assert.equal(ph(rec(conf, { ...rv, replaces: [TX_C] }), { row: { deploy_txid: TX_C } }), "registered-provisional", "the replaced publish confirmed (its depth unknown: not final)");
+  assert.equal(ph(rec(conf, { ...rv, replaces: [TX_C] }), { row: { deploy_txid: TX_C, deploy_block: 969_395 } }), "registered", "…and final once its block is 6 deep");
   // A released publish (droppedReveals) that confirmed after all is still ours.
   const released = rec(conf, null, { droppedReveals: [TX_B] });
   assert.deepEqual(released.droppedReveals, [TX_B]);
@@ -382,12 +399,25 @@ const keep = (l) => {
   const SALT = "00112233445566778899aabbccddeeff";
   assert.deepEqual(revealWindow(969_400), { revealFrom: 969_401, expiresAt: 971_416 });
   const t0 = revealTiming(969_400, 969_400);
-  assert.equal(t0.ready, true, "a publish sent right after the commit's block confirms at 969,401 or later");
+  assert.equal(t0.ready, true, "the rules would take a publish sent right after the commit's block (it confirms at 969,401 or later)");
   assert.equal(t0.blocksLeft, 2_016);
+  // …but Publish waits for step 1's 2nd confirmation: at the first, a chain
+  // reorganization could put both steps into one block (commit_too_recent).
+  assert.deepEqual([t0.confirmations, t0.settled, t0.publishable, t0.publishFrom], [1, false, false, 969_401]);
+  const t1 = revealTiming(969_400, 969_401);
+  assert.deepEqual([t1.confirmations, t1.settled, t1.publishable], [2, true, true]);
+  assert.equal(PUBLISH_MIN_CONFIRMATIONS, 2);
   assert.equal(revealTiming(969_400, 971_415).blocksLeft, 1, "the next block is the last one");
+  // The last PUBLISH_CUTOFF_BLOCKS blocks of the window: Publish is closed.
+  assert.equal(PUBLISH_CUTOFF_BLOCKS, 6);
+  assert.deepEqual([revealTiming(969_400, 971_410).closing, revealTiming(969_400, 971_410).publishable], [false, true], "6 blocks left: still open");
+  assert.deepEqual([revealTiming(969_400, 971_411).closing, revealTiming(969_400, 971_411).publishable], [true, false], "5 left: closed");
+  assert.equal(revealTiming(969_400, 971_415).closing, true);
   assert.equal(revealTiming(969_400, 971_416).expired, true);
+  assert.equal(revealTiming(969_400, 971_416).closing, false, "expired is not closing");
   assert.equal(revealTiming(null, 969_400), null);
-  assert.equal(expiryText(revealTiming(969_400, 969_400)), "Publish by block #971,416 — 2,016 blocks left (about 14 days).");
+  assert.match(expiryText(revealTiming(969_400, 969_400)), /^Publish by block #971,410 — 2,011 blocks left \(about 14 days\); publishing closes 6 blocks before the reservation expires\.$/);
+  assert.match(expiryText(revealTiming(969_400, 971_412)), /fewer than 6 blocks are left, so Publish is closed/);
   assert.match(expiryText(revealTiming(969_400, 971_416)), /expired at block #971,416/);
 
   const base = { ticker: "NEW", salt: SALT, carrierScript: SPK, hash: commitHashFor("NEW", SALT, SPK), createdAt: T0, carrierSats: 546, commit: null, reveal: null };
@@ -401,10 +431,17 @@ const keep = (l) => {
   const conf = { ...commit, height: 969_400 };
   assert.equal(ph(rec(conf)), "recording", "confirmed, the indexer not asked yet");
   assert.equal(ph(rec(conf), { commitStatus: null }), "recording", "404: not recorded yet");
-  assert.equal(ph(rec(conf), { commitStatus: "open", row: null }), "ready");
-  assert.equal(ph(rec(conf), { commitStatus: "open" }), "recording", "ux-5: never ready before the registry row was read");
-  assert.equal(ph(rec(conf), { commitStatus: "open", row: { deploy_txid: OTHER_TXID } }), "taken", "another deploy took the name before the publish");
-  assert.equal(ph(rec(commit), { row: { deploy_txid: OTHER_TXID } }), "taken", "…even while step 1 is pending");
+  assert.equal(ph(rec(conf), { commitStatus: "open", row: null }), "settling", "1 confirmation: Publish waits for the 2nd");
+  assert.equal(ph(rec(conf), { commitStatus: "open", row: null, tip: 969_401 }), "ready");
+  assert.equal(ph(rec(conf), { commitStatus: "open", tip: 969_401 }), "recording", "ux-5: never ready before the registry row was read");
+  const other = (h) => ({ deploy_txid: OTHER_TXID, deploy_block: h });
+  assert.equal(ph(rec(conf), { commitStatus: "open", row: other(969_395) }), "taken", "another deploy took the name before the publish — final (6 deep)");
+  assert.equal(ph(rec(conf), { commitStatus: "open", row: other(969_396) }), "taken-tentative", "…5 deep: a chain reorganization could still undo it");
+  assert.equal(ph(rec(conf), { commitStatus: "open", row: { deploy_txid: OTHER_TXID } }), "taken-tentative", "…depth unknown: not final");
+  assert.equal(ph(rec(commit), { row: other(969_390) }), "taken", "…even while step 1 is pending");
+  assert.ok(!DEAD_END_PHASES.has("taken-tentative") && DEAD_END_PHASES.has("taken"), "a tentative verdict is not a dead end");
+  assert.equal(ph(rec(conf), { commitStatus: "open", row: null, tip: 971_411 }), "closing", "fewer than 6 blocks left: Publish closed");
+  assert.ok(DEAD_END_PHASES.has("closing"));
   assert.equal(ph(rec(conf), { commitStatus: "open", tip: 971_416 }), "expired");
   assert.equal(ph(rec(conf), { commitStatus: "invalid" }), "invalid");
   assert.equal(ph(rec(conf), { commitStatus: "revealed" }), "carrier-spent");
@@ -414,9 +451,15 @@ const keep = (l) => {
   assert.equal(ph(rec(conf, rv), { row: { deploy_txid: TXID.replace(/a/g, "b") } }), "publish-pending-taken");
   const rvc = { ...rv, height: 969_402 };
   assert.equal(ph(rec(conf, rvc), { row: null, rowAsOf: 969_401 }), "publish-confirmed", "the row was read before the publish's block was applied");
-  assert.equal(ph(rec(conf, rvc), { row: null, rowAsOf: 969_402 }), "refused", "applied, still no row → the publish did not register");
-  assert.equal(ph(rec(conf, rvc), { row: { deploy_txid: OTHER_TXID } }), "registered");
-  assert.equal(ph(rec(conf, { ...rvc, txid: "9".repeat(64), replaces: [OTHER_TXID] }), { row: { deploy_txid: OTHER_TXID } }), "registered", "a replaced (sped-up) publish still counts as ours");
+  const ourSpend = { status: "revealed", spent_txid: OTHER_TXID, reveal_applied: null, reveal_reason: null };
+  assert.equal(ph(rec(conf, rvc), { row: null, rowAsOf: 969_402, commitInfo: ourSpend }), "refused", "applied, our publish spent the reservation, still no row → it did not register");
+  assert.equal(ph(rec(conf, rvc), { row: null, rowAsOf: 969_402 }), "publish-confirmed", "no row but no word on the spend: not a verdict (a chain reorganization can take the publish out)");
+  assert.equal(ph(rec(conf, rvc), { row: null, rowAsOf: 969_402, commitInfo: { status: "open" } }), "publish-confirmed", "the reservation is open again: the publish left its block — keep checking");
+  assert.equal(ph(rec(conf, rvc), { row: { deploy_txid: OTHER_TXID } }), "registered-provisional", "ours, depth unknown");
+  assert.equal(ph(rec(conf, rvc), { row: { deploy_txid: OTHER_TXID, deploy_block: 969_402 }, tip: 969_406 }), "registered-provisional", "ours, 5 confirmations");
+  assert.equal(ph(rec(conf, rvc), { row: { deploy_txid: OTHER_TXID, deploy_block: 969_402 }, tip: 969_407 }), "registered", "ours, 6 confirmations: final");
+  assert.equal(ph(rec(conf, rvc), { row: { deploy_txid: OTHER_TXID, deploy_block: 969_402 }, tip: 969_420, indexed: 969_403 }), "registered-provisional", "depth counts on the indexer's applied height");
+  assert.equal(ph(rec(conf, { ...rvc, txid: "9".repeat(64), replaces: [OTHER_TXID] }), { row: { deploy_txid: OTHER_TXID, deploy_block: 969_390 } }), "registered", "a replaced (sped-up) publish still counts as ours");
   assert.equal(ph(rec(conf, rvc), { row: { deploy_txid: "8".repeat(64) } }), "taken-after");
   assert.equal(revealVerdict(null, rec(conf, rvc)), "unindexed");
   // The indexer's own verdict on the spend of our carrier (CommitView.reveal_applied / reveal_reason).
@@ -438,6 +481,92 @@ const keep = (l) => {
   assert.equal(odd.reveal_applied, null);
   assert.equal(odd.reveal_reason, null);
   console.log("commitReveal: reveal window, expiry countdown, every page phase");
+}
+
+// ---- chain reorganizations under a reservation, and created names until final ------------------------------------
+{
+  const SALT = "00112233445566778899aabbccddeeff";
+  const TX_NEXT = "4".repeat(64);
+  const commit = { txid: TXID, sentAt: T0, height: 969_400, replaces: [] };
+  // step 1 left its block: the indexer no longer has it although it applied the next blocks — twice in a row
+  assert.equal(commitRecheckNeeded({ commit, commitData: null, indexed: 969_403, misses: 2 }), true);
+  assert.equal(commitRecheckNeeded({ commit, commitData: null, indexed: 969_403, misses: 1 }), false, "one 404 can race the indexer");
+  assert.equal(commitRecheckNeeded({ commit, commitData: null, indexed: 969_399, misses: 5 }), false, "the indexer is still behind step 1's block");
+  assert.equal(commitRecheckNeeded({ commit, commitData: { status: "open" }, indexed: 969_403, misses: 5 }), false, "recorded: nothing to re-check");
+  assert.equal(commitRecheckNeeded({ commit: { ...commit, height: null }, commitData: null, indexed: 969_403, misses: 5 }), false, "not confirmed: tracked as pending anyway");
+  // …and what the re-check does
+  const back = commitAfterRecheck(commit, { kind: "seen", txid: TXID }, T0 + 1);
+  assert.deepEqual([back.txid, back.height, back.unseenAt], [TXID, null, null], "back in the mempool: unconfirmed (tracking and Speed up resume)");
+  const moved = commitAfterRecheck({ ...commit, replaces: [TX_NEXT] }, { kind: "confirmed", txid: TX_NEXT, height: 969_401 }, T0 + 1);
+  assert.deepEqual([moved.txid, moved.height, moved.replaces], [TX_NEXT, 969_401, [TXID]], "another version confirmed (a Speed up) — switched to it and its height");
+  const gone = commitAfterRecheck(commit, { kind: "none" }, T0 + 9);
+  assert.deepEqual([gone.height, gone.unseenAt], [null, T0 + 9], "unknown to the node: unseen (the reserve-unseen flow)");
+  assert.equal(commitAfterRecheck(commit, { kind: "unknown" }, T0), commit, "no answer: unchanged");
+  // our publish left its block: the reservation is open again at a height the indexer has applied
+  const reveal = { txid: OTHER_TXID, sentAt: T0, height: 969_402 };
+  assert.equal(revealLeftBlock({ reveal, commitData: { status: "open" }, indexed: 969_402 }), true);
+  assert.equal(revealLeftBlock({ reveal, commitData: { status: "open" }, indexed: 969_401 }), false, "the indexer has not applied the publish's block yet");
+  assert.equal(revealLeftBlock({ reveal, commitData: { status: "revealed" }, indexed: 969_405 }), false);
+  assert.equal(revealLeftBlock({ reveal: { ...reveal, height: null }, commitData: { status: "open" }, indexed: 969_405 }), false);
+  // a sent publish that a block went by without: said, so it is sped up while the name is exposed
+  const sent = { txid: OTHER_TXID, sentAt: T0, sentTip: 969_402, height: null, unseenAt: null };
+  assert.equal(publishMissedBlock(sent, 969_402), false, "no block since it was sent");
+  assert.equal(publishMissedBlock(sent, 969_403), true, "a block came without it");
+  assert.equal(publishMissedBlock({ ...sent, height: 969_403 }, 969_404), false, "confirmed");
+  assert.equal(publishMissedBlock({ ...sent, sentTip: null }, 969_404), false, "unknown send height");
+  assert.equal(publishMissedBlock({ ...sent, unseenAt: T0 }, 969_404), false, "unseen is said otherwise");
+  assert.equal(publishMissedBlock(sent, null), false);
+  assert.equal(normalizeDeployRecord({ ticker: "NEW", salt: SALT, carrierScript: SPK, createdAt: T0, commit, reveal: sent }).reveal.sentTip, 969_402, "the record keeps the send height");
+
+  // a created name is followed until final (settling notes, the whole record kept)
+  const full = normalizeDeployRecord({ ticker: "NEW", salt: SALT, carrierScript: SPK, createdAt: T0, commit, reveal });
+  const mem = new Map();
+  const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+  let now = T0;
+  const st = createSettlingStore({ storage, now: () => now });
+  assert.equal(settlingKey(" BC1QX "), "lp.deploy.settling.bc1qx");
+  const [note] = st.add(ADDR, { rec: full, height: 969_402 });
+  assert.deepEqual([note.ticker, note.revealTxid, note.height, note.verdict, note.rec.salt], ["NEW", OTHER_TXID, 969_402, "provisional", SALT], "the note keeps the salt");
+  assert.equal(settlingVerdict(note, undefined, 969_404), "unknown");
+  assert.equal(settlingVerdict(note, { deploy_txid: OTHER_TXID, deploy_block: 969_402 }, 969_404), "provisional");
+  assert.equal(settlingVerdict(note, { deploy_txid: OTHER_TXID, deploy_block: 969_402 }, 969_407), "final");
+  assert.equal(settlingVerdict(note, { deploy_txid: "8".repeat(64), deploy_block: 969_403 }, 969_404), "changed-taken", "a reorganization put another publish first");
+  assert.equal(settlingVerdict(note, null, 969_404), "changed-missing", "our publish left its block");
+  // no row is only a reorganization when the indexer that answered has applied the note's block and is not rebuilding
+  assert.equal(settlingVerdict(note, null, 969_404, { applied: 969_401 }), "unknown", "the indexer has not applied the publish's block (a restart, a cold scan)");
+  assert.equal(settlingVerdict(note, null, 969_404, { applied: 969_404, rebuilding: true }), "unknown", "a rebuild from the activation height");
+  assert.equal(settlingVerdict(note, null, 969_404, { applied: null }), "unknown", "its height unknown");
+  assert.equal(settlingVerdict(note, null, 969_404, { applied: 969_402 }), "changed-missing", "applied the block itself: the publish is out of it");
+  assert.equal(settlingVerdict({ ...note, height: null }, null, 969_404), "unknown", "a note without a height never reads as missing");
+  assert.equal(st.update(ADDR, OTHER_TXID, (n) => ({ ...n, verdict: "changed-missing" }))[0].verdict, "changed-missing");
+  assert.equal(st.list(ADDR)[0].changes, 0, "a note starts with no change counted");
+  assert.equal(st.update(ADDR, OTHER_TXID, (n) => ({ ...n, changes: 2 }))[0].changes, 2, "the note keeps its count of changes");
+  assert.equal(st.list(ADDR).length, 1);
+  now += 24 * 60 * 60 * 1000 + 1;
+  assert.equal(st.list(ADDR).length, 0, "dropped after a day whatever it says");
+  now = T0;
+  st.add(ADDR, { rec: full, height: 969_402 });
+  assert.equal(st.remove(ADDR, OTHER_TXID).length, 0);
+  assert.equal(normalizeSettlingNote({ rec: { ...full, reveal: null }, revealTxid: OTHER_TXID }), null, "a note needs a published record");
+  // lines
+  const final = keep(createdFinalLine("NEW", 969_402, OTHER_TXID, T0));
+  assert.match(final.text, /^NEW final {2}block 969,402 {2}6 confirmations {2}· {2}the name is yours$/);
+  assert.match(keep(createdReorgLine("NEW", "changed-taken", OTHER_TXID, "8".repeat(64), T0)).text, /^chain reorganization {2}NEW is now registered to another publish \(tx 88888…888\)/);
+  assert.match(keep(createdReorgLine("NEW", "changed-missing", OTHER_TXID, null, T0)).text, /your publish of NEW left its block/);
+  assert.notEqual(createdReorgLine("NEW", "changed-missing", OTHER_TXID, null, T0).key, createdReorgLine("NEW", "provisional", OTHER_TXID, null, T0).key, "one line per change");
+  // the same change twice (out, back, out again) is two lines: the note counts its changes
+  const out1 = createdReorgLine("NEW", "changed-missing", OTHER_TXID, null, T0, { change: 1 });
+  const out2 = createdReorgLine("NEW", "changed-missing", OTHER_TXID, null, T0 + 60_000, { change: 3 });
+  assert.notEqual(out1.key, out2.key);
+  assert.equal(appendLine(appendLine([], out1), out2).length, 2, "the second flip is not dropped as a repeat");
+  assert.equal(createdReorgLine("NEW", "changed-missing", OTHER_TXID, null, T0 + 5_000, { change: 1 }).key, out1.key, "one change is still one line (a repeated check)");
+  assert.match(keep(stepLeftBlockLine("COMMIT", TXID, 969_400, T0)).text, /^COMMIT .+ left block #969,400 \(chain reorganization\) {2}· {2}waiting for it to confirm again$/);
+  const left1 = stepLeftBlockLine("COMMIT", TXID, 969_400, T0);
+  const left2 = stepLeftBlockLine("COMMIT", TXID, 969_400, T0 + 30 * 60_000);
+  assert.equal(appendLine(appendLine([], left1), left2).length, 2, "a step that leaves the same height twice is logged twice");
+  assert.notEqual(reserveConfirmedLine(969_401, null, TXID, T0).key, reserveConfirmedLine(969_402, null, TXID, T0).key, "a COMMIT confirmed again at another height is logged again");
+  assert.match(keep(deployedLine("NEW", 969_402, OTHER_TXID, T0, { provisional: true })).text, /✓ yours {2}· {2}provisional until 6 confirmations$/);
+  console.log("commitReveal: a reorganized step 1 / publish is followed again; Publish waits for 2 confirmations and closes 6 blocks before expiry; a created name stays provisional until 6");
 }
 
 // ---- vocabulary gate on every produced line ------------------------------------------------------------

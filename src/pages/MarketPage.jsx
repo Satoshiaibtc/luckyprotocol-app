@@ -5,7 +5,9 @@ import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Identicon from "../components/Identicon.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
-import { MARKET_SORTS, mintedPct, partitionMarkets } from "../lib/marketBoard.js";
+import { MARKET_SORTS, isMarketPending, mintedPct, partitionMarkets } from "../lib/marketBoard.js";
+import { mintedProgressNote } from "../lib/tokenTabs.js";
+import { FINAL_DEPTH } from "../lib/finality.js";
 import { changeSign, fmtChangePct } from "../lib/market.js";
 import { fmtAgo, fmtCompact, fmtInt, fmtMintedPct, fmtUnit, fmtUsd } from "../lib/format.js";
 import { REQUIRED_TOKEN_SUPPLY } from "../lib/payloads.js";
@@ -49,7 +51,7 @@ export default function MarketPage() {
                 "connecting…"
               )}
             </span>
-            <span className="muted">Markets open when a token is fully minted (100% of {fmtInt(REQUIRED_TOKEN_SUPPLY)} credited to miners)</span>
+            <span className="muted">Markets open when a token is fully minted (100% of {fmtInt(REQUIRED_TOKEN_SUPPLY)} credited to miners) and that block has {FINAL_DEPTH} confirmations</span>
           </div>
         </div>
       </header>
@@ -157,6 +159,8 @@ function MarketRow({ t, usd }) {
 /** A token on its way to 100%: progress bar, minted / supply, mines, and the way to mine it. */
 function NextRow({ t, mobile }) {
   const pct = mintedPct(t);
+  // Minted out, its market opening once the completing block is deep enough.
+  const pending = isMarketPending(t);
   return (
     <li className="next-row">
       <a className="next-avatar" href={tokenHref(t.ticker)} aria-label={`${t.ticker} token page`}>
@@ -173,11 +177,11 @@ function NextRow({ t, mobile }) {
           <span className="next-fill" style={{ width: `${pct}%` }} />
         </div>
         <div className="next-sub">
-          {mobile ? `${fmtCompact(t.minted)} / ${fmtCompact(t.supply)}` : `minted ${fmtInt(t.minted)} / ${fmtInt(t.supply)}`} · {fmtCompact(t.mine_count)} mines
+          {pending ? mintedProgressNote(t) : `${mobile ? `${fmtCompact(t.minted)} / ${fmtCompact(t.supply)}` : `minted ${fmtInt(t.minted)} / ${fmtInt(t.supply)}`} · ${fmtCompact(t.mine_count)} mines`}
         </div>
       </div>
-      <a className="btn btn-sm" href={tokenHref(t.ticker, "mine")}>
-        Mine
+      <a className="btn btn-sm" href={tokenHref(t.ticker, pending ? undefined : "mine")}>
+        {pending ? "Open" : "Mine"}
       </a>
     </li>
   );

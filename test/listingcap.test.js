@@ -192,7 +192,7 @@ const row = (id, status = "open", extra = {}) => ({ id, seller: ME, ticker: "BLO
   assert.equal(listingCapDecision(q0, `${n10.txid}:${n10.vout}`).kind, "new");
   const tenth = await list(n10, priceOf(n10));
   assert.equal(tenth.status, "open");
-  assert.equal(tenth.replaced, undefined);
+  assert.equal(tenth.replaced, false, "a new listing replaces nothing (the flag is always present, like the live book's 201)");
   const q1 = await readQuota();
   assert.deepEqual([q1.used, q1.full], [10, true]);
   assert.equal(listingQuotaText(q1), "10 of 10 listings used");

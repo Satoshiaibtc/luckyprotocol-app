@@ -4,6 +4,19 @@ import { bucketOfHash } from "../lib/yield.js";
 import { emptyCounts } from "../lib/mix.js";
 
 /**
+ * Does any height of a fresh `/blocks/recent` read (`fresh`: height →
+ * { hash }) carry another hash than the one cached for it? Pure — tested in
+ * test/blocks.test.js.
+ */
+export function hashesDisagree(cache, fresh) {
+  for (const [h, b] of fresh) {
+    const prev = cache.get(h);
+    if (prev && prev.hash && b && b.hash && prev.hash !== b.hash) return true;
+  }
+  return false;
+}
+
+/**
  * The last `count` blocks up to `ceiling` (indexed_height first, so
  * blockInfo never 404s on unstored heights), oldest → newest.
  *
@@ -59,6 +72,11 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
         /* fall through to per-height reads */
       }
       if (!alive || ctrl.signal.aborted) return false;
+      // The whole window, not only the heights asked for: the common chain
+      // reorganization replaces block h AND adds h+1 in one step, so the
+      // ceiling only moves up and h — already cached — would keep showing
+      // the replaced block's hash and digit (audit: stale tape digit).
+      if (hashesDisagree(cache, byHeight)) reorg = true;
       const rest = [];
       for (const h of heights) {
         const block = byHeight.get(h);

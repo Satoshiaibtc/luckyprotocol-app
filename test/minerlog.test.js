@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import {
   MAX_LINES,
+  againAfterReorg,
   appendLine,
   formatTime,
   hashLine,
@@ -171,7 +172,7 @@ const keep = (l) => {
 {
   const plain = keep(blockFoundLine({ height: 968_662, hash: HASH_F, tx_count: 3412, weight: 3_996_000 }, { at: T0 }));
   assert.equal(plain.kind, "block");
-  assert.equal(plain.key, "block:968662");
+  assert.equal(plain.key, `block:968662:${HASH_F}`, "keyed by height AND hash: a block that replaces it is a new line");
   assert.equal(plain.tier, null, "plain block line carries no tier");
   assert.equal(plain.lit, false);
   assert.equal(plain.hash, HASH_F);
@@ -294,4 +295,23 @@ const keep = (l) => {
   const doneNoRow = reconcileLine({ reconcile: "done", indexed: null, txid: "ef".repeat(32) });
   assert.equal(doneNoRow.text, "indexer has not indexed this mine yet");
   console.log("minerlog: move / null heights / untracked / edge rows ok");
+}
+
+// ---- a MINE that confirms again in the block it left: its lines print again ---------------------------------------
+{
+  const hash = "0".repeat(63) + "f";
+  const d = digitLine(hash, 1000, 0);
+  assert.equal(againAfterReorg(d, 0), d, "never moved: the line as it is");
+  assert.equal(againAfterReorg(d, undefined), d);
+  assert.equal(againAfterReorg(null, 2), null);
+  const d1 = againAfterReorg(d, 1);
+  assert.equal(d1.key, `${d.key}:r1`);
+  assert.equal(d1.text, d.text);
+  let buf = appendLine([], d);
+  buf = appendLine(buf, d);
+  assert.equal(buf.length, 1, "the same print is a repeat");
+  buf = appendLine(buf, d1);
+  assert.equal(buf.length, 2, "after a reorganization the same block's digit prints again");
+  assert.equal(appendLine(buf, againAfterReorg(d, 1)).length, 2, "…once per move");
+  console.log("minerlog reorg: lines after a move carry the move's count, so a re-confirmation in the same block is shown");
 }

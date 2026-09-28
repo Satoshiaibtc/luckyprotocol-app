@@ -7,6 +7,7 @@ import * as wallet from "../lib/wallet.js";
 import { droppedMessage, useTxStatus } from "../hooks/useTxStatus.js";
 import { useModalFocus } from "../hooks/useModalFocus.js";
 import { friendlyError } from "../hooks/useWallet.js";
+import { seedWaitNote } from "../hooks/useMine.js";
 import { buildFillPsbt, finalizeFill, parseListing, verifyListing } from "../lib/swap.js";
 import { expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
@@ -16,7 +17,9 @@ import { carrierRowOf, sellerCarrierCheck } from "../lib/buyChecks.js";
 import { mockCheckSecondSource } from "../lib/mock.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { fundingMessage } from "../lib/funding.js";
-import { forgetTx } from "../lib/txrecords.js";
+import { syncPauseText } from "../lib/sync.js";
+import { forgetTx, markTxConfirmed, markTxUnconfirmed } from "../lib/txrecords.js";
+import { FINAL_DEPTH, isMarketOpen, marketPendingText } from "../lib/finality.js";
 import { fmtBtcShort, fmtInt, fmtSats, fmtUnit, fmtUsd } from "../lib/format.js";
 import TxProgress, { ConnectPrompt } from "./TxProgress.jsx";
 import FeeSelector from "./FeeSelector.jsx";
@@ -25,6 +28,8 @@ import Led from "./hud/Led.jsx";
 
 const IDLE = { phase: "idle" };
 const BUSY = new Set(["building", "signing", "broadcasting", "pending"]);
+/** Phases whose fill is still tracked (until its block is final). */
+const TRACKED = new Set(["pending", "unseen", "confirmed"]);
 const RACE_MESSAGE = "This listing was just filled or withdrawn by someone else — your funds did not move.";
 
 const CHECK_ORDER = [
@@ -56,20 +61,33 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
   // The fill's confirmation is polled HERE, not in the sheet: the sheet can
   // be hidden while the fill is pending (Hide / Esc / the backdrop), and the
   // bar's "checking every 15 s" must stay true then.
-  const status = useTxStatus(flow.phase === "pending" || flow.phase === "confirmed" ? flow.txid : null, {
-    onConfirmed: () => {
-      if (address && flow.txid) forgetTx(address, flow.txid);
+  const status = useTxStatus(TRACKED.has(flow.phase) ? flow.txid : null, {
+    onConfirmed: (s) => {
+      // Tracked (and its inputs guarded) until the block is final.
+      if (address && flow.txid) markTxConfirmed(address, flow.txid, s.block_height ?? null);
       setFlow((f) => ({ ...f, phase: "confirmed" }));
       refreshAll();
       onSettled?.();
     },
+    onReorg: (kind) => {
+      if (kind !== "mempool") return;
+      // Back in the mempool: pending again; a competing fill or the seller's
+      // withdrawal can still take its place until it confirms.
+      if (address && flow.txid) markTxUnconfirmed(address, flow.txid);
+      setFlow((f) => (f.phase === "confirmed" ? { ...f, phase: "pending" } : f));
+      refreshAll();
+    },
   });
-
-  // The fill left the node's mempool without confirming — a competing fill
-  // or a withdrawal replaced it: stop showing "pending" (audit usertx-6).
   useEffect(() => {
-    if (!status.dropped) return;
-    setFlow((f) => (f.phase === "pending" ? { ...f, phase: "error", error: droppedMessage(f.txid, "fill") } : f));
+    if (status.final && address && flow.txid) forgetTx(address, flow.txid);
+  }, [status.final, address, flow.txid]);
+
+  // The node has not seen the fill for a while — a competing fill or a
+  // withdrawal may have replaced it, or the node may just not have it: say
+  // so and keep checking (audit usertx-6).
+  useEffect(() => {
+    if (status.dropped) setFlow((f) => (f.phase === "pending" ? { ...f, phase: "unseen", note: droppedMessage(f.txid, "fill") } : f));
+    else setFlow((f) => (f.phase === "unseen" ? { ...f, phase: "pending", note: null } : f));
   }, [status.dropped]);
 
   // A wallet change abandons the sheet's state.
@@ -90,6 +108,10 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
   }, [order?.id]);
 
   const quote = order ? fillQuote({ order, address: address || order.seller, feeRateSatVb: fee.satVb }) : null;
+  // No fill before the market is open: the token is minted out AND the block
+  // that completed its supply is FINAL_DEPTH deep — until then a chain
+  // reorganization could still change how many tokens a listed output holds.
+  const marketOpen = isMarketOpen(token) && order?.market_open !== false;
   const open = () => {
     setSheetOrder(order);
     setFlow(IDLE);
@@ -111,11 +133,23 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
             <>
               <span className="label">Buy · {fmtInt(sheetOrder.amount)} {ticker}</span>
               <span className="buybar-line">
-                <span className="muted">{flow.phase === "confirmed" ? "Filled." : flow.phase === "error" ? flow.error : "In progress — checking every 15 s."}</span>
+                <span className="muted">
+                  {flow.phase === "confirmed"
+                    ? status.final
+                      ? "Filled."
+                      : `Filled in block #${fmtInt(status.block_height ?? 0)} — final after ${FINAL_DEPTH} confirmations.`
+                    : flow.phase === "error"
+                      ? flow.error
+                      : flow.phase === "unseen"
+                        ? status.watchEnded
+                          ? "Not seen by the indexer's node for over an hour — no longer checked here. Look at your Portfolio."
+                          : "Not seen by the indexer's node for a while — still checking."
+                        : "In progress — checking every 15 s."}
+                </span>
                 <button className="btn btn-sm" type="button" onClick={() => setSheetOpen(true)}>
                   Show
                 </button>
-                {(flow.phase === "confirmed" || flow.phase === "error") && (
+                {(flow.phase === "confirmed" || flow.phase === "error" || (flow.phase === "unseen" && status.watchEnded)) && (
                   <button className="btn btn-ghost btn-sm" type="button" onClick={reset}>
                     Done
                   </button>
@@ -182,11 +216,12 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
               </dd>
             </div>
           </dl>
-          <button className="btn btn-primary btn-lg buybar-confirm" type="button" onClick={open} disabled={!order || !quote || !indexerOk || busy || (inFlight && flow.phase === "confirmed")}>
+          <button className="btn btn-primary btn-lg buybar-confirm" type="button" onClick={open} disabled={!order || !quote || !indexerOk || busy || !marketOpen || (inFlight && flow.phase === "confirmed")}>
             {busy ? "Working…" : order ? `Confirm · buy ${fmtInt(order.amount)} ${ticker}` : "Select a listing"}
           </button>
           {order && !fee.satVb && <div className="err">{missingFeeHint(fee.choice, fee.satVb, "buy", { awaitingAck: !!fee.highFee?.pending })}</div>}
           {order && !indexerOk && <div className="err">Indexer offline — fills are paused until it is reachable.</div>}
+          {order && !marketOpen && <div className="err">{marketPendingText(token || { ticker })}</div>}
         </div>
         )}
       </div>
@@ -208,8 +243,8 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
  * Build (never sign) the fill of verified order `full` for `addr` at `rate`
  * from the wallet's current UTXOs — the dry run and the real build share it.
  */
-async function buildFill(full, addr, pubkeyHex, rate) {
-  const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr), indexer.tokenUtxos(addr)]);
+async function buildFill(full, addr, pubkeyHex, rate, onWait) {
+  const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { onWait }), indexer.tokenUtxos(addr)]);
   let built;
   try {
     built = buildFillPsbt({
@@ -231,7 +266,7 @@ async function buildFill(full, addr, pubkeyHex, rate) {
 }
 
 function requireRate(v) {
-  if (!isUsableFeeRate(v)) throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
+  if (!isUsableFeeRate(v)) throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
   return v;
 }
 
@@ -244,7 +279,7 @@ const SECOND_IDLE = { state: "pending", detail: "", reasons: [], notes: [] };
  * explanation, the totals, and the sign → broadcast → confirm flow.
  */
 function BuySheet({ order, ticker, token, usd, flow, setFlow, status, onClose, onReset, connected }) {
-  const { wallet: w, fee, indexerOk, mock } = useApp();
+  const { wallet: w, fee, indexerOk, mock, sync } = useApp();
   const [checks, setChecks] = useState(() => CHECK_ORDER.map((c) => ({ ...c, state: "pending", detail: "" })));
   const [second, setSecond] = useState(SECOND_IDLE);
   const [ack, setAck] = useState(false);
@@ -393,7 +428,11 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, onClose, o
   const exact = dry && !dry.loading && !dry.error && dry.rate === fee.satVb ? dry : null;
   const feeSats = flow.feeSats ?? exact?.feeSats ?? quote?.feeSats ?? null;
   const totalSats = flow.totalSats ?? exact?.totalSats ?? quote?.totalSats ?? null;
-  const canConfirm = connected && indexerOk && !!full && allOk && secondOk && !busy && flow.phase !== "confirmed";
+  // The market gate, from the token row and the order view (§7.4).
+  const marketOpen = isMarketOpen(token) && order.market_open !== false && full?.market_open !== false;
+  // Paused while the indexer's view may be stale (lagging, stalled, rebuilding, behind the network).
+  const pauseText = indexerOk ? syncPauseText(sync, "buying") : null;
+  const canConfirm = connected && indexerOk && !pauseText && marketOpen && !!full && allOk && secondOk && !busy && flow.phase !== "confirmed";
 
   const confirm = async () => {
     if (!canConfirm) return;
@@ -408,7 +447,10 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, onClose, o
       // was emptied since the sheet opened is never signed (audit trading-2).
       const carrier = sellerCarrierCheck(carrierRowOf(await indexer.tokenUtxos(full.seller), full.id), full);
       if (!carrier.ok) throw new Error(`Not signed: ${carrier.detail}.`);
-      const built = await buildFill(full, addr, pubkeyHex, rate);
+      // The indexer may be scanning this address first (first use, or again
+      // after a chain reorganization): say so while the build waits.
+      const onWait = (info) => setFlow((f) => (f.phase === "building" ? { ...f, waitNote: seedWaitNote(info) } : f));
+      const built = await buildFill(full, addr, pubkeyHex, rate, onWait);
       // Never open the wallet for more than the sheet showed: a build that
       // costs more (the UTXO set changed since the dry run) stops here and
       // shows the new total, and the next press signs that.
@@ -506,6 +548,8 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, onClose, o
           </li>
         </ol>
         {verifyError && <div className="err">{verifyError}</div>}
+        {!marketOpen && <div className="err">Not signed: {marketPendingText(token || { ticker })}</div>}
+        {pauseText && flow.phase === "idle" && <div className="err">{pauseText}</div>}
         {anyFail && !verifyError && <div className="err">Verification failed — this listing will not be signed.</div>}
         {second.state === "disagree" && (
           <div className="err">
@@ -630,7 +674,8 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, onClose, o
             signing: `Awaiting signature — ${w.providerName || "your wallet"} signs only your inputs; the seller's signature stays intact.`,
             broadcasting: "Finalizing the seller's input and broadcasting…",
             pending: "Fill broadcast. Pending confirmation — checking every 15 s.",
-            confirmed: `Filled. ${fmtInt(order.amount)} ${ticker} are now on your address.`,
+            confirmed: `Fill confirmed — ${fmtInt(order.amount)} ${ticker} move to your address; final after ${FINAL_DEPTH} confirmations.`,
+            final: `Filled. ${fmtInt(order.amount)} ${ticker} are on your address.`,
           }}
         />
       </div>

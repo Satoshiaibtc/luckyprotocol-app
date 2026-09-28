@@ -10,7 +10,10 @@
 // the lock time is only enforced when some input's sequence is below
 // 0xffffffff, and 0xfffffffd also signals replace-by-fee, which "Speed up"
 // (buildSpeedUpPsbt) relies on. Such a tx can only confirm in block
-// 969,300 (ACTIVATION_HEIGHT) or later.
+// 969,300 (ACTIVATION_HEIGHT) or later. The one exception is a REVEAL's
+// input 0 (the COMMIT carrier): nSequence = REVEAL_CARRIER_SEQUENCE (1), a
+// BIP68 relative lock of one block, so the REVEAL can never confirm in its
+// COMMIT's block — not even after a chain reorganization.
 //
 // COMMIT layout (§2.1, step 1 of a deploy — names no ticker):
 //                       vout0 546 → self (the COMMIT CARRIER; the REVEAL spends it as input 0)
@@ -20,7 +23,7 @@
 //                       only works for a carrier paying this address.
 //
 // REVEAL layout (§2.1, step 2 — a DEPLOY with a salt):
-//                       input 0 = the COMMIT carrier (commit_txid:0), then fee inputs
+//                       input 0 = the COMMIT carrier (commit_txid:0, nSequence 1), then fee inputs
 //                       vout0 546 → self (deployer proof)
 //                       vout1 5,460 → PROJECT_FEE_ADDRESS
 //                       vout2 OP_RETURN  LUCKY-20|DEPLOY|<TICKER>|<SALT>
@@ -57,6 +60,7 @@ import {
   DUST_SATS,
   PROJECT_FEE_ADDRESS,
   DEPLOY_PROTOCOL_FEE_SATS,
+  MIN_COMMIT_AGE,
   MINE_PROTOCOL_FEE_SATS,
   SEND_PROTOCOL_FEE_SATS,
   PROTOCOL_LOCKTIME,
@@ -76,6 +80,19 @@ export const NETWORK = btc.NETWORK; // mainnet
  * (≤ 0xfffffffd) and enables nLockTime (< 0xffffffff).
  */
 export const RBF_SEQUENCE = 0xfffffffd;
+
+/**
+ * nSequence of a REVEAL's input 0, the COMMIT carrier: a BIP68 relative
+ * lock of MIN_COMMIT_AGE (1) block — the tx is version 2 — so no chain,
+ * not even one rebuilt by a chain reorganization, can confirm the REVEAL
+ * in the same block as its COMMIT (§2.1: such a DEPLOY is invalid and uses
+ * the reservation up). Nodes refuse the REVEAL until the COMMIT has
+ * confirmed, and drop it if a reorganization puts the COMMIT back in the
+ * mempool (it is published again, with the same salt, once the COMMIT
+ * confirms again). Below 0xfffffffe it still signals replace-by-fee, and
+ * it enables nLockTime like RBF_SEQUENCE.
+ */
+export const REVEAL_CARRIER_SEQUENCE = MIN_COMMIT_AGE;
 
 /** The COMMIT carrier is always vout0 of the COMMIT tx (§2.1). */
 export const COMMIT_CARRIER_VOUT = 0;
@@ -400,13 +417,14 @@ function psbtOutputScripts(psbtHex) {
  *
  *   expectPsbtPayload(hex, { op: "SEND", ticker: "LUCKY", amount: 100 })
  *   expectPsbtPayload(hex, { op: "COMMIT", hash, vout0Script, lockTime: PROTOCOL_LOCKTIME })
- *   expectPsbtPayload(hex, { op: "DEPLOY", ticker, salt, input0: { txid, vout: 0 } })
+ *   expectPsbtPayload(hex, { op: "DEPLOY", ticker, salt, input0: { txid, vout: 0 }, input0Sequence: REVEAL_CARRIER_SEQUENCE })
  *   expectPsbtPayload(hex, { op: null })          // a plain payment: no OP_RETURN at all
  *
  * Throws on: more than one OP_RETURN output, a missing / unparsable
  * payload, the wrong opcode, ticker, amount, COMMIT hash or REVEAL salt,
- * and — when asked — the wrong nLockTime, input 0 or vout0 script (hex; a
- * COMMIT's H only works for the carrier script it was computed with).
+ * and — when asked — the wrong nLockTime, input 0, input 0's nSequence or
+ * vout0 script (hex; a COMMIT's H only works for the carrier script it was
+ * computed with).
  * Returns the parsed payload (null for a plain payment).
  */
 export function expectPsbtPayload(psbtHex, expect = {}) {
@@ -418,7 +436,7 @@ export function expectPsbtPayload(psbtHex, expect = {}) {
     const got = scripts.length ? hex.encode(scripts[0]) : "none";
     if (got !== String(want.vout0Script).toLowerCase()) throw new Error("refusing to sign: the first output is not the reservation output its sealed code was made for");
   }
-  if (want.lockTime !== undefined || want.input0 !== undefined) {
+  if (want.lockTime !== undefined || want.input0 !== undefined || want.input0Sequence !== undefined) {
     const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownInputs: true, allowUnknownOutputs: true });
     if (want.lockTime !== undefined && tx.lockTime !== want.lockTime) {
       throw new Error(`refusing to sign: nLockTime is ${tx.lockTime}, expected ${want.lockTime}`);
@@ -428,6 +446,11 @@ export function expectPsbtPayload(psbtHex, expect = {}) {
       const got = i0 ? `${hex.encode(i0.txid)}:${i0.index}` : "none";
       const exp = `${String(want.input0.txid).toLowerCase()}:${Number(want.input0.vout)}`;
       if (got !== exp) throw new Error(`refusing to sign: input 0 is ${got}, expected the reservation output ${exp}`);
+    }
+    if (want.input0Sequence !== undefined) {
+      const seq = tx.inputsLength > 0 ? (tx.getInput(0).sequence ?? 0xffffffff) : null;
+      const h = (n) => `0x${(n >>> 0).toString(16).padStart(8, "0")}`;
+      if (seq !== want.input0Sequence) throw new Error(`refusing to sign: input 0 has nSequence ${seq === null ? "none" : h(seq)}, expected ${h(want.input0Sequence)}`);
     }
   }
   return payload;
@@ -655,11 +678,11 @@ function newProtocolTx() {
 }
 
 /** A PSBT input for one of the wallet's own outputs `u` ({ txid, vout, sats }), RBF-signalling. */
-function protocolInput(u, script, tapInternalKey) {
+function protocolInput(u, script, tapInternalKey, sequence = RBF_SEQUENCE) {
   const input = {
     txid: u.txid,
     index: u.vout,
-    sequence: RBF_SEQUENCE,
+    sequence,
     witnessUtxo: { script, amount: BigInt(u.sats) },
   };
   if (tapInternalKey) input.tapInternalKey = tapInternalKey;
@@ -795,9 +818,11 @@ function buildUnsigned({
  * OP_RETURN, `postOutputs`, then the optional BTC change to `address`
  * (folded into the miner fee when it would be < dust, like MINE's).
  * `pinned` rows must carry their EXACT on-chain `sats`: the segwit /
- * taproot sighash commits to every input's amount.
+ * taproot sighash commits to every input's amount. `input0Sequence` is
+ * input 0's nSequence (a REVEAL's relative lock); every other input gets
+ * RBF_SEQUENCE.
  */
-function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints, feeRateSatVb, preOutputs, opReturnScript, postOutputs = [], minInputSats = 0, selectionOrder }) {
+function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints, feeRateSatVb, preOutputs, opReturnScript, postOutputs = [], minInputSats = 0, selectionOrder, input0Sequence = RBF_SEQUENCE }) {
   const { type, script } = decodeAddress(address);
   const tapInternalKey = type === "tr" ? xOnlyFromCompressedHex(pubkeyHex) : null;
   const pinnedKeys = new Set(pinned.map(outpointKey));
@@ -852,7 +877,7 @@ function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints
 
   const tx = newProtocolTx();
   const inputIndexes = [];
-  for (const u of [...pinned, ...selected]) inputIndexes.push(tx.addInput(protocolInput(u, script, tapInternalKey)));
+  [...pinned, ...selected].forEach((u, i) => inputIndexes.push(tx.addInput(protocolInput(u, script, tapInternalKey, i === 0 ? input0Sequence : RBF_SEQUENCE))));
   for (const o of preOutputs) tx.addOutputAddress(o.address, BigInt(o.value), NETWORK);
   tx.addOutput({ script: opReturnScript, amount: 0n });
   for (const o of postOutputs) tx.addOutputAddress(o.address, BigInt(o.value), NETWORK);
@@ -927,7 +952,8 @@ export function estimateCommitFeeSats({ address, feeRateSatVb, inputCount = 1 })
 /**
  * Build an unsigned REVEAL PSBT — step 2 of a deploy ("Publish"). Input 0
  * is the COMMIT carrier `carrier` = `{ txid, vout: 0, sats }` (its exact
- * on-chain value — 546 when this app built the COMMIT), then fee inputs;
+ * on-chain value — 546 when this app built the COMMIT), with nSequence
+ * REVEAL_CARRIER_SEQUENCE (a one-block relative lock), then fee inputs;
  * vout0 546 → self (deployer proof), vout1 5,460 → PROJECT_FEE_ADDRESS,
  * vout2 `LUCKY-20|DEPLOY|<TICKER>|<SALT>`, vout3 optional change. The
  * carrier belongs to `address`: the committer signs the reveal, and the
@@ -955,6 +981,7 @@ export function buildRevealPsbt({ address, pubkeyHex, utxos, tokenOutpoints, fee
     opReturnScript: makeOpReturnScript(payload), //                               vout2
     minInputSats, //                                                              vout3 optional change
     selectionOrder,
+    input0Sequence: REVEAL_CARRIER_SEQUENCE,
   });
 }
 

@@ -19,6 +19,8 @@ import {
   _sanitizePrice as price,
   _sanitizeTokenRow as tokenRow,
   _sanitizeTradeRow as tradeRow,
+  _sanitizeMineRow as mineRow,
+  _sanitizeTxStatus as txStatus,
 } from "../src/lib/indexer.js";
 
 const TX = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -160,7 +162,28 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.equal(m.minted_out, false, "market gate absent → false");
   assert.equal(market({ ...raw, minted_out: true }).minted_out, true);
   assert.equal(market({ ...raw, minted_out: 1 }).minted_out, false, "only an explicit true opens the market");
+  assert.deepEqual([m.market_open, m.market_opens_at_height], [false, null], "the depth gate absent → closed, height unknown");
+  assert.deepEqual([market({ ...raw, minted_out: true, market_open: true, market_opens_at_height: 969_795 }).market_open, market({ ...raw, market_opens_at_height: 969_795 }).market_opens_at_height], [true, 969_795]);
   console.log("views /market: every field bounded, negatives allowed for change_pct, unknown → null; minted_out strict");
+}
+
+// ---- reorg audit: depth on every view (the indexer API: confirmations / final / market_open / health) ----------------
+{
+  // OrderView.market_open: false while the ticker's market is not open (the book then offers no fill)
+  const o = { id: `${TX}:1`, ticker: "LUCKY", amount: 10, price_sats: 1_000, seller: P2TR, carrier_sats: 546, status: "open" };
+  assert.equal(orderRow(o).market_open, true, "absent → open (an indexer that predates the flag)");
+  assert.equal(orderRow({ ...o, market_open: false }).market_open, false);
+  // MineView depth
+  const mv = mineRow({ txid: TX, ticker: "LUCKY", block_height: 969_801, block_hash: "0".repeat(63) + "f", sender: P2TR, status: "settled", yield_smallest: 1000, confirmations: 2, final: false });
+  assert.deepEqual([mv.confirmations, mv.final], [2, false]);
+  const mvOld = mineRow({ txid: TX, ticker: "LUCKY", block_height: 969_801, sender: P2TR, status: "settled", yield_smallest: 1000 });
+  assert.deepEqual([mvOld.confirmations, mvOld.final], [null, null], "not reported → unknown, never 'final'");
+  // /tx-status depth: only for a confirmed tx; final only when explicitly true
+  const ts = txStatus(TX, { confirmed: true, block_height: 969_801, block_hash: "0".repeat(64), confirmations: 6, final: true });
+  assert.deepEqual([ts.confirmations, ts.final], [6, true]);
+  assert.deepEqual([txStatus(TX, { confirmed: true, block_height: 1, block_hash: "0".repeat(64), final: "yes" }).final, txStatus(TX, { confirmed: false, seen: true, confirmations: 3 }).confirmations], [false, null]);
+  assert.deepEqual([txStatus(TX, null, false).confirmations, txStatus(TX, null, false).final], [null, false]);
+  console.log("views depth: order market_open, mine confirmations / final, tx-status confirmations / final");
 }
 
 // ---- candles ------------------------------------------------------------------------------

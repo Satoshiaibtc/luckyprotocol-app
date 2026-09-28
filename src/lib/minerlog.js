@@ -7,10 +7,14 @@
 // 1000 | null and always derives from src/lib/yield.js. Keys are
 // deterministic per event so StrictMode's double-invoked effects and
 // re-renders are idempotent (appendLine drops a key it already holds).
+// Every line about a block carries that block's HASH in its key: after a
+// chain reorganization the replacing block at the same height is a new
+// event, and its lines must not be dropped as repeats.
 
 import { DIGIT_SPACE, bucketOf, bucketOfHash, bucketOfYield, yieldDigit } from "./yield.js";
 import { fmtInt, fmtMintedPct, shortAddr, shortTxid } from "./format.js";
 import { MAX_BLOCK_WEIGHT } from "./blocks.js";
+import { FINAL_DEPTH, confirmationsText } from "./finality.js";
 
 export const MAX_LINES = 200;
 
@@ -194,6 +198,8 @@ export function settlementLine(row, ticker, at = Date.now()) {
  * `block 968,662 found  hash <64 hex>  txs 3,412  weight 99.9%`
  * `hash` / `pre` / `post` let the terminal wrap the hash in a mono span
  * with the last character enlarged when `lit` (the user's confirming block).
+ * Keyed by height AND hash: the plain and the lit print of one block share
+ * a key; a block that replaced it at the same height does not.
  */
 export function blockFoundLine(block, { lit = false, at = Date.now() } = {}) {
   if (!block || !Number.isInteger(block.height)) return null;
@@ -204,8 +210,9 @@ export function blockFoundLine(block, { lit = false, at = Date.now() } = {}) {
   const pre = `block ${fmtInt(block.height)} found${hash ? "  hash " : ""}`;
   const post = `${txs}${weight}`;
   return line({
-    key: `block:${Number(block.height)}`,
+    key: blockLineKey(block.height, hash),
     kind: "block",
+    height: Number(block.height),
     text: `${pre}${hash}${post}`,
     tier: lit ? tierOfHash(hash) : null,
     hash: hash || null,
@@ -217,6 +224,12 @@ export function blockFoundLine(block, { lit = false, at = Date.now() } = {}) {
     lit: !!lit && !!hash,
     ts: at,
   });
+}
+
+/** The key of the "block found" line of `hash` at `height` (the hash is left out when unknown). */
+export function blockLineKey(height, hash) {
+  const h = typeof hash === "string" && hash ? `:${hash.toLowerCase()}` : "";
+  return `block:${Number(height)}${h}`;
 }
 
 /** `mine no longer tracked on this page  tx a3f9c…21e  ·  tracking resumes when you return` — logged when the page unmounts while a mine is pending (useMine.resumeMineState keeps that promise). */
@@ -247,19 +260,43 @@ export function digitLine(hash, yieldLocal, at = Date.now()) {
  * `credited` is what the indexer credited; `tierYield` the digit's tier
  * (defaults to `credited`). The tier colour is used only when the credit is
  * the full tier; a short credit names why in `note`
- * (`… ✓ yours  ·  cap reached: tier 1,000, credited 100`).
+ * (`… ✓ yours  ·  cap reached: tier 1,000, credited 100`). With the block's
+ * `hash` the key names the block (a reorganization's new block prints its
+ * own banner); `confirmations` below FINAL_DEPTH marks it provisional
+ * (`… ✓ yours  ·  provisional 1/6 confirmations`).
  */
-export function yoursLine(ticker, height, credited, txid, at = Date.now(), { tierYield = credited, note = "" } = {}) {
+export function yoursLine(ticker, height, credited, txid, at = Date.now(), { tierYield = credited, note = "", hash = null, confirmations = null } = {}) {
   const full = Number(credited) === Number(tierYield);
+  const provisional = Number.isInteger(confirmations) && confirmations < FINAL_DEPTH ? `provisional ${confirmationsText(confirmations)}` : "";
+  const notes = [note, provisional].filter(Boolean).map((n) => `  ·  ${n}`).join("");
   return line({
-    key: `yours:${txid ?? height}`,
+    key: `yours:${txid ?? height}${hash ? `:${String(hash).toLowerCase()}` : ""}`,
     kind: "tier",
     tier: full ? tierOfYield(credited) : null,
     yours: true,
-    text: `${ticker} mine settled  block ${fmtInt(height)}  ✓ yours${note ? `  ·  ${note}` : ""}`,
+    text: `${ticker} mine settled  block ${fmtInt(height)}  ✓ yours${notes}`,
     sum: `+${fmtInt(credited)} ${ticker}`,
     ts: at,
   });
+}
+
+/**
+ * Plain words for the §2.2 rule an invalid MINE failed (MineView `reason`),
+ * or "" when unknown.
+ */
+export function mineInvalidReasonText(reason) {
+  switch (reason) {
+    case "not_deployed":
+      return "its ticker had not been created when it confirmed";
+    case "deploy_same_block":
+      return "it confirmed in the same block as the ticker's creation — mining starts in the next block";
+    case "fee_missing":
+      return "it did not pay the exact 546-sat protocol fee";
+    case "vout0_unusable":
+      return "its first output cannot hold tokens";
+    default:
+      return "";
+  }
 }
 
 /**
@@ -288,7 +325,62 @@ export function settledYoursLine(ticker, settle, at = Date.now()) {
   if (!settle || settle.reconcile !== "done") return null;
   const c = creditOf(settle.indexed, settle.yieldLocal);
   if (!c) return null;
-  return yoursLine(ticker, settle.blockHeight, c.credited, settle.txid, at, { tierYield: settle.yieldLocal, note: c.note });
+  return yoursLine(ticker, settle.blockHeight, c.credited, settle.txid, at, {
+    tierYield: settle.yieldLocal,
+    note: c.note,
+    hash: settle.blockHash ?? null,
+    confirmations: settle.final ? null : settle.confirmations ?? null,
+  });
+}
+
+/**
+ * `LUCKY mine final  block 968,662  6 confirmations  ·  +1,000 LUCKY can no
+ * longer change` — once the block of a credited MINE is FINAL_DEPTH deep.
+ * null until then, and for a MINE without a credit.
+ */
+export function finalLine(ticker, settle, at = Date.now()) {
+  if (!settle || settle.reconcile !== "done" || !settle.final) return null;
+  const c = creditOf(settle.indexed, settle.yieldLocal);
+  const credit = c ? `+${fmtInt(c.credited)} ${ticker}` : "its result";
+  return line({
+    key: `final:${settle.txid}:${String(settle.blockHash || "").toLowerCase()}`,
+    kind: "ok",
+    text: `${ticker} mine final  block ${fmtInt(settle.blockHeight)}  ${FINAL_DEPTH} confirmations  ·  ${credit} can no longer change`,
+    ts: at,
+  });
+}
+
+/**
+ * The line for a MINE a chain reorganization moved (`item.reorg`, see
+ * src/lib/minePending.js):
+ *   `chain reorganization  block #968,662 was replaced — this MINE is now in block #968,663 (digit 3 → tier 100; it showed +1,000)`
+ *   `chain reorganization  block #968,662 was replaced — this MINE is back in the mempool and is credited from the block that confirms it`
+ * Keyed by the txid, the new block (or "mempool") and the move's count, so
+ * each move prints once. null without a move.
+ */
+export function reorgLine(item, ticker, at = Date.now()) {
+  const r = item?.reorg;
+  if (!r || !item.txid) return null;
+  const from = Number.isInteger(r.fromHeight) ? `block #${fmtInt(r.fromHeight)}` : "its block";
+  const was = Number.isFinite(r.fromYield) && r.fromYield !== null ? `; it showed +${fmtInt(r.fromYield)} ${ticker}` : "";
+  const key = `reorg:${item.txid}:${item.blockHash || "mempool"}:${item.reorgs || 0}`;
+  if (r.kind === "mempool") {
+    return line({ key, kind: "err", text: `chain reorganization  ${from} was replaced — this MINE is back in the mempool and is credited from the block that confirms it${was}`, ts: at });
+  }
+  const d = yieldDigit(item.blockHash);
+  const tier = d ? ` (digit ${d} → tier ${fmtInt(bucketOf(d)?.yield ?? item.yieldLocal)}${was})` : was ? ` (${was.slice(2)})` : "";
+  return line({ key, kind: "err", text: `chain reorganization  ${from} was replaced — this MINE is now in block #${fmtInt(item.blockHeight)}${tier}`, ts: at });
+}
+
+/**
+ * A line printed for a MINE after a chain reorganization moved it
+ * (`reorgs` > 0): its key gains the move's count, so a MINE that confirms
+ * again in the SAME block (the chain went back, or the node's answer
+ * flapped) prints its digit, credit and final lines again instead of
+ * having them dropped as repeats. Unchanged when it never moved.
+ */
+export function againAfterReorg(l, reorgs) {
+  return l && Number.isInteger(reorgs) && reorgs > 0 ? { ...l, key: `${l.key}:r${reorgs}` } : l;
 }
 
 /** `resumed tracking  tx a3f9c…21e  ·  broadcast 20:20:39` — a MINE picked up again after a reload or a return to the page. */
@@ -320,11 +412,14 @@ export function mineCaption(litDigit, mine, ticker) {
 /** The indexer's verdict, exactly as MinePanel's confirmed branch computed it; null while reconcile is pending. */
 export function reconcileLine(mine, at = Date.now()) {
   if (!mine || mine.reconcile === "pending" || !mine.reconcile) return null;
-  const key = `reconcile:${mine.txid ?? mine.blockHeight}:${mine.reconcile}`;
+  const key = `reconcile:${mine.txid ?? mine.blockHeight}:${mine.reconcile}${mine.blockHash ? `:${String(mine.blockHash).toLowerCase()}` : ""}`;
   if (mine.reconcile === "timeout") return line({ key, kind: "sys", text: "indexer has not indexed this mine yet — its credit shows under Portfolio › My mines once it does", ts: at });
   const row = mine.indexed;
   if (!row) return line({ key, kind: "sys", text: "indexer has not indexed this mine yet", ts: at });
-  if (row.status === "invalid") return line({ key, kind: "sys", text: "indexer: invalid mine (0 credited)", ts: at });
+  if (row.status === "invalid") {
+    const why = mineInvalidReasonText(row.reason);
+    return line({ key, kind: "sys", text: `indexer: invalid mine (0 credited)${why ? ` — ${why}` : ""}`, ts: at });
+  }
   if (row.cap_exhausted) return line({ key, kind: "sys", text: "indexer: settled, supply exhausted (0 credited)", ts: at });
   const differs = row.yield_smallest !== mine.yieldLocal ? " · local yield differs from indexer — indexer is authoritative" : "";
   return line({ key, kind: "sys", text: `indexer: settled, ${fmtInt(row.yield_smallest)} ${row.ticker} credited${differs}`, ts: at });

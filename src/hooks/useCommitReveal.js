@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
-import { droppedMessage, useTxStatus } from "./useTxStatus.js";
+import { useTxStatus } from "./useTxStatus.js";
 import { friendlyError } from "./useWallet.js";
 import { seedWaitNote } from "./useMine.js";
 import {
@@ -14,18 +14,24 @@ import {
   extractRawTxHex,
   minFeeInputSats,
   rawTxSummary,
+  REVEAL_CARRIER_SEQUENCE,
 } from "../lib/psbt.js";
 import { DUST_SATS, PROTOCOL_LOCKTIME, newSalt } from "../lib/payloads.js";
 import { withPending } from "../lib/pending.js";
-import { DROP_GRACE_MS, forgetTx } from "../lib/txrecords.js";
+import { DROP_GRACE_MS, forgetTx, markTxConfirmed } from "../lib/txrecords.js";
 import { syncRetryText, syncStateOf } from "../lib/sync.js";
 import { isUsableFeeRate } from "../lib/feechoice.js";
 import { activationNotice, activationState } from "../lib/activation.js";
 import { fundingMessage } from "../lib/funding.js";
 import {
+  PUBLISH_CUTOFF_BLOCKS,
+  PUBLISH_MIN_CONFIRMATIONS,
+  addSettlingNote,
   claimDeployRecord,
   clearDeployRecord,
+  commitAfterRecheck,
   commitMismatch,
+  commitRecheckNeeded,
   commitStatusText,
   deployPhase,
   deployRecordBackend,
@@ -33,18 +39,26 @@ import {
   deployStage,
   isStaleDraft,
   loadDeployRecord,
+  removeSettlingNote,
   resolveVersions,
+  restoreDeployRecord,
+  revealLeftBlock,
   revealTiming,
   revealWindow,
+  settlingNotes,
+  settlingVerdict,
   startDeployRecord,
   stepVersions,
   switchStepTo,
   updateDeployRecord,
+  updateSettlingNote,
 } from "../lib/commitReveal.js";
 import {
   abandonedLine,
   acceptedLine,
   broadcastingLine,
+  createdFinalLine,
+  createdReorgLine,
   deployConfirmedLine,
   deployMempoolLine,
   errorLine,
@@ -59,6 +73,7 @@ import {
   speedUpLine,
   stepDroppedLine,
   stepFoundLine,
+  stepLeftBlockLine,
   stepUnseenLine,
   takenBeforePublishLine,
 } from "../lib/deploylog.js";
@@ -110,6 +125,15 @@ async function findVersion(txids, { commits = false } = {}) {
  *   speedUpQuote(step, rate)  the replacement's fee, without signing (null when impossible)
  *   abandon()                 forget the reservation (its 546-sat output stays in the wallet)
  *   dismiss()                 clear a finished result
+ *   dismissSettling(txid)     stop following a created name (a settling note)
+ *   restoreSettling(txid)     make a settling note's reservation the open one again (its
+ *                             publish left its block and did not come back)
+ *
+ * A name registered to our publish is provisional until its block is
+ * FINAL_DEPTH deep: the reservation record is cleared at once (so another
+ * name can be reserved) and a settling note — the whole record, salt
+ * included — is followed until it is final (`settling`); a chain
+ * reorganization that changes the result is said in the log and on the page.
  *
  * `log(line)` receives every Deploy // log event of the flow. Returns the
  * record, the derived `phase` (commitReveal.deployPhase), the in-flight
@@ -124,6 +148,8 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
   const [tokenInfo, setTokenInfo] = useState({ ticker: null, row: undefined, asOf: null, error: null });
   // The finished result of a reservation whose record was cleared (registered, or dismissed later).
   const [finished, setFinished] = useState(null);
+  // Created names that are not final yet (src/lib/commitReveal.js settling notes).
+  const [settling, setSettling] = useState(() => (address ? settlingNotes(address) : []));
   const logRef = useRef(log);
   logRef.current = log;
   const emit = useCallback((l) => logRef.current?.(l), []);
@@ -144,6 +170,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
     setFinished(null);
     setCommitInfo({ txid: null, data: undefined, error: null });
     setTokenInfo({ ticker: null, row: undefined, asOf: null, error: null });
+    setSettling(address ? settlingNotes(address) : []);
     if (!r) return;
     if (deployStage(r) === "draft") {
       // A draft may belong to a wallet window that is still open — in
@@ -291,7 +318,10 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
           if (released && !released.reveal) {
             for (const t of ours) forgetTx(address, t);
             emit(stepDroppedLine("DEPLOY", s.txid));
-            setError({ kind: "publish", message: `${droppedMessage(s.txid, "publish transaction (step 2)")} Your reservation is still open — you can publish again.` });
+            setError({
+              kind: "publish",
+              message: `Step 2 (tx ${s.txid.slice(0, 12)}…) has not been seen by the indexer's node for a while, and your reservation is still open — you can publish again. If the earlier publish confirms after all, it still counts as yours.`,
+            });
           }
         }
       }
@@ -347,9 +377,11 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
     if (!commitTxid) return undefined;
     let alive = true;
     const read = async () => {
+      // The indexer's applied height before the read: the answer reflects at least that much of the chain.
+      const asOf = Number.isInteger(indexedRef.current) ? indexedRef.current : null;
       try {
         const data = await indexer.commit(commitTxid);
-        if (alive) setCommitInfo({ txid: commitTxid, data, error: null });
+        if (alive) setCommitInfo({ txid: commitTxid, data, error: null, asOf });
       } catch (e) {
         if (alive) setCommitInfo((c) => ({ ...c, txid: commitTxid, error: friendlyError(e) }));
       }
@@ -362,6 +394,74 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
     };
   }, [commitTxid, commitPollKey]);
   const commitData = commitInfo.txid === commitTxid ? commitInfo.data : undefined;
+
+  // Chain reorganizations under the reservation (audit: reorganized COMMIT):
+  //  - the indexer records step 1 at another height → follow it (countdown, links);
+  //  - it no longer has step 1 although it applied the blocks after it (two
+  //    reads in a row) → ask about every version again: confirmed elsewhere,
+  //    back in a mempool (tracking and Speed up resume), or unseen;
+  //  - it shows the reservation open although our publish had confirmed →
+  //    the publish left its block: tracking resumes (and the release flow
+  //    opens Publish again if it is gone).
+  //
+  // Each /commits read is judged once (`read` = the commitInfo object it
+  // produced), and only on the height the indexer had applied before it
+  // was made (`asOf`), so a read older than the block tx-status just
+  // reported is never taken for a reorganization.
+  const missesRef = useRef({ txid: null, n: 0, read: null, busy: false });
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!address || !commit || !Number.isInteger(commit.height)) return;
+    if (commitInfo.txid !== commit.txid || commitInfo.data === undefined || commitInfo.error) return;
+    const m = missesRef.current;
+    if (m.txid !== commit.txid) Object.assign(m, { txid: commit.txid, n: 0, read: null });
+    if (m.read === commitInfo) return;
+    m.read = commitInfo;
+    const data = commitInfo.data;
+    if (data && Number.isInteger(data.height) && data.height !== commit.height && data.txid === commit.txid) {
+      m.n = 0;
+      const next = persist((x) => (x.commit?.txid === commit.txid ? { ...x, commit: { ...x.commit, height: data.height } } : x));
+      if (next?.commit?.height === data.height) emit(reserveConfirmedLine(data.height, revealWindow(data.height), commit.txid));
+      return;
+    }
+    if (data !== null) {
+      m.n = 0;
+      return;
+    }
+    m.n += 1;
+    if (m.busy || !commitRecheckNeeded({ commit, commitData: data, indexed: commitInfo.asOf, misses: m.n })) return;
+    m.n = 0;
+    m.busy = true;
+    (async () => {
+      try {
+        const v = await findVersion(stepVersions(commit), { commits: true });
+        if (!mountedRef.current || v.kind === "unknown") return;
+        if (v.kind === "confirmed" && v.txid === commit.txid && v.height === commit.height) return;
+        const next = persist((x) => (x.commit?.txid === commit.txid && x.commit.height === commit.height ? { ...x, commit: commitAfterRecheck(x.commit, v) } : x));
+        if (!next?.commit || next.commit.height === commit.height) return;
+        if (v.kind === "confirmed") emit(stepFoundLine("COMMIT", v.txid, v.height));
+        else emit(stepLeftBlockLine("COMMIT", commit.txid, commit.height));
+      } finally {
+        m.busy = false;
+      }
+    })();
+  }, [address, commit, commitInfo, persist, emit]);
+  const revealReadRef = useRef(null);
+  useEffect(() => {
+    if (!address || !reveal || commitInfo.txid !== commit?.txid || commitInfo.error) return;
+    if (!revealLeftBlock({ reveal, commitData: commitInfo.data, indexed: commitInfo.asOf })) return;
+    // one verdict per read: the publish confirming again must wait for a newer read
+    if (revealReadRef.current === commitInfo) return;
+    revealReadRef.current = commitInfo;
+    const next = persist((x) => (x.reveal?.txid === reveal.txid && Number.isInteger(x.reveal.height) ? { ...x, reveal: { ...x.reveal, height: null } } : x));
+    if (next?.reveal && !Number.isInteger(next.reveal.height)) emit(stepLeftBlockLine("DEPLOY", reveal.txid, reveal.height));
+  }, [address, reveal, commit, commitInfo, persist, emit]);
 
   // The registry row of the reserved ticker (taken by someone else? ours?).
   const ticker = rec?.ticker || null;
@@ -386,7 +486,15 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
   }, [ticker]);
   const row = tokenInfo.ticker === ticker ? tokenInfo.row : undefined;
 
-  const phase = deployPhase({ rec, commitStatus: commitData === undefined ? undefined : commitData?.status ?? null, commitInfo: commitData ?? null, row, rowAsOf: tokenInfo.ticker === ticker ? tokenInfo.asOf : null, tip });
+  const phase = deployPhase({
+    rec,
+    commitStatus: commitData === undefined ? undefined : commitData?.status ?? null,
+    commitInfo: commitData ?? null,
+    row,
+    rowAsOf: tokenInfo.ticker === ticker ? tokenInfo.asOf : null,
+    tip,
+    indexed: Number.isInteger(indexed) ? indexed : tip,
+  });
 
   // A publish released as dropped spent the carrier after all (the indexer
   // shows the reservation used by one of our released txids): it is our
@@ -407,22 +515,79 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
   useEffect(() => {
     if (!rec) return;
     if (phase === "ready" && commitTxid) emit(reserveRecordedLine(commitTxid));
-    else if (phase === "taken" || phase === "publish-pending-taken" || phase === "taken-after") emit(takenBeforePublishLine(rec.ticker, `${rec.commit?.txid}:${phase === "taken" ? "before" : "after"}`));
+    else if (phase === "taken" || phase === "taken-tentative" || phase === "publish-pending-taken" || phase === "taken-after")
+      emit(takenBeforePublishLine(rec.ticker, `${rec.commit?.txid}:${phase === "taken" || phase === "taken-tentative" ? "before" : "after"}`));
     else if (phase === "expired" && timing) emit(reservationExpiredLine(timing.expiresAt, commitTxid));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one line per phase change
   }, [phase, commitTxid]);
 
-  // Registered: the reservation has done its job — clear it, keep the result on screen.
+  // Registered: the reservation has done its job — clear it (so another name
+  // can be reserved), keep the result on screen. Not final yet: a settling
+  // note — the whole record, salt included — is followed until it is.
   useEffect(() => {
-    if (phase !== "registered" || !rec || !address) return;
+    if ((phase !== "registered" && phase !== "registered-provisional") || !rec || !address) return;
     // The registry can list the name before this page's tx-status poll saw the block.
     if (!Number.isInteger(rec.reveal.height) && Number.isInteger(row?.deploy_block)) emit(deployConfirmedLine(rec.ticker, row.deploy_block, rec.reveal.txid));
-    setFinished({ ticker: rec.ticker, verdict: "registered", revealTxid: rec.reveal.txid, height: rec.reveal.height ?? row?.deploy_block ?? null, resumed: false });
+    const height = row?.deploy_block ?? rec.reveal.height ?? null;
+    const provisional = phase === "registered-provisional";
+    if (provisional) setSettling(addSettlingNote(address, { rec, height }));
+    setFinished({ ticker: rec.ticker, verdict: "registered", revealTxid: rec.reveal.txid, height, resumed: false, provisional });
+    // A confirmed record keeps guarding its inputs until final (txrecords.js).
+    if (Number.isInteger(height)) markTxConfirmed(address, rec.reveal.txid, height);
     forgetTx(address, rec.reveal.txid);
     clearDeployRecord(address);
     setRec(null);
     settledRef.current?.();
   }, [phase, rec, row, address, emit]);
+
+  // Settling notes: each followed until its block is final — or a chain
+  // reorganization changed the result, which is said once per change.
+  const settlingKey = settling.map((n) => `${n.revealTxid}:${n.verdict}`).join(",");
+  useEffect(() => {
+    if (!address || !settlingKey) return undefined;
+    let alive = true;
+    const check = async () => {
+      for (const n of settlingNotes(address)) {
+        let row;
+        try {
+          row = await indexer.token(n.ticker);
+        } catch {
+          continue; // unknown — ask again next time
+        }
+        if (!alive) return;
+        // No row: only a reorganization if the indexer that answered has
+        // applied the note's block and is not rebuilding — read its health
+        // after the 404, so both describe the same state.
+        let applied = indexedRef.current;
+        let rebuilding = false;
+        if (row === null) {
+          const h = syncStateOf(await indexer.health().catch(() => null));
+          if (!alive) return;
+          applied = h.indexed;
+          rebuilding = h.rebuilding;
+        }
+        const v = settlingVerdict(n, row, Number.isInteger(indexedRef.current) ? indexedRef.current : tipRef.current, { applied, rebuilding });
+        if (v === "final") {
+          removeSettlingNote(address, n.revealTxid);
+          emit(createdFinalLine(n.ticker, row.deploy_block, n.revealTxid));
+          setFinished((f) => (f && f.revealTxid === n.revealTxid ? { ...f, provisional: false } : f));
+        } else if (v !== "unknown" && v !== n.verdict) {
+          const change = (n.changes || 0) + 1;
+          updateSettlingNote(address, n.revealTxid, (x) => ({ ...x, verdict: v, changes: change }));
+          emit(createdReorgLine(n.ticker, v, n.revealTxid, row?.deploy_txid ?? null, Date.now(), { change }));
+          // The "Created" banner no longer holds: the note says what changed.
+          setFinished((f) => (f && f.revealTxid === n.revealTxid && v !== "provisional" ? null : f));
+        }
+      }
+      if (alive) setSettling(settlingNotes(address));
+    };
+    check();
+    const id = setInterval(check, POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [settlingKey, address, emit]);
 
   // ---- actions --------------------------------------------------------------------------------
   const busy = !!op;
@@ -444,7 +609,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       let signedTxid = null;
       let salt = null;
       try {
-        if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
+        if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
         // Re-check at the moment of the click, not from the last poll.
         const [h, existing] = await Promise.all([indexer.health(), indexer.token(t)]);
         const fresh = syncStateOf(h);
@@ -536,7 +701,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       let utxoRes = null;
       let signedTxid = null;
       try {
-        if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
+        if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
         // Re-check right before the reveal: the indexer is synced, the name
         // is still free, and the reservation is recorded, open and in its window.
         const [h, existing, c] = await Promise.all([indexer.health(), indexer.token(t), indexer.commit(r.commit.txid)]);
@@ -558,6 +723,14 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         const tm = revealTiming(c.height, h.tip_height);
         if (!tm || tm.expired) throw new Error("Your reservation has expired — nothing was sent.");
         if (!tm.ready) throw new Error(`Publishing opens at block #${tm.revealFrom.toLocaleString("en-US")} — nothing was sent.`);
+        // Step 1 at its first confirmation: a chain reorganization could put
+        // both steps into one block, where the publish does not count.
+        if (!tm.settled) {
+          throw new Error(`Publishing opens at block #${tm.publishFrom.toLocaleString("en-US")}, step 1's ${PUBLISH_MIN_CONFIRMATIONS === 2 ? "2nd" : `${PUBLISH_MIN_CONFIRMATIONS}th`} confirmation — nothing was sent.`);
+        }
+        // The last blocks of the window: a publish sent now would most
+        // likely confirm too late (fees paid, the name public for nothing).
+        if (tm.closing) throw new Error(`Fewer than ${PUBLISH_CUTOFF_BLOCKS} blocks are left before your reservation expires — a publish sent now would most likely confirm too late. Nothing was sent.`);
         const onWait = (info) => setOp((o) => (o && o.phase === "building" ? { ...o, waitNote: seedWaitNote(info) } : o));
         const [list, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { onWait }), indexer.tokenUtxos(address)]);
         utxoRes = list;
@@ -575,8 +748,8 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
           carrier,
           minInputSats: minFeeInputSats(utxoRes.assetSafe),
         });
-        // Sign-time guard: DEPLOY|<ticker>|<this salt>, input 0 = the carrier, the lock time.
-        expectPsbtPayload(built.psbtHex, { op: "DEPLOY", ticker: t, salt: r.salt, input0: carrier, lockTime: PROTOCOL_LOCKTIME });
+        // Sign-time guard: DEPLOY|<ticker>|<this salt>, input 0 = the carrier (with its one-block relative lock), the lock time.
+        expectPsbtPayload(built.psbtHex, { op: "DEPLOY", ticker: t, salt: r.salt, input0: carrier, input0Sequence: REVEAL_CARRIER_SEQUENCE, lockTime: PROTOCOL_LOCKTIME });
         const info = { feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, inputCount: built.inputIndexes.length, inputs: built.inputs, assetSafe: utxoRes.assetSafe, utxoSource: utxoRes.source };
         const signing = { kind: "publish", phase: "signing", ticker: t, startedAt, ...info };
         setOp(signing);
@@ -595,7 +768,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         setOp({ ...signing, phase: "broadcasting" });
         emit(broadcastingLine(startedAt));
         await wallet.broadcastSignedPsbt(signed, { kind: "deploy", ticker: t });
-        setRec(updateDeployRecord(address, (x) => ({ ...x, reveal: { ...x.reveal, sentAt: Date.now() } })));
+        setRec(updateDeployRecord(address, (x) => ({ ...x, reveal: { ...x.reveal, sentAt: Date.now(), sentTip: Number.isInteger(tipRef.current) ? tipRef.current : null } })));
         emit(acceptedLine(signedTxid));
         const tipNow = tipRef.current;
         emit(deployMempoolLine(t, Number.isInteger(tipNow) ? tipNow + 1 : null, signedTxid));
@@ -647,7 +820,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         }
         const q = buildSpeedUpPsbt({ psbtHex: s.psbt, changeVout: s.changeVout, feeRateSatVb: feeRate, incrementalRelayFee });
         const carrier = { txid: r.commit.txid, vout: COMMIT_CARRIER_VOUT };
-        expectPsbtPayload(q.psbtHex, step === "commit" ? { op: "COMMIT", hash: r.hash, vout0Script: r.carrierScript, lockTime: PROTOCOL_LOCKTIME } : { op: "DEPLOY", ticker: r.ticker, salt: r.salt, input0: carrier, lockTime: PROTOCOL_LOCKTIME });
+        expectPsbtPayload(q.psbtHex, step === "commit" ? { op: "COMMIT", hash: r.hash, vout0Script: r.carrierScript, lockTime: PROTOCOL_LOCKTIME } : { op: "DEPLOY", ticker: r.ticker, salt: r.salt, input0: carrier, input0Sequence: REVEAL_CARRIER_SEQUENCE, lockTime: PROTOCOL_LOCKTIME });
         setOp({ kind: "speedup", step, phase: "signing", ticker: r.ticker, startedAt, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, oldFeeSats: q.oldFeeSats });
         emit(signLine(providerName, startedAt));
         const signed = await wallet.signPsbt(q.psbtHex, { inputIndexes: q.inputIndexes, address });
@@ -659,7 +832,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         forgetTx(address, s.txid);
         persist((x) => ({
           ...x,
-          [step]: { ...x[step], txid: newTxid, psbt: q.psbtHex, sentAt: Date.now(), height: null, unseenAt: null, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, vsize: q.vsize, replaces: [...(x[step].replaces || []), s.txid] },
+          [step]: { ...x[step], txid: newTxid, psbt: q.psbtHex, sentAt: Date.now(), sentTip: Number.isInteger(tipRef.current) ? tipRef.current : null, height: null, unseenAt: null, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, vsize: q.vsize, replaces: [...(x[step].replaces || []), s.txid] },
         }));
         emit(speedUpLine(what, { oldFeeSats: q.oldFeeSats, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, txid: newTxid }));
         setOp(null);
@@ -702,6 +875,37 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
     setError(null);
   }, []);
 
+  /** Stop following a created name (its settling note). */
+  const dismissSettling = useCallback(
+    (revealTxid) => {
+      if (!address) return;
+      setSettling(removeSettlingNote(address, revealTxid));
+      setFinished((f) => (f && f.revealTxid === revealTxid ? null : f));
+    },
+    [address],
+  );
+
+  /**
+   * A created name whose publish left its block and has not come back
+   * (`changed-missing`): make its reservation the open one again — with its
+   * salt — so the page follows the publish (and offers Publish again if it
+   * is gone for good). Only while no other reservation is open.
+   */
+  const restoreSettling = useCallback(
+    (revealTxid) => {
+      if (!address || busy || loadDeployRecord(address)) return;
+      const n = settlingNotes(address).find((x) => x.revealTxid === String(revealTxid).toLowerCase());
+      if (!n) return;
+      // The note's record, its publish unconfirmed again: the open reservation.
+      const back = restoreDeployRecord(address, { ...n.rec, reveal: { ...n.rec.reveal, height: null, unseenAt: null } });
+      if (!back) return;
+      setRec(back);
+      setSettling(removeSettlingNote(address, n.revealTxid));
+      setFinished(null);
+    },
+    [address, busy],
+  );
+
   /** Re-read /commits now (after a Publish click found it unrecorded). */
   const refreshCommit = useCallback(() => setCommitPollKey((k) => k + 1), []);
 
@@ -721,6 +925,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       commitStatus,
       revealStatus,
       storageBackend: deployRecordBackend(),
+      settling,
       reserve,
       publish,
       speedUp,
@@ -728,8 +933,10 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       abandon,
       finish,
       dismiss,
+      dismissSettling,
+      restoreSettling,
       refreshCommit,
     }),
-    [rec, phase, op, busy, error, finished, timing, commitData, commitInfo, commitTxid, row, tokenInfo, ticker, commitStatus, revealStatus, reserve, publish, speedUp, speedUpQuote, abandon, finish, dismiss, refreshCommit],
+    [rec, phase, op, busy, error, finished, timing, commitData, commitInfo, commitTxid, row, tokenInfo, ticker, commitStatus, revealStatus, settling, reserve, publish, speedUp, speedUpQuote, abandon, finish, dismiss, dismissSettling, restoreSettling, refreshCommit],
   );
 }

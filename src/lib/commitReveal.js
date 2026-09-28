@@ -19,6 +19,7 @@
 
 import { MAX_COMMIT_AGE, MIN_COMMIT_AGE, SALT_RE, SCRIPT_HEX_RE, TICKER_RE, commitHashFor } from "./payloads.js";
 import { blocksEtaText, blocksText } from "./activation.js";
+import { FINAL_DEPTH, confirmationsAt } from "./finality.js";
 
 export const DEPLOY_RECORD_PREFIX = "lp.deploy.";
 // 2: the record keeps `carrierScript`, the scriptPubKey H binds (§2.1). A
@@ -86,6 +87,8 @@ export function normalizeStep(s) {
     psbt,
     signedAt: num(s.signedAt),
     sentAt: num(s.sentAt),
+    // the chain tip when it was (last) sent: a block above it without the step means it missed one
+    sentTip: int(s.sentTip),
     height: int(s.height),
     feeSats: int(s.feeSats),
     feeRateSatVb: num(s.feeRateSatVb),
@@ -243,6 +246,26 @@ export function sameAddress(a, b) {
   return x === y;
 }
 
+/**
+ * Confirmations step 1 needs before Publish opens. The rules accept a
+ * publish in any block after the reservation's — but one sent at the first
+ * confirmation can, after a one-block chain reorganization, confirm in the
+ * SAME block as step 1: then it does not count, the reservation is used up
+ * and the name is public. Waiting for the second confirmation closes that
+ * window (it costs one block, about ten minutes).
+ */
+export const PUBLISH_MIN_CONFIRMATIONS = 2;
+
+/**
+ * Publish closes when fewer than this many blocks can still hold it. A
+ * publish needs room for a block it misses (fees), a chain reorganization
+ * that confirms it a block later, and the page's tip being a block behind
+ * the network; one that confirms after the window does not count — its
+ * fees are paid and the name is public. Giving up the last hour of a
+ * two-week window costs nothing.
+ */
+export const PUBLISH_CUTOFF_BLOCKS = 6;
+
 /** The reservation window of a COMMIT confirmed at `commitHeight`: `{ revealFrom, expiresAt }` (block heights, inclusive). */
 export function revealWindow(commitHeight) {
   if (!Number.isInteger(commitHeight)) return null;
@@ -251,26 +274,52 @@ export function revealWindow(commitHeight) {
 
 /**
  * The REVEAL timing at `tip` for a COMMIT confirmed at `commitHeight`:
- *   ready       a REVEAL sent now confirms at tip + 1 or later ≥ revealFrom
- *   blocksLeft  blocks that can still hold a valid REVEAL (tip + 1 … expiresAt)
- *   expired     none can any more (tip ≥ expiresAt)
+ *   ready          a REVEAL sent now confirms at tip + 1 or later ≥ revealFrom (the rules allow it)
+ *   confirmations  step 1's confirmations at `tip`
+ *   settled        it has PUBLISH_MIN_CONFIRMATIONS (the app's Publish waits for that)
+ *   publishFrom    the tip at which it will have them
+ *   blocksLeft     blocks that can still hold a valid REVEAL (tip + 1 … expiresAt)
+ *   expired        none can any more (tip ≥ expiresAt)
+ *   closing        not expired, but fewer than PUBLISH_CUTOFF_BLOCKS left: Publish is closed
+ *   publishable    ready AND settled AND neither expired nor closing
  * or null while either height is unknown.
  */
 export function revealTiming(commitHeight, tip) {
   const w = revealWindow(commitHeight);
   if (!w || !Number.isInteger(tip)) return null;
   const blocksLeft = Math.max(0, w.expiresAt - tip);
-  return { ...w, ready: tip + 1 >= w.revealFrom, blocksLeft, expired: blocksLeft === 0 };
+  const ready = tip + 1 >= w.revealFrom;
+  const confirmations = confirmationsAt(commitHeight, tip);
+  const settled = confirmations >= PUBLISH_MIN_CONFIRMATIONS;
+  const expired = blocksLeft === 0;
+  const closing = !expired && blocksLeft < PUBLISH_CUTOFF_BLOCKS;
+  return {
+    ...w,
+    ready,
+    confirmations,
+    settled,
+    publishFrom: commitHeight + PUBLISH_MIN_CONFIRMATIONS - 1,
+    blocksLeft,
+    expired,
+    closing,
+    publishable: ready && settled && !expired && !closing,
+  };
 }
 
 /** Below this many blocks left the countdown turns into a warning. */
 export const EXPIRY_WARN_BLOCKS = 144;
 
-/** "Publish by block #971,317 — 2,015 blocks left (about 14 days)." */
+/**
+ * "Publish by block #971,311 — 2,009 blocks left (about 14 days)." — the
+ * last block Publish is open (PUBLISH_CUTOFF_BLOCKS before the expiry).
+ */
 export function expiryText(timing) {
   if (!timing) return "";
   if (timing.expired) return `The reservation expired at block #${timing.expiresAt.toLocaleString("en-US")} — it can no longer be published.`;
-  return `Publish by block #${timing.expiresAt.toLocaleString("en-US")} — ${blocksText(timing.blocksLeft)} left (${blocksEtaText(timing.blocksLeft)}).`;
+  if (timing.closing) return `The reservation expires at block #${timing.expiresAt.toLocaleString("en-US")}: fewer than ${PUBLISH_CUTOFF_BLOCKS} blocks are left, so Publish is closed.`;
+  const lastTip = timing.expiresAt - PUBLISH_CUTOFF_BLOCKS;
+  const left = Math.max(0, timing.blocksLeft - PUBLISH_CUTOFF_BLOCKS + 1);
+  return `Publish by block #${lastTip.toLocaleString("en-US")} — ${blocksText(left)} left (${blocksEtaText(left)}); publishing closes ${PUBLISH_CUTOFF_BLOCKS} blocks before the reservation expires.`;
 }
 
 /**
@@ -299,19 +348,27 @@ export function ownPublishTxids(rec) {
  *   row           /tokens/:ticker row; null = no row; undefined = not asked yet
  *   rowAsOf       the indexer's applied height when `row` was read (null = unknown)
  *   tip           chain tip height (null = unknown)
+ *   indexed       the indexer's applied height, for the depth of the registry row (default: tip)
  *
  * → "idle" | "draft" | "reserve-unsent" | "reserve-pending" | "reserve-unseen"
- *   | "recording" | "ready" | "taken" | "expired" | "invalid" | "carrier-spent"
+ *   | "recording" | "settling" | "ready" | "taken-tentative" | "taken"
+ *   | "closing" | "expired" | "invalid" | "carrier-spent"
  *   | "publish-unsent" | "publish-pending" | "publish-unseen"
- *   | "publish-pending-taken" | "publish-confirmed" | "registered"
- *   | "taken-after" | "refused"
+ *   | "publish-pending-taken" | "publish-confirmed"
+ *   | "registered-provisional" | "registered" | "taken-after" | "refused"
  *
  * "reserve-unseen" / "publish-unseen": the indexer's node has not known the
  * step (nor any version it replaced) for a few minutes. Not a dead end — a
  * miner may still confirm it — so the record and its salt are kept and the
  * page keeps checking (audits LENS-2 / ux-1).
+ *
+ * Depth (src/lib/finality.js): "settling" — step 1 confirmed but Publish
+ * waits for PUBLISH_MIN_CONFIRMATIONS; "closing" — too few blocks left to
+ * publish safely (PUBLISH_CUTOFF_BLOCKS); "taken-tentative" — someone
+ * else's DEPLOY of the name is not final yet, so it could still change;
+ * "registered-provisional" — ours, not final yet.
  */
-export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf = null, tip }) {
+export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf = null, tip, indexed = tip }) {
   switch (deployStage(rec)) {
     case "none":
       return "idle";
@@ -326,13 +383,20 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
       // can no longer claim it, whatever its own state. (A publish of our
       // own that was released as dropped may have registered it after all:
       // the page restores it from /commits — "recording" meanwhile.)
-      if (row) return ownPublishTxids(rec).has(String(row.deploy_txid || "").toLowerCase()) ? "recording" : "taken";
+      if (row) {
+        if (ownPublishTxids(rec).has(String(row.deploy_txid || "").toLowerCase())) return "recording";
+        // Someone else's DEPLOY: final only at FINAL_DEPTH — until then a
+        // chain reorganization could still undo it (audit: 1-conf verdicts).
+        return rowIsFinal(row, indexed) ? "taken" : "taken-tentative";
+      }
       if (!Number.isInteger(rec.commit.height)) return rec.commit.unseenAt ? "reserve-unseen" : "reserve-pending";
       const t = revealTiming(rec.commit.height, tip);
       if (commitStatus === "invalid") return "invalid";
       if (commitStatus === "revealed") return commitInfo && ownPublishTxids(rec).has(commitInfo.spent_txid) ? "recording" : "carrier-spent";
       if (commitStatus === "expired" || t?.expired) return "expired";
+      if (commitStatus === "open" && t?.closing) return "closing";
       if (commitStatus !== "open" || !t?.ready) return "recording";
+      if (!t.settled) return "settling";
       // The registry row of the ticker has not been read yet (undefined, not
       // null): never offer Publish before it is known to be free (ux-5).
       if (row === undefined) return "recording";
@@ -340,12 +404,13 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
     }
     case "revealed": {
       const v = revealVerdict(row, rec);
+      const registered = rowIsFinal(row, indexed) ? "registered" : "registered-provisional";
       if (!Number.isInteger(rec.reveal.height)) {
-        if (v === "registered") return "registered";
+        if (v === "registered") return registered;
         if (rec.reveal.unseenAt) return "publish-unseen";
         return v === "taken" ? "publish-pending-taken" : "publish-pending";
       }
-      if (v === "registered") return "registered";
+      if (v === "registered") return registered;
       // The indexer's own verdict on the spend of our carrier (CommitView).
       const ours = ownPublishTxids(rec);
       if (commitInfo && commitInfo.reveal_applied === false && ours.has(commitInfo.spent_txid)) {
@@ -353,8 +418,22 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
       }
       if (v === "taken") return "taken-after";
       // No row although the indexer had applied the REVEAL's block when the
-      // row was read: the REVEAL did not apply.
-      if (row === null && Number.isInteger(rowAsOf) && rowAsOf >= rec.reveal.height) return "refused";
+      // row was read: the REVEAL did not apply — but only on the indexer's
+      // word that OUR publish spent the reservation. After a chain
+      // reorganization took the publish out of its block the reservation is
+      // open again and there is no row either: that is not a verdict, the
+      // page keeps checking (audit: 1-conf verdicts).
+      if (
+        row === null &&
+        Number.isInteger(rowAsOf) &&
+        rowAsOf >= rec.reveal.height &&
+        commitInfo &&
+        commitInfo.status === "revealed" &&
+        ours.has(commitInfo.spent_txid) &&
+        commitInfo.reveal_applied !== true
+      ) {
+        return "refused";
+      }
       return "publish-confirmed";
     }
     default:
@@ -362,8 +441,63 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
   }
 }
 
+/** Is the registry row's DEPLOY final at `indexed` (its block FINAL_DEPTH deep)? Unknown depth is not final. */
+export function rowIsFinal(row, indexed) {
+  const n = row ? confirmationsAt(row.deploy_block, indexed) : null;
+  return n !== null && n >= FINAL_DEPTH;
+}
+
+/** Confirmations of the registry row's DEPLOY at `indexed`, or null. */
+export function rowConfirmations(row, indexed) {
+  return row ? confirmationsAt(row.deploy_block, indexed) : null;
+}
+
 /** Phases in which a reservation can only be abandoned (nothing left to publish). */
-export const DEAD_END_PHASES = new Set(["taken", "expired", "invalid", "carrier-spent", "taken-after", "refused"]);
+export const DEAD_END_PHASES = new Set(["taken", "closing", "expired", "invalid", "carrier-spent", "taken-after", "refused"]);
+
+// ---- chain reorganizations under a reservation -------------------------------------------------
+
+/**
+ * Has step 1 left the block it was recorded in? True when this record
+ * shows it confirmed (`commit.height`), the indexer no longer has it
+ * (`commitData === null`, /commits 404) although it has applied the blocks
+ * after it (`indexed ≥ height + 1`), and that was seen on `misses` ≥ 2
+ * reads in a row (one read can race the indexer). The page then asks
+ * about every version of step 1 again (audit: reorganized COMMIT).
+ */
+export function commitRecheckNeeded({ commit, commitData, indexed, misses }) {
+  if (!commit || !Number.isInteger(commit.height) || commitData !== null) return false;
+  if (!Number.isInteger(indexed) || indexed < commit.height + 1) return false;
+  return misses >= 2;
+}
+
+/**
+ * Step 1 after that re-check (`verdict` = findVersion's): confirmed at
+ * another height or as another version → switched there; in a mempool →
+ * unconfirmed again (height null: tracking and Speed up resume); unknown to
+ * the node → unconfirmed and unseen (the reserve-unseen flow); no answer →
+ * unchanged. Note: `switchStepTo` keeps the old height when given none, so
+ * the height is cleared here explicitly.
+ */
+export function commitAfterRecheck(step, verdict, now = Date.now()) {
+  if (!step || !verdict) return step;
+  if (verdict.kind === "confirmed") return switchStepTo(step, verdict.txid, { height: verdict.height, now });
+  if (verdict.kind === "seen") return { ...switchStepTo(step, verdict.txid, { now }), height: null, unseenAt: null };
+  if (verdict.kind === "none") return { ...step, height: null, unseenAt: step.unseenAt ?? now };
+  return step;
+}
+
+/**
+ * Has our publish left its block? It shows confirmed (`reveal.height`), the
+ * indexer has applied that block, and yet reports the reservation OPEN —
+ * its carrier unspent: a chain reorganization took the publish out. The
+ * page clears the height so tracking (and Speed up) resume; if the publish
+ * is gone from every mempool the existing release flow opens Publish again.
+ */
+export function revealLeftBlock({ reveal, commitData, indexed }) {
+  if (!reveal || !Number.isInteger(reveal.height) || !commitData) return false;
+  return commitData.status === "open" && Number.isInteger(indexed) && indexed >= reveal.height;
+}
 
 /** Plain words for a §2.1 REVEAL `reason` (CommitView.reveal_reason); unknown codes are shown as they are. */
 export function revealReasonText(reason) {
@@ -533,12 +667,163 @@ export function createDeployRecordStore({ storage, now = () => Date.now() } = {}
     clear(address) {
       write(address, null);
     },
+    /**
+     * Put `rec` back as the open record of `address` (a created name whose
+     * publish left its block — see the settling notes). Refuses (null)
+     * while another record is open that is not a stale draft. → the stored record.
+     */
+    restore(address, rec) {
+      const cur = read(address);
+      if (cur && !isStaleDraft(cur, now())) return null;
+      const next = normalizeDeployRecord(rec);
+      if (!next) return null;
+      write(address, next);
+      return next;
+    },
     /** "storage" | "memory" (after a failure, or without localStorage). */
     backend() {
       return store ? "storage" : "memory";
     },
   };
 }
+
+// ---- created, not final yet ------------------------------------------------------------------
+//
+// A publish the registry lists as ours is provisional until its block is
+// FINAL_DEPTH deep: a chain reorganization can still take it out, or put
+// another publish of the name first. The reservation record is cleared at
+// once (so a new name can be reserved), but a SETTLING note keeps what is
+// needed to follow it — the whole record, salt included — per address in
+// localStorage ('lp.deploy.settling.<address>'), until it is final.
+
+export const SETTLING_PREFIX = "lp.deploy.settling.";
+/** Notes kept per address (the oldest go first). */
+export const SETTLING_MAX = 5;
+/** A note older than this is dropped whatever it says. */
+export const SETTLING_TTL_MS = 24 * 60 * 60 * 1000;
+const SETTLING_VERDICTS = new Set(["provisional", "changed-taken", "changed-missing"]);
+
+/** Storage key of the settling notes of an address. */
+export function settlingKey(address) {
+  const a = typeof address === "string" ? address.trim().toLowerCase() : "";
+  return `${SETTLING_PREFIX}${a || "*"}`;
+}
+
+/** A well-formed settling note `{ ticker, revealTxid, height, at, verdict, changes, rec }` (`changes`: reorganization changes seen), or null. */
+export function normalizeSettlingNote(n) {
+  if (!n || typeof n !== "object") return null;
+  const rec = normalizeDeployRecord(n.rec);
+  const revealTxid = String(n.revealTxid || "").toLowerCase();
+  if (!rec || !rec.reveal || !TXID_RE.test(revealTxid)) return null;
+  return {
+    ticker: rec.ticker,
+    revealTxid,
+    height: int(n.height),
+    at: num(n.at) ?? 0,
+    verdict: SETTLING_VERDICTS.has(n.verdict) ? n.verdict : "provisional",
+    changes: int(n.changes) ?? 0,
+    rec,
+  };
+}
+
+/**
+ * Where a settling note stands, from the registry row of its ticker
+ * (`row`: undefined = not read, null = no row) at `indexed`:
+ * "final" (ours and FINAL_DEPTH deep — the note can go), "provisional"
+ * (ours, not final yet), "changed-taken" (another publish holds the name
+ * now), "changed-missing" (no row although the indexer has applied the
+ * note's block and is not rebuilding: our publish is out of its block), or
+ * "unknown" (not read yet, or no row because the indexer has not applied
+ * that block — a restart, a cold scan or a rebuild is not a reorganization).
+ * `applied` / `rebuilding` describe the indexer that answered the "no row"
+ * (read after it); `applied` defaults to `indexed`.
+ */
+export function settlingVerdict(note, row, indexed, { applied = indexed, rebuilding = false } = {}) {
+  if (!note || row === undefined) return "unknown";
+  if (row === null) {
+    const seen = !rebuilding && Number.isInteger(applied) && Number.isInteger(note.height) && applied >= note.height;
+    return seen ? "changed-missing" : "unknown";
+  }
+  if (!ownPublishTxids(note.rec).has(String(row.deploy_txid || "").toLowerCase()) && row.deploy_txid !== note.revealTxid) return "changed-taken";
+  return rowIsFinal(row, indexed) ? "final" : "provisional";
+}
+
+/**
+ * Did a sent, unconfirmed publish miss a block? True when the chain tip is
+ * above the tip it was sent at (`step.sentTip`) and it has no height yet:
+ * its ticker is visible in the mempool, and every block it waits gives
+ * someone else time to reserve the name and publish first (their COMMIT
+ * needs a block of its own). False while anything is unknown.
+ */
+export function publishMissedBlock(step, tip) {
+  if (!step || !step.sentAt || Number.isInteger(step.height) || step.unseenAt) return false;
+  return Number.isInteger(step.sentTip) && Number.isInteger(tip) && tip > step.sentTip;
+}
+
+/** Settling notes over any { getItem, setItem, removeItem } storage (localStorage in the browser). */
+export function createSettlingStore({ storage, now = () => Date.now() } = {}) {
+  let store = storage === undefined ? browserStorage() : storage;
+  const fallback = memoryStorage();
+  const backend = () => store || fallback;
+  const read = (address) => {
+    let raw = null;
+    try {
+      raw = backend().getItem(settlingKey(address));
+    } catch {
+      store = null;
+      raw = fallback.getItem(settlingKey(address));
+    }
+    let list = [];
+    try {
+      list = raw ? JSON.parse(raw) : [];
+    } catch {
+      list = [];
+    }
+    const t = now();
+    return (Array.isArray(list) ? list : []).map(normalizeSettlingNote).filter((n) => n && t - n.at <= SETTLING_TTL_MS);
+  };
+  const write = (address, list) => {
+    const key = settlingKey(address);
+    try {
+      if (list.length) backend().setItem(key, JSON.stringify(list));
+      else backend().removeItem(key);
+    } catch {
+      store = null;
+      if (list.length) fallback.setItem(key, JSON.stringify(list));
+      else fallback.removeItem(key);
+    }
+  };
+  return {
+    list: (address) => read(address),
+    /** Add (or replace) the note of `rec`'s publish. */
+    add(address, { rec, height = null }) {
+      const n = normalizeSettlingNote({ rec, revealTxid: rec?.reveal?.txid, height, at: now(), verdict: "provisional" });
+      if (!n) return read(address);
+      const list = [...read(address).filter((x) => x.revealTxid !== n.revealTxid), n].slice(-SETTLING_MAX);
+      write(address, list);
+      return list;
+    },
+    /** Apply `fn(note) → note` to the note of `revealTxid`. */
+    update(address, revealTxid, fn) {
+      const t = String(revealTxid || "").toLowerCase();
+      const list = read(address).map((n) => (n.revealTxid === t ? normalizeSettlingNote(fn(n)) || n : n));
+      write(address, list);
+      return list;
+    },
+    remove(address, revealTxid) {
+      const t = String(revealTxid || "").toLowerCase();
+      const list = read(address).filter((n) => n.revealTxid !== t);
+      write(address, list);
+      return list;
+    },
+  };
+}
+
+const SETTLING_STORE = createSettlingStore();
+export const settlingNotes = (address) => SETTLING_STORE.list(address);
+export const addSettlingNote = (address, note) => SETTLING_STORE.add(address, note);
+export const updateSettlingNote = (address, revealTxid, fn) => SETTLING_STORE.update(address, revealTxid, fn);
+export const removeSettlingNote = (address, revealTxid) => SETTLING_STORE.remove(address, revealTxid);
 
 const DEFAULT_STORE = createDeployRecordStore();
 
@@ -547,4 +832,5 @@ export const startDeployRecord = (address, init) => DEFAULT_STORE.start(address,
 export const updateDeployRecord = (address, fn) => DEFAULT_STORE.update(address, fn);
 export const claimDeployRecord = (address, pred, fn) => DEFAULT_STORE.claim(address, pred, fn);
 export const clearDeployRecord = (address) => DEFAULT_STORE.clear(address);
+export const restoreDeployRecord = (address, rec) => DEFAULT_STORE.restore(address, rec);
 export const deployRecordBackend = () => DEFAULT_STORE.backend();

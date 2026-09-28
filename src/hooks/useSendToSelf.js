@@ -4,6 +4,7 @@ import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { droppedMessage, useTxStatus } from "./useTxStatus.js";
 import { friendlyError } from "./useWallet.js";
+import { seedWaitNote } from "./useMine.js";
 import { buildSendPsbt, estimateSendFeeSats, expectPsbtPayload, minFeeInputSats, MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
 import { cancelFeeRate } from "../lib/market.js";
@@ -11,11 +12,13 @@ import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { isConflictError } from "../lib/walletShapes.js";
 import { retryWhileSeeding } from "../lib/retry.js";
 import { fundingMessage } from "../lib/funding.js";
-import { forgetTx } from "../lib/txrecords.js";
+import { forgetTx, markTxConfirmed, markTxUnconfirmed } from "../lib/txrecords.js";
 import { sendPendingOutpoints } from "../lib/send.js";
 
 const IDLE = { phase: "idle" };
 const BUSY = new Set(["building", "signing", "broadcasting", "pending"]);
+/** Phases whose tx is still tracked (useTxStatus keeps checking until final). */
+const TRACKED = new Set(["pending", "unseen", "confirmed"]);
 const outKey = (u) => `${u.txid}:${u.vout}`;
 
 const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
@@ -41,9 +44,12 @@ const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
  *   run({ kind: "split" | "cancel" | "send", ticker, amount, utxo: { txid, vout, sats? } | utxos: [...], toAddress?, order? })
  *
  * `chain` = { phase, kind, ticker, amount, toAddress, txid, feeSats,
- * feeRateSatVb, vsize, inputs, assetSafe, rule, error }, phase ∈ idle |
- * building | signing | broadcasting | pending | confirmed | error. A wallet
- * change resets it.
+ * feeRateSatVb, vsize, inputs, assetSafe, rule, error, note }, phase ∈ idle |
+ * building | signing | broadcasting | pending | unseen | confirmed | error.
+ * A confirmed tx is tracked until its block is final (`status.final`): a
+ * chain reorganization can still put it back in the mempool — the chain
+ * then returns to "pending" and its record guards its inputs again. A
+ * wallet change resets it.
  */
 export function useSendToSelf({ onSettled } = {}) {
   const { wallet: w, address, pubkeyHex, fees, fee, refreshAll } = useApp();
@@ -55,22 +61,33 @@ export function useSendToSelf({ onSettled } = {}) {
     setChain(IDLE);
   }, [address]);
 
-  const status = useTxStatus(chain.phase === "pending" || chain.phase === "confirmed" ? chain.txid : null, {
-    onConfirmed: () => {
-      // Confirmed: the record has nothing left to guard (its listing is no
-      // longer "your withdrawal is pending" anywhere).
-      if (address && chain.txid) forgetTx(address, chain.txid);
+  const status = useTxStatus(TRACKED.has(chain.phase) ? chain.txid : null, {
+    onConfirmed: (s) => {
+      // Confirmed, not final: the record keeps guarding its inputs until
+      // the block is final (a chain reorganization could undo it).
+      if (address && chain.txid) markTxConfirmed(address, chain.txid, s.block_height ?? null);
       setChain((c) => ({ ...c, phase: "confirmed" }));
       refreshAll();
       settledRef.current?.();
     },
+    onReorg: (kind) => {
+      if (kind !== "mempool") return;
+      if (address && chain.txid) markTxUnconfirmed(address, chain.txid);
+      setChain((c) => (c.phase === "confirmed" ? { ...c, phase: "pending" } : c));
+      refreshAll();
+    },
   });
 
-  // The pending tx left the node's mempool without confirming (replaced or
-  // evicted): say so instead of polling a dead txid forever (audit usertx-6).
+  // Final: nothing can undo it any more — the record may go.
   useEffect(() => {
-    if (!status.dropped) return;
-    setChain((c) => (c.phase === "pending" ? { ...c, phase: "error", error: droppedMessage(c.txid, WHAT[c.kind] || "send") } : c));
+    if (status.final && address && chain.txid) forgetTx(address, chain.txid);
+  }, [status.final, address, chain.txid]);
+
+  // The node has not seen the tx for a while: say so, keep checking — it may
+  // still confirm (audit usertx-6); seen again, it is pending again.
+  useEffect(() => {
+    if (status.dropped) setChain((c) => (c.phase === "pending" ? { ...c, phase: "unseen", note: droppedMessage(c.txid, WHAT[c.kind] || "send") } : c));
+    else setChain((c) => (c.phase === "unseen" ? { ...c, phase: "pending", note: null } : c));
   }, [status.dropped]);
 
   const run = useCallback(
@@ -100,8 +117,9 @@ export function useSendToSelf({ onSettled } = {}) {
         const rate = rule ? rule.satVb : chosen;
         // /btc-utxos may still be scanning a first-time address (503 / 429):
         // both reads wait for it the same way (src/lib/retry.js).
+        const onWait = (info) => setChain((c) => (c.phase === "building" ? { ...c, waitNote: seedWaitNote(info) } : c));
         const [utxoList, tokenRows, btcRows] = await Promise.all([
-          wallet.getBitcoinUtxos(address),
+          wallet.getBitcoinUtxos(address, { onWait }),
           indexer.tokenUtxos(address),
           retryWhileSeeding(() => indexer.btcUtxos(address)),
         ]);

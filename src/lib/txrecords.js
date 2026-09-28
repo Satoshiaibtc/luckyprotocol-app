@@ -16,22 +16,46 @@
 //     pending DEPLOY for (a second DEPLOY would pay the fees twice), and
 //     the mine console resumes tracking a pending MINE after a reload.
 //
-// A record is dropped when its tx confirmed and nothing needs it any more,
-// when the indexer's node reports it unknown for longer than
-// DROP_GRACE_MS (dropped / replaced), or after TXREC_TTL_MS (the default
-// mempool expiry). A confirmed DEPLOY or MINE is KEPT (marked confirmed)
-// until the page that shows its result has shown it: the Create page's
-// registry verdict, the mine console's reveal — "tracking resumes when you
-// return" must hold even when another page's build refreshed the records
-// in between (audit mine-4). Pure parts are unit-tested in
-// test/pending.test.js.
+// A confirmed record is kept until its block is FINAL (src/lib/finality.js):
+// a chain reorganization can put a confirmed tx back into the mempool, and
+// its inputs then reappear as unspent in the indexer's view — spending one
+// again would replace the user's own tx (a withdrawal undone by the next
+// MINE). So its inputs stay excluded until the block has FINAL_DEPTH
+// confirmations (or, when the depth cannot be read, FINAL_GUARD_MS after
+// it was first seen confirmed), and a re-check that finds it back in the
+// mempool marks it unconfirmed again. A record is dropped when it is final
+// and nothing needs it any more, when the indexer's node has not seen it
+// for longer than DROP_GRACE_MS since it was last seen (dropped /
+// replaced — counted only while that answer means something, see
+// `setUnseenTrusted`), or after TXREC_TTL_MS (the default mempool expiry).
+// A confirmed DEPLOY or MINE is KEPT until the page that shows its result
+// has shown it (`done`): the Create page's registry verdict, the mine
+// console's final credit — "tracking resumes when you return" must hold
+// even when another page's build refreshed the records in between (audit
+// mine-4). Pure parts are unit-tested in test/pending.test.js and
+// test/flows.test.js.
+
+import { FINAL_DEPTH, confirmationsAt } from "./finality.js";
 
 export const TXREC_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 export const TXREC_KEY_PREFIX = "lp.txrec.";
-/** How long a broadcast tx may be unknown to the indexer's node before it counts as dropped. */
-export const DROP_GRACE_MS = 3 * 60 * 1000;
+/**
+ * How long a broadcast tx may be unknown to the indexer's node, since it
+ * was last seen (or broadcast), before it counts as dropped. Generous: a
+ * node can miss a tx the rest of the network holds (a relay path through
+ * the wallet's own backend, a restart that emptied its mempool).
+ */
+export const DROP_GRACE_MS = 10 * 60 * 1000;
+/** A confirmed record whose depth cannot be read guards its inputs this long (~12 blocks). */
+export const FINAL_GUARD_MS = 2 * 60 * 60 * 1000;
 /** Records kept per address (oldest dropped first). */
 export const TXREC_MAX = 50;
+/**
+ * A confirmed record that is not final yet is asked about again at most
+ * this often (every build refreshes the records; its inputs stay excluded
+ * in between whatever the answer).
+ */
+export const CONFIRMED_RECHECK_MS = 60 * 1000;
 
 const TXID_RE = /^[0-9a-f]{64}$/;
 const OUTPOINT_RE = /^[0-9a-f]{64}:(0|[1-9][0-9]{0,6})$/;
@@ -56,7 +80,23 @@ export function normalizeTxRecord(r, now = Date.now()) {
   if (!Number.isFinite(at)) return null;
   if (at > now) at = now;
   const confirmed = r.confirmed === true;
-  return { txid, kind, ticker, inputs, at, confirmed };
+  const stamp = (v) => (v !== null && v !== undefined && Number.isFinite(Number(v)) ? Math.min(Number(v), now) : null);
+  const height = Number(r.blockHeight);
+  return {
+    txid,
+    kind,
+    ticker,
+    inputs,
+    at,
+    confirmed,
+    // when the indexer's node last reported it (in its mempool or confirmed)
+    seenAt: stamp(r.seenAt),
+    // the block it confirmed in, and when that was first seen (null while unconfirmed)
+    blockHeight: confirmed && r.blockHeight !== null && Number.isInteger(height) && height >= 0 ? height : null,
+    confirmedAt: confirmed ? stamp(r.confirmedAt) : null,
+    // the page that shows its result has shown it; kept only to guard its inputs until final
+    done: r.done === true,
+  };
 }
 
 /** Parse a stored JSON list, drop malformed and expired rows, keep the newest TXREC_MAX. */
@@ -82,20 +122,23 @@ export function parseTxRecords(raw, now = Date.now(), ttl = TXREC_TTL_MS) {
 }
 
 /**
- * At most TXREC_MAX records, oldest first. Over the cap, CONFIRMED records
- * (kept only for a result page) go first, oldest first — an unconfirmed
- * one guards inputs against being re-spent and is evicted only when
- * nothing else is left.
+ * At most TXREC_MAX records, oldest first. Over the cap, records kept only
+ * as a guard (`done`, confirmed) go first, then other CONFIRMED records
+ * (kept for a result page), oldest first — an unconfirmed one guards
+ * inputs against being re-spent and is evicted only when nothing else is
+ * left.
  */
 export function trimRecords(list, max = TXREC_MAX) {
   if (list.length <= max) return list;
   let drop = list.length - max;
   const gone = new Set();
-  for (const r of list) {
-    if (drop === 0) break;
-    if (r.confirmed) {
-      gone.add(r.txid);
-      drop -= 1;
+  for (const pick of [(r) => r.confirmed && r.done, (r) => r.confirmed]) {
+    for (const r of list) {
+      if (drop === 0) break;
+      if (!gone.has(r.txid) && pick(r)) {
+        gone.add(r.txid);
+        drop -= 1;
+      }
     }
   }
   const kept = list.filter((r) => !gone.has(r.txid));
@@ -103,41 +146,106 @@ export function trimRecords(list, max = TXREC_MAX) {
 }
 
 /**
- * The record of this browser's own, still unconfirmed transaction that
- * spends `outpoint` ("txid:vout") — matched by the order's
- * `pending_spend_txid` when the indexer names one, else by the record's
- * inputs — or null. A listing whose pending spend is one of these is the
- * seller's own withdrawal (or split), not a buyer's fill (audit
- * portfolio-1).
+ * The record of this browser's own transaction that spends `outpoint`
+ * ("txid:vout") and is in the mempool, or null. A listing whose pending
+ * spend is one of these is the seller's own withdrawal (or split), not a
+ * buyer's fill (audit portfolio-1).
+ *
+ * When the indexer names the pending spend (`pendingSpendTxid`), only that
+ * txid counts — even a record already seen confirmed (a chain
+ * reorganization put it back in the mempool). A record whose inputs
+ * include the outpoint but whose txid is NOT the named spend was replaced
+ * (someone else's fill paid more): that is not the user's pending
+ * withdrawal any more. Only while the indexer names nothing (it has not
+ * seen the spend yet) are the unconfirmed records' inputs matched.
  */
 export function ownPendingSpendOf(records, outpoint, pendingSpendTxid = null) {
   const key = String(outpoint || "").toLowerCase();
   const t = String(pendingSpendTxid || "").toLowerCase();
   for (const r of records || []) {
-    if (r.confirmed) continue;
-    if (t && r.txid === t) return r;
-    if (key && r.inputs.includes(key) && r.kind !== "fill") return r;
+    if (t) {
+      if (r.txid === t) return r;
+      continue;
+    }
+    if (!r.confirmed && key && r.inputs.includes(key) && r.kind !== "fill") return r;
   }
   return null;
 }
 
-/** Outpoints ("txid:vout") spent by records that are not confirmed. */
+/**
+ * This browser's own unconfirmed transaction that spent `outpoint` but is
+ * NOT the spend the indexer now reports (`pendingSpendTxid`) — replaced in
+ * the mempool, e.g. a withdrawal out-bid by a fill of the old listing — or
+ * null.
+ */
+export function replacedOwnSpendOf(records, outpoint, pendingSpendTxid) {
+  const key = String(outpoint || "").toLowerCase();
+  const t = String(pendingSpendTxid || "").toLowerCase();
+  if (!t || !key) return null;
+  for (const r of records || []) {
+    if (!r.confirmed && r.txid !== t && r.inputs.includes(key) && r.kind !== "fill") return r;
+  }
+  return null;
+}
+
+/**
+ * Outpoints ("txid:vout") spent by the records — unconfirmed ones AND
+ * confirmed ones that are not final yet (a final record has left the
+ * store): a chain reorganization can put a confirmed tx back in the
+ * mempool and its inputs back in the indexer's unspent view. Excluding an
+ * input that is really spent costs nothing — it is not in the UTXO set.
+ */
 export function pendingSpentOutpoints(records) {
   const out = new Set();
-  for (const r of records || []) if (!r.confirmed) for (const k of r.inputs) out.add(k);
+  for (const r of records || []) for (const k of r.inputs) out.add(k);
   return out;
 }
 
 /**
- * What a /tx-status answer means for a record: "confirmed" | "pending"
- * (in the mempool, or still inside the grace window) | "dropped" (unknown
- * to the node for longer than `graceMs`) | "unknown" (no answer).
+ * Has a confirmed record reached finality at `tip` (the indexer's applied
+ * height)? When its depth cannot be read, FINAL_GUARD_MS after it was
+ * first seen confirmed counts instead.
  */
-export function classifyTxStatus(record, status, now = Date.now(), graceMs = DROP_GRACE_MS) {
+export function recordIsFinal(record, tip, now = Date.now()) {
+  if (!record || !record.confirmed) return false;
+  const n = confirmationsAt(record.blockHeight, tip);
+  if (n !== null) return n >= FINAL_DEPTH;
+  const since = record.confirmedAt ?? record.at;
+  return Number.isFinite(since) && now - since >= FINAL_GUARD_MS;
+}
+
+// Is an unknown-to-the-node answer meaningful right now? The app keeps this
+// in step with /health (App.jsx: `sync.trustUnseen`): while the indexer
+// lags, is stalled or rebuilding, or its node has no peers, a tx the node
+// does not know may simply not have reached it — no record is dropped then.
+let unseenTrusted = true;
+// The indexer's applied height, for the depth of confirmed records (null =
+// unknown: the FINAL_GUARD_MS time guard applies). Also kept by the app.
+let indexedTip = null;
+/** Set by the app from the indexer's health; see above. */
+export function setUnseenTrusted(v) {
+  unseenTrusted = v !== false;
+}
+/** Set by the app from the indexer's health: its applied height. */
+export function setIndexedTip(n) {
+  indexedTip = Number.isInteger(n) ? n : null;
+}
+export const isUnseenTrusted = () => unseenTrusted;
+
+/**
+ * What a /tx-status answer means for a record: "confirmed" | "pending"
+ * (in the mempool, or still inside the grace window, or the node's
+ * "unknown" cannot be trusted right now) | "dropped" (unknown to the node
+ * for longer than `graceMs` since it was last seen or broadcast) |
+ * "unknown" (no answer).
+ */
+export function classifyTxStatus(record, status, now = Date.now(), graceMs = DROP_GRACE_MS, { trustUnseen = true } = {}) {
   if (!status) return "unknown";
   if (status.confirmed) return "confirmed";
   if (status.seen) return "pending";
-  return now - record.at > graceMs ? "dropped" : "pending";
+  if (!trustUnseen) return "pending";
+  const since = Math.max(record.at, Number.isFinite(record.seenAt) ? record.seenAt : 0);
+  return now - since > graceMs ? "dropped" : "pending";
 }
 
 function memoryStorage() {
@@ -215,15 +323,54 @@ export function createTxRecordStore({ storage, now = () => Date.now(), ttl = TXR
     list(address) {
       return read(address);
     },
-    /** Forget one tx. */
+    /** Delete one tx's record outright. */
     remove(address, txid) {
       const t = String(txid || "").toLowerCase();
       write(address, read(address).filter((r) => r.txid !== t));
     },
-    /** Mark one tx confirmed (its inputs are no longer excluded; the record stays for its ticker). */
-    markConfirmed(address, txid) {
+    /**
+     * Forget one tx: an unconfirmed record (dropped, replaced, abandoned)
+     * is deleted; a confirmed one is only marked `done` — it keeps guarding
+     * its inputs until its block is final (refreshTxRecords deletes it then).
+     */
+    forget(address, txid) {
       const t = String(txid || "").toLowerCase();
-      write(address, read(address).map((r) => (r.txid === t ? { ...r, confirmed: true } : r)));
+      const list = read(address);
+      const r = list.find((x) => x.txid === t);
+      if (!r) return;
+      if (r.confirmed) write(address, list.map((x) => (x.txid === t ? { ...x, done: true } : x)));
+      else write(address, list.filter((x) => x.txid !== t));
+    },
+    /** Mark one tx confirmed in block `blockHeight` (null = not known yet); the record stays until final. */
+    markConfirmed(address, txid, blockHeight = null) {
+      const t = String(txid || "").toLowerCase();
+      const at = now();
+      write(
+        address,
+        read(address).map((r) =>
+          r.txid === t
+            ? {
+                ...r,
+                confirmed: true,
+                blockHeight: Number.isInteger(blockHeight) ? blockHeight : r.blockHeight,
+                confirmedAt: r.confirmed && r.confirmedAt !== null ? r.confirmedAt : at,
+                seenAt: at,
+              }
+            : r,
+        ),
+      );
+    },
+    /** A confirmed tx is back in the mempool (a chain reorganization): unconfirmed again, its inputs still guarded. */
+    markUnconfirmed(address, txid) {
+      const t = String(txid || "").toLowerCase();
+      const at = now();
+      write(address, read(address).map((r) => (r.txid === t ? { ...r, confirmed: false, blockHeight: null, confirmedAt: null, seenAt: at } : r)));
+    },
+    /** The indexer's node reported the tx (in its mempool): the drop clock restarts. */
+    markSeen(address, txid) {
+      const t = String(txid || "").toLowerCase();
+      const at = now();
+      write(address, read(address).map((r) => (r.txid === t ? { ...r, seenAt: at } : r)));
     },
   };
 }
@@ -232,25 +379,43 @@ const DEFAULT_STORE = createTxRecordStore();
 
 export const recordBroadcastTx = (address, rec) => DEFAULT_STORE.add(address, rec);
 export const txRecords = (address) => DEFAULT_STORE.list(address);
-export const forgetTx = (address, txid) => DEFAULT_STORE.remove(address, txid);
-export const markTxConfirmed = (address, txid) => DEFAULT_STORE.markConfirmed(address, txid);
+/** Forget a tx: see the store's `forget` (a confirmed one keeps guarding its inputs until final). */
+export const forgetTx = (address, txid) => DEFAULT_STORE.forget(address, txid);
+export const markTxConfirmed = (address, txid, blockHeight = null) => DEFAULT_STORE.markConfirmed(address, txid, blockHeight);
+export const markTxUnconfirmed = (address, txid) => DEFAULT_STORE.markUnconfirmed(address, txid);
 
 /** Kinds whose confirmed record is kept until the page showing its result forgets it. */
 export const KEEP_WHEN_CONFIRMED = new Set(["deploy", "mine"]);
 
 /**
  * Re-check every record of `address` that still matters against the
- * indexer (`txStatus(txid)` → the /tx-status shape) and prune: a dropped
- * tx is forgotten, a confirmed one is forgotten too — except a DEPLOY or a
- * MINE, which is marked confirmed (its inputs need no exclusion any more)
- * and kept for its ticker until the Create page / mine console has shown
- * the result. Returns the surviving records with a `state`
- * ("confirmed" | "pending" | "unknown").
+ * indexer (`txStatus(txid)` → the /tx-status shape) and prune:
+ *
+ *   - a dropped tx is forgotten (only while the node's "unknown" can be
+ *     trusted — `trustUnseen`, default: the app's current health);
+ *   - a confirmed tx stays until its block is final at `tip` (the
+ *     indexer's applied height; unknown → FINAL_GUARD_MS), its inputs
+ *     still excluded — then it is forgotten, except a DEPLOY or a MINE
+ *     whose result page has not shown it yet (not `done`);
+ *   - a confirmed tx found back in the mempool (a chain reorganization)
+ *     is unconfirmed again. A confirmed record is asked about at most
+ *     every CONFIRMED_RECHECK_MS (each build refreshes the records, and a
+ *     heavy miner holds dozens of them for the hour before they are final).
+ *
+ * Returns the surviving records with a `state` ("confirmed" | "pending" | "unknown").
  */
-export async function refreshTxRecords(address, txStatus, { store = DEFAULT_STORE, now = Date.now, graceMs = DROP_GRACE_MS } = {}) {
+export async function refreshTxRecords(address, txStatus, { store = DEFAULT_STORE, now = Date.now, graceMs = DROP_GRACE_MS, tip = indexedTip, trustUnseen = unseenTrusted } = {}) {
   const out = [];
   for (const r of store.list(address)) {
-    if (r.confirmed) {
+    if (r.confirmed && recordIsFinal(r, tip, now())) {
+      if (r.done || !KEEP_WHEN_CONFIRMED.has(r.kind)) {
+        store.remove(address, r.txid);
+        continue;
+      }
+      out.push({ ...r, state: "confirmed" });
+      continue;
+    }
+    if (r.confirmed && Number.isFinite(r.seenAt) && now() - r.seenAt < CONFIRMED_RECHECK_MS) {
       out.push({ ...r, state: "confirmed" });
       continue;
     }
@@ -260,20 +425,32 @@ export async function refreshTxRecords(address, txStatus, { store = DEFAULT_STOR
     } catch {
       s = null;
     }
-    const state = classifyTxStatus(r, s, now(), graceMs);
+    if (r.confirmed) {
+      // Not final yet: back in the mempool is a chain reorganization; any
+      // other answer (including "unknown" while the indexer recovers from
+      // one) keeps it confirmed and guarding.
+      if (s && !s.confirmed && s.seen) {
+        store.markUnconfirmed(address, r.txid);
+        out.push({ ...r, confirmed: false, blockHeight: null, confirmedAt: null, state: "pending", status: s });
+        continue;
+      }
+      // A confirmed answer is stamped (the next re-check waits); no answer is asked again next time.
+      if (s && s.confirmed && Number.isInteger(s.block_height) && s.block_height !== r.blockHeight) store.markConfirmed(address, r.txid, s.block_height);
+      else if (s && s.confirmed) store.markSeen(address, r.txid);
+      out.push({ ...r, state: "confirmed", status: s });
+      continue;
+    }
+    const state = classifyTxStatus(r, s, now(), graceMs, { trustUnseen });
     if (state === "dropped") {
       store.remove(address, r.txid);
       continue;
     }
     if (state === "confirmed") {
-      // A confirmed DEPLOY stays until the registry lists its ticker (the
-      // Create page forgets it then), a confirmed MINE until the console has
-      // shown its reveal; anything else has nothing left to guard.
-      if (KEEP_WHEN_CONFIRMED.has(r.kind)) store.markConfirmed(address, r.txid);
-      else {
-        store.remove(address, r.txid);
-        continue;
-      }
+      // Kept (its inputs still excluded) until final; a confirmed DEPLOY or
+      // MINE beyond that until its result page has shown it.
+      store.markConfirmed(address, r.txid, s.block_height ?? null);
+    } else if (s && s.seen) {
+      store.markSeen(address, r.txid);
     }
     out.push({ ...r, confirmed: state === "confirmed", state, status: s });
   }

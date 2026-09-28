@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { feeSourceNote } from "../lib/network.js";
 import {
   DEFAULT_PRESET,
   FEE_CHOICE_KEY,
@@ -38,6 +39,8 @@ function writeStoredChoice(choice) {
  *   fee.presets          → [{ id, label, eta, satVb | null }]
  *   fee.customText       → the input's current text
  *   fee.customError      → inline message | null
+ *   fee.sourceNote       → where the estimates came from when that is worth saying
+ *                          (the second source standing in, or its higher Fast), else null
  *   fee.highFee          → null, or { satVb, threshold, fastest, pending } when the
  *                          custom rate is above max(50, 2 × fastestFee): satVb stays
  *                          null until fee.ackHighFee() (audit usertx-8)
@@ -98,6 +101,7 @@ export function useFeeRate(feesData, { preset = null, persist = true } = {}) {
     feesAvailable,
     customText,
     customError: choice.kind === "custom" ? custom.error : null,
+    sourceNote: feeSourceNote(feesData),
     highFee,
     ackHighFee,
     pickPreset,

@@ -2,7 +2,8 @@ import { addrUrl, fmtAgo, fmtBtcShort, fmtDateUtc, fmtExpires, fmtInt, fmtUnit, 
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { bucketOfYield, yieldDigit } from "../lib/yield.js";
 import { activityParties } from "../lib/activity.js";
-import { ownPendingSpendOf } from "../lib/txrecords.js";
+import { ownPendingSpendOf, replacedOwnSpendOf } from "../lib/txrecords.js";
+import { FINAL_DEPTH } from "../lib/finality.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
 import DigitChip from "./DigitChip.jsx";
 
@@ -199,15 +200,31 @@ function yieldClass(row) {
 }
 
 /** Yield cell: digit chip (when the block hash is known) + amount. */
+/**
+ * "2/6" on a mine whose block is not final yet (the indexer's `final:
+ * false`): the credit is provisional — a chain reorganization can still
+ * move the MINE to another block and change it.
+ */
+function ProvisionalTag({ r }) {
+  if (r.final !== false) return null;
+  const n = Number.isInteger(r.confirmations) ? Math.min(r.confirmations, FINAL_DEPTH) : null;
+  return (
+    <span className="status-tag s-filling" title={`provisional — final after ${FINAL_DEPTH} confirmations; until then a chain reorganization can still change this credit`}>
+      {n !== null ? `${n}/${FINAL_DEPTH}` : "provisional"}
+    </span>
+  );
+}
+
 function YieldCell({ r }) {
   const invalid = r.status === "invalid";
   const amount = invalid ? null : r.cap_exhausted ? "0" : fmtInt(r.yield_smallest);
-  const title = invalid ? "invalid mine — no yield" : `${fmtInt(r.cap_exhausted ? 0 : r.yield_smallest)} ${r.ticker}`;
+  const title = invalid ? "invalid mine — no yield" : `${fmtInt(r.cap_exhausted ? 0 : r.yield_smallest)} ${r.ticker}${r.final === false ? " (provisional)" : ""}`;
   const d = r.block_hash ? yieldDigit(r.block_hash) : null;
   if (!d && !invalid) {
     return (
       <span className={yieldClass(r)} title={title}>
         {amount}
+        <ProvisionalTag r={r} />
       </span>
     );
   }
@@ -215,6 +232,7 @@ function YieldCell({ r }) {
     <span className={yieldClass(r)} title={title}>
       <DigitChip digit={d} size="sm" invalid={invalid} ticker={r.ticker} />
       {amount !== null && <span>{amount}</span>}
+      <ProvisionalTag r={r} />
     </span>
   );
 }
@@ -348,8 +366,11 @@ const LIVE = new Set(["open", "filling"]);
  * The indexer marks a listing `filling` for ANY mempool spend of it —
  * including the seller's own withdrawal (§7.3). A row whose pending spend
  * is one of the user's own transactions says "your withdrawal is pending"
- * and offers no second Withdraw: that would only out-bid the user's own
- * transaction (audit portfolio-1).
+ * — and that the listing can still be bought until it confirms — and
+ * offers no second Withdraw: that would only out-bid the user's own
+ * transaction (audit portfolio-1). A row whose pending spend is someone
+ * else's although the user's own withdrawal spent it too says the
+ * withdrawal was replaced, and offers Withdraw again (it must out-bid).
  */
 export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = false, records = null, empty = "No listings from this address." }) {
   const actions = !!(onCancel || onRenew);
@@ -369,6 +390,7 @@ export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = f
         body: q.rows.map((o) => {
           const live = LIVE.has(o.status);
           const own = live && records ? ownPendingSpendOf(records, o.id, o.pending_spend_txid) : null;
+          const replaced = !own && o.status === "filling" && records ? replacedOwnSpendOf(records, o.id, o.pending_spend_txid) : null;
           // A `filling` order is exempt from the 14-day expiry while its spend sits in the mempool.
           const expires = o.status === "open" && !own ? fmtExpires(o.expires_at) : "";
           return (
@@ -389,6 +411,7 @@ export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = f
                     <small className="usd">
                       your {own.kind === "send" ? "withdrawal" : "transaction"} is pending · tx <TxLink txid={own.txid} head={4} tail={3} />
                     </small>
+                    <small className="usd">until it confirms, the listing can still be bought</small>
                   </>
                 ) : (
                   <span className={`status-tag s-${o.status}`}>{STATUS_LABEL[o.status] || o.status}</span>
@@ -398,6 +421,9 @@ export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = f
                     fill pending{o.pending_feerate !== null ? ` · ${o.pending_feerate} sat/vB` : ""}
                     {o.pending_fee_sats !== null ? ` · ${fmtInt(o.pending_fee_sats)} sats` : ""}
                   </small>
+                )}
+                {replaced && (
+                  <small className="usd">your withdrawal (tx <TxLink txid={replaced.txid} head={4} tail={3} />) was replaced by this fill — if it confirms you are paid; Withdraw again to out-bid it</small>
                 )}
                 {expires && <small className="usd">{expires}</small>}
                 {!live && o.spent_txid && (

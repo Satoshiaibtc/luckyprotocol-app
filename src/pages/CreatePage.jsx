@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import { friendlyError } from "../hooks/useWallet.js";
@@ -6,17 +6,30 @@ import { tokenHref } from "../hooks/useHashRoute.js";
 import { useDeployLog } from "../hooks/useMinerLog.js";
 import { useFeeRate } from "../hooks/useFeeRate.js";
 import { useCommitReveal } from "../hooks/useCommitReveal.js";
-import { estimateCommitFeeSats, estimateRevealFeeSats, speedUpFloorRate } from "../lib/psbt.js";
+import { MAX_FEE_RATE_SAT_VB, estimateCommitFeeSats, estimateRevealFeeSats, speedUpFloorRate } from "../lib/psbt.js";
 import { refreshTxRecords, txRecords } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
-import { missingFeeHint } from "../lib/feechoice.js";
+import { clampCustomFee, missingFeeHint, needsHighFeeAck } from "../lib/feechoice.js";
 import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
 import { activationNotice, activationState, lockedHint } from "../lib/activation.js";
-import { DEAD_END_PHASES, EXPIRY_WARN_BLOCKS, commitStatusText, expiryText, invalidReasonText, revealReasonText } from "../lib/commitReveal.js";
+import {
+  DEAD_END_PHASES,
+  EXPIRY_WARN_BLOCKS,
+  PUBLISH_CUTOFF_BLOCKS,
+  PUBLISH_MIN_CONFIRMATIONS,
+  commitStatusText,
+  expiryText,
+  invalidReasonText,
+  publishMissedBlock,
+  revealReasonText,
+  rowConfirmations,
+} from "../lib/commitReveal.js";
+import { FINAL_DEPTH, confirmationsAt, confirmationsText } from "../lib/finality.js";
 import { cleanTickerInput, cleanedCaret } from "../lib/tickerInput.js";
 import { readyText } from "../lib/statusText.js";
 import { BUCKETS, EXPECTED_YIELD } from "../lib/yield.js";
 import { blockUrl, fmtDec, fmtInt, fmtSats, shortTxid, txUrl } from "../lib/format.js";
+import { blockLineKey } from "../lib/minerlog.js";
 import { DEPLOY_PHASES, blockFoundLine, deployHeartbeatLine, deployUntrackedLine, deployedLine, feeQuoteLine, registrationLine, tipLine, walletLine } from "../lib/deploylog.js";
 import TokenCard from "../components/TokenCard.jsx";
 import { ConnectPrompt, SpentInputs } from "../components/TxProgress.jsx";
@@ -30,7 +43,7 @@ const HEARTBEAT_MS = 60_000;
 const FEE_LOG_MIN_MS = 10 * 60_000;
 // Registered → hop to the token page after the banner had a moment on screen.
 const HOP_MS = 4_000;
-const PENDING_PHASES = new Set(["reserve-pending", "reserve-unsent", "reserve-unseen", "recording", "publish-pending", "publish-unsent", "publish-unseen", "publish-pending-taken", "publish-confirmed"]);
+const PENDING_PHASES = new Set(["reserve-pending", "reserve-unsent", "reserve-unseen", "recording", "settling", "taken-tentative", "publish-pending", "publish-unsent", "publish-unseen", "publish-pending-taken", "publish-confirmed"]);
 
 /**
  * This browser's own earlier DEPLOY of `ticker` from `address` that has not
@@ -191,10 +204,13 @@ export default function CreatePage({ params, navigate }) {
     if (canPublish) cr.publish(revealRate);
   };
 
-  // Registered → hop to the token page once the banner has been on screen.
+  // Registered and final → hop to the token page once the banner has been
+  // on screen. A provisional result stays here, where it is checked until
+  // final (and a change by a chain reorganization is explained); the check
+  // clears `provisional` then, and the hop follows.
   const finished = cr.finished;
   useEffect(() => {
-    if (!finished || finished.verdict !== "registered") return undefined;
+    if (!finished || finished.verdict !== "registered" || finished.provisional) return undefined;
     const id = setTimeout(() => navigate(tokenHref(finished.ticker)), HOP_MS);
     return () => clearTimeout(id);
   }, [finished, navigate]);
@@ -241,10 +257,10 @@ export default function CreatePage({ params, navigate }) {
     push(tipLine(tipRef.current, "deploy", null));
   }, [tipHeight, push]);
 
-  // (d) the registry's verdict of a publish.
+  // (d) the registry's verdict of a publish (provisional until FINAL_DEPTH).
   useEffect(() => {
     if (!finished || finished.verdict !== "registered") return;
-    push(deployedLine(finished.ticker, finished.height, finished.revealTxid));
+    push(deployedLine(finished.ticker, finished.height, finished.revealTxid, Date.now(), { provisional: !!finished.provisional }));
     push(registrationLine(finished.ticker, "registered", finished.revealTxid));
   }, [finished, push]);
   const revealTxid = rec?.reveal?.txid ?? null;
@@ -277,7 +293,7 @@ export default function CreatePage({ params, navigate }) {
     prevTipRef.current = tipHeight;
     if (prev === null || prev === tipHeight) return;
     const tip = tipRef.current;
-    const existing = linesRef.current.find((l) => l.key === `block:${tipHeight}`);
+    const existing = linesRef.current.find((l) => l.key === blockLineKey(tipHeight, tip?.hash));
     if (existing) {
       if (!existing.post && tip && (tip.tx_count != null || tip.weight != null)) {
         push(blockFoundLine({ height: tipHeight, hash: existing.hash || tip.hash, tx_count: tip.tx_count, weight: tip.weight }, { at: existing.ts }), { replace: true });
@@ -430,6 +446,8 @@ export default function CreatePage({ params, navigate }) {
 
           <Steps cr={cr} rec={rec} phase={phase} tipNow={tipNow} revealFee={revealFee} fees={fees.data} connected={connected} />
 
+          {connected && <SettlingNotes cr={cr} indexed={sync.indexed ?? tipNow} />}
+
           {!connected ? (
             <ConnectPrompt action="create a token" />
           ) : !rec && !finished ? (
@@ -438,7 +456,7 @@ export default function CreatePage({ params, navigate }) {
               {!preActivation && valid && availFree && (
                 <p className="fineprint">
                   Step 1 (Reserve) puts a sealed code on the chain: nobody can see which ticker you chose, and the code is tied to your address, so a copy of it is
-                  useless to anyone else. When it has 1 confirmation, step 2 (Publish) shows the name and
+                  useless to anyone else. When it has {PUBLISH_MIN_CONFIRMATIONS} confirmations, step 2 (Publish) shows the name and
                   pays the {fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee. The first valid publish of {ticker} claims it; a name created by someone else before your
                   publish cannot be taken over.
                 </p>
@@ -452,7 +470,7 @@ export default function CreatePage({ params, navigate }) {
               <FeeSelector fee={revealFee} disabled={cr.busy} />
               <p className="fineprint">
                 Publishing shows {rec.ticker} in the mempool until it confirms, so the fee defaults to Fast: a slow publish gives others time to try to create the same
-                name first.
+                name first. Others may have reserved {rec.ticker} too — only the first publish to confirm gets it, and a later one still pays its fees.
               </p>
               <button className="btn btn-primary btn-lg" type="button" onClick={onPublish} disabled={!canPublish}>
                 {cr.busy && cr.op?.kind === "publish" ? "Working…" : `Step 2 · Publish ${rec.ticker}`}
@@ -470,6 +488,7 @@ export default function CreatePage({ params, navigate }) {
               idle={{ indexerOk, preActivation, valid, availState, typed, sync, fee, feeRate, assetSafe: walletState.assetSafe }}
               revealRate={revealRate}
               revealFee={revealFee}
+              indexed={sync.indexed ?? tipNow}
               onRestart={(t) => {
                 // Start again with a NEW reservation (a new sealed code) of the same name.
                 cr.abandon();
@@ -506,7 +525,7 @@ export default function CreatePage({ params, navigate }) {
 function AvailHelp({ availState, ticker, typed, valid, avail, sync }) {
   if (availState === "reserved") return <>Reserved by you — finish step 2 below.</>;
   if (availState === "reserved-dead") return <>This reservation can no longer be published — see below.</>;
-  if (!typed) return <>1–8 characters, A–Z and 0–9. The first valid publish claims the name forever.</>;
+  if (!typed) return <>1–8 characters, A–Z and 0–9. The first valid publish claims the name.</>;
   if (!valid) return <>Tickers are 1–8 characters, A–Z and 0–9.</>;
   switch (availState) {
     case "checking":
@@ -549,12 +568,17 @@ function ledStatesFor(phase, op, error, finished) {
     case "reserve-pending":
     case "reserve-unseen":
     case "recording":
+    case "settling":
       s = ["ok", "busy", "idle", "idle"];
       break;
     case "ready":
       s = ["ok", "ok", "idle", "idle"];
       break;
+    case "taken-tentative":
+      s = ["ok", "ok", "busy", "idle"];
+      break;
     case "taken":
+    case "closing":
     case "expired":
     case "invalid":
     case "carrier-spent":
@@ -604,9 +628,10 @@ function Steps({ cr, rec, phase, tipNow, revealFee, fees, connected }) {
         <a href={blockUrl(c.height)} target="_blank" rel="noopener noreferrer" className="mono">
           #{fmtInt(c.height)}
         </a>
+        {t && !t.settled ? ` · ${t.confirmations} of ${PUBLISH_MIN_CONFIRMATIONS} confirmations` : ""}
       </>
     ) : (
-      "waiting for 1 confirmation"
+      `waiting for ${PUBLISH_MIN_CONFIRMATIONS} confirmations`
     );
   const step2 = r?.unseenAt && !Number.isInteger(r.height)
     ? "not seen by the indexer's node for a few minutes — it may still confirm; this page keeps checking"
@@ -616,11 +641,13 @@ function Steps({ cr, rec, phase, tipNow, revealFee, fees, connected }) {
       : "sent — waiting for a block"
     : phase === "ready"
       ? "ready — press Publish"
-      : phase === "recording"
-        ? "opens when the indexer has recorded step 1"
-        : DEAD_END_PHASES.has(phase)
-          ? "not possible (see below)"
-          : "opens 1 block after step 1 confirms";
+      : phase === "settling" && t
+        ? `opens at step 1's ${PUBLISH_MIN_CONFIRMATIONS === 2 ? "2nd" : `${PUBLISH_MIN_CONFIRMATIONS}th`} confirmation (block #${fmtInt(t.publishFrom)})`
+        : phase === "recording"
+          ? "opens when the indexer has recorded step 1"
+          : DEAD_END_PHASES.has(phase)
+            ? "not possible (see below)"
+            : `opens when step 1 has ${PUBLISH_MIN_CONFIRMATIONS} confirmations`;
   const warnExpiry = t && !t.expired && t.blocksLeft <= EXPIRY_WARN_BLOCKS;
   return (
     <div className="cr-steps" role="group" aria-label="Deploy steps">
@@ -659,13 +686,21 @@ function Steps({ cr, rec, phase, tipNow, revealFee, fees, connected }) {
               </>
             )}
           </div>
-          {r?.sentAt && !Number.isInteger(r.height) && <SpeedUp cr={cr} step="reveal" fees={fees} />}
+          {phase !== "publish-pending-taken" && publishMissedBlock(r, tipNow) && (
+            <p className="notice" role="alert">
+              Your publish missed block #{fmtInt(r.sentTip + 1)}{tipNow > r.sentTip + 1 ? ` and ${tipNow - r.sentTip - 1} more` : ""}. {rec.ticker} is visible in the mempool now, and every
+              block it waits gives someone else time to reserve it and publish first — speed it up.
+            </p>
+          )}
+          {/* never for a publish that is already beaten: speeding it up only pays more for nothing */}
+          {r?.sentAt && !Number.isInteger(r.height) && phase !== "publish-pending-taken" && <SpeedUp cr={cr} step="reveal" fees={fees} />}
         </div>
       </div>
       {t && !r?.sentAt && !DEAD_END_PHASES.has(phase) && (
         <p className={`cr-window${warnExpiry || t.expired ? " warn" : ""}`}>
           {expiryText(t)}
           {Number.isInteger(tipNow) && !t.expired ? ` Now at block #${fmtInt(tipNow)}.` : ""}
+          {warnExpiry && !t.expired ? " Publish soon: the later it goes out, the more a slow block or a chain reorganization can push it past the window." : ""}
         </p>
       )}
       {!r?.sentAt && !DEAD_END_PHASES.has(phase) && (
@@ -681,11 +716,17 @@ function Steps({ cr, rec, phase, tipNow, revealFee, fees, connected }) {
 
 /**
  * "Speed up" for a pending step: the same transaction with a higher fee taken
- * from its change (replace-by-fee). The new rate is the indexer's fast
- * estimate, or the lowest rate a replacement may use when that is higher.
+ * from its change (replace-by-fee). The suggested rate is the Fast estimate,
+ * or the lowest rate a replacement may use when that is higher; the user may
+ * enter a rate of their own (in a rush the estimates lag), and one above the
+ * high-fee threshold is confirmed before it can be signed.
  */
 function SpeedUp({ cr, step, fees }) {
+  const inputId = useId();
   const [open, setOpen] = useState(false);
+  // A rate of the user's own ("" = the suggested one); a high one is confirmed once, for that rate.
+  const [customText, setCustomText] = useState("");
+  const [ackRate, setAckRate] = useState(null);
   const s = cr.rec?.[step];
   const floor = useMemo(() => {
     try {
@@ -695,11 +736,40 @@ function SpeedUp({ cr, step, fees }) {
     }
   }, [s?.psbt, fees?.incrementalrelayfee]);
   const fast = Number(fees?.fastestFee) || 0;
-  const rate = floor ? Math.max(fast, floor) : null;
+  const suggested = floor ? Math.max(fast, floor) : null;
+  const custom = customText.trim() === "" ? null : clampCustomFee(customText);
+  const rate = custom ? custom.value : suggested;
+  // A typo here costs real sats: above the usual threshold the rate is confirmed first.
+  const high = rate !== null && rate > (floor ?? 0) && needsHighFeeAck(rate, fees);
   const quote = open && rate ? cr.speedUpQuote(step, rate) : null;
   const busyHere = cr.op?.kind === "speedup" && cr.op.step === step;
   const err = cr.error?.kind === "speedup" && cr.error.step === step ? cr.error.message : null;
+  const close = () => {
+    setOpen(false);
+    setCustomText("");
+    setAckRate(null);
+  };
   if (!s?.psbt) return null;
+  const rateInput = (
+    <span className="cr-speedup-rate">
+      <label htmlFor={inputId}>Rate</label>
+      <input
+        id={inputId}
+        className={`input mono${custom?.error ? " invalid" : ""}`}
+        type="text"
+        inputMode="decimal"
+        pattern="[0-9]+([.][0-9]{0,2})?"
+        placeholder={suggested ? String(suggested) : "sat/vB"}
+        value={customText}
+        onChange={(e) => setCustomText(e.target.value)}
+        disabled={cr.busy}
+        autoComplete="off"
+        spellCheck={false}
+        aria-invalid={!!custom?.error}
+      />
+      <span className="unit">sat/vB · 1–{MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")}</span>
+    </span>
+  );
   return (
     <div className="cr-speedup">
       {!open ? (
@@ -710,29 +780,39 @@ function SpeedUp({ cr, step, fees }) {
         <>
           <span>
             New fee <span className="mono">{fmtInt(quote.feeSats)} sats</span> @ {quote.feeRateSatVb} sat/vB (now {fmtInt(quote.oldFeeSats)} sats @ {quote.oldFeeRateSatVb} sat/vB). The
-            extra fee comes from your change; everything else stays the same.
+            extra fee comes from your change; everything else stays the same. Leave the rate empty for the suggested {suggested} sat/vB, or enter your own.
           </span>
+          {rateInput}
+          {high && ackRate !== rate && (
+            <span className="err" role="alert">
+              {rate.toLocaleString("en-US")} sat/vB is high{fast ? ` — the fastest estimate is ${fast} sat/vB` : ""}. A typo here costs real sats.{" "}
+              <button className="btn btn-sm" type="button" onClick={() => setAckRate(rate)} disabled={cr.busy}>
+                Use {rate.toLocaleString("en-US")} sat/vB
+              </button>
+            </span>
+          )}
           <span className="cr-speedup-actions">
             <button
               className="btn btn-sm btn-primary"
               type="button"
-              disabled={cr.busy}
+              disabled={cr.busy || (high && ackRate !== rate)}
               onClick={async () => {
                 await cr.speedUp(step, rate);
-                setOpen(false);
+                close();
               }}
             >
               {busyHere ? (cr.op.phase === "signing" ? "Confirm in wallet…" : "Working…") : "Sign faster version"}
             </button>
-            <button className="btn btn-sm" type="button" onClick={() => setOpen(false)} disabled={cr.busy}>
+            <button className="btn btn-sm" type="button" onClick={close} disabled={cr.busy}>
               Cancel
             </button>
           </span>
         </>
       ) : (
         <>
-          <span className="err">{quote?.error || "No fee estimate to speed up with right now."}</span>
-          <button className="btn btn-sm" type="button" onClick={() => setOpen(false)}>
+          <span className="err">{custom?.error || quote?.error || "No fee estimate to speed up with right now."}</span>
+          {floor && rateInput}
+          <button className="btn btn-sm" type="button" onClick={close}>
             Close
           </button>
         </>
@@ -747,7 +827,7 @@ function SpeedUp({ cr, step, fees }) {
  * (idle), the in-flight step with its signing detail, the waiting states,
  * the dead ends (taken / expired / …) with Abandon, and the verdict.
  */
-function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, revealFee, onRestart }) {
+function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, revealFee, indexed, onRestart }) {
   const who = providerName || "your wallet";
   const op = cr.op;
   // Abandon asks once, inline (no blocking browser dialog).
@@ -760,8 +840,18 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
     confirming ? (
       <>
         <span className="cr-confirm">
-          Abandon {rec?.ticker}?{phase === "reserve-pending" || phase === "reserve-unseen" ? " Step 1 may still confirm." : ""} Its {fmtInt(DUST_SATS)}-sat output stays in your wallet, but this reservation can no
-          longer publish the name.
+          {phase === "publish-pending-taken" ? (
+            <>
+              Abandon {rec?.ticker}? Your publish is still waiting in the mempool: if it confirms, it is ignored and still pays the {fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee and
+              the network fee. Abandoning only forgets it on this page.
+            </>
+          ) : (
+            <>
+              Abandon {rec?.ticker}?{phase === "reserve-pending" || phase === "reserve-unseen" ? " Step 1 may still confirm." : ""}
+              {phase === "publish-unseen" ? " Step 2 may still confirm — and still count as yours." : ""} Its {fmtInt(DUST_SATS)}-sat output stays in your wallet, but this reservation can no
+              longer publish the name.
+            </>
+          )}
         </span>
         <button
           className="btn btn-sm"
@@ -808,10 +898,14 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
       );
     }
   } else if (finished?.verdict === "registered") {
-    led = "ok";
+    led = finished.provisional ? "busy" : "ok";
+    const at = Number.isInteger(finished.height) ? ` in block #${fmtInt(finished.height)}` : "";
     text = (
       <>
-        Created {finished.ticker} — your publish was the first valid one. <a href={tokenHref(finished.ticker)}>Open {finished.ticker}</a>.
+        Created {finished.ticker}
+        {at} — your publish was the first valid one.
+        {finished.provisional ? ` It is final after ${FINAL_DEPTH} confirmations (about an hour); this page keeps checking and opens the token page then.` : ""}{" "}
+        <a href={tokenHref(finished.ticker)}>Open {finished.ticker}</a>.
       </>
     );
     actions = (
@@ -840,6 +934,7 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
       case "publish-unseen":
         led = "busy";
         text = `Step 2 has not been seen by the indexer's node for a few minutes. It may still confirm; this page keeps checking and opens Publish again if it is gone.`;
+        actions = abandonBtn();
         break;
       case "reserve-unsent":
         led = "busy";
@@ -847,7 +942,7 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
         break;
       case "reserve-pending":
         led = "busy";
-        text = `Step 1 sent — waiting for 1 confirmation. Then step 2 opens. Details are in the Deploy log.`;
+        text = `Step 1 sent — step 2 opens at its ${PUBLISH_MIN_CONFIRMATIONS === 2 ? "2nd" : `${PUBLISH_MIN_CONFIRMATIONS}th`} confirmation. Details are in the Deploy log.`;
         actions = abandonBtn();
         break;
       case "recording":
@@ -862,9 +957,28 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
         else if (cr.rowError) detail = `last availability check failed: ${cr.rowError}`;
         actions = abandonBtn();
         break;
+      case "settling": {
+        led = "busy";
+        const t = cr.timing;
+        text = `Step 1 is confirmed (${t ? `${t.confirmations} of ${PUBLISH_MIN_CONFIRMATIONS}` : "1"} confirmations). Publish opens at block #${t ? fmtInt(t.publishFrom) : "…"}: sent earlier, a chain reorganization could put both steps into one block, where the publish does not count and the reservation is used up.`;
+        actions = abandonBtn();
+        break;
+      }
       case "ready":
         led = "ok";
         text = revealRate ? `Step 1 is confirmed. Publish ${rec.ticker} now — availability is checked again right before it is sent.` : missingFeeHint(revealFee.choice, revealRate, "publish");
+        actions = abandonBtn();
+        break;
+      case "taken-tentative": {
+        led = "busy";
+        const n = rowConfirmations(cr.row, indexed);
+        text = `${rec.ticker} looks taken: another publish of it confirmed${Number.isInteger(n) ? ` (${confirmationsText(n)})` : ""}. That usually stands, but until it has ${FINAL_DEPTH} confirmations a chain reorganization could still change it — wait a few blocks before you abandon this reservation.`;
+        actions = abandonBtn();
+        break;
+      }
+      case "closing":
+        led = "err";
+        text = `Fewer than ${PUBLISH_CUTOFF_BLOCKS} blocks are left before this reservation expires${cr.timing ? ` at block #${fmtInt(cr.timing.expiresAt)}` : ""}. A publish sent now would most likely confirm too late — its fees paid and the name public for nothing — so Publish is closed. Abandon it (the ${fmtInt(DUST_SATS)}-sat output stays in your wallet) and reserve again.`;
         actions = abandonBtn();
         break;
       case "taken":
@@ -902,20 +1016,27 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
         led = "busy";
         text = `Step 2 sent — waiting for a block to confirm the publish of ${rec.ticker}. Details are in the Deploy log.`;
         break;
-      case "publish-pending-taken":
+      case "publish-pending-taken": {
         led = "err";
-        text = `${rec.ticker} was created by someone else while your publish was waiting — yours will be ignored when it confirms (the fees are still paid).`;
+        // Not final yet: a chain reorganization that takes the other publish out lets yours count.
+        const n = rowConfirmations(cr.row, indexed);
+        const tentative = Number.isInteger(n) && n < FINAL_DEPTH ? ` The other publish has ${confirmationsText(n)}: until it has ${FINAL_DEPTH}, a chain reorganization could still take it out, and yours could count.` : "";
+        text = `${rec.ticker} was created by someone else while your publish was waiting — yours will be ignored when it confirms (the fees are still paid).${tentative}`;
         actions = abandonBtn();
         break;
+      }
       case "publish-confirmed":
         led = "busy";
         text = `Step 2 confirmed — checking the registry for ${rec.ticker}.`;
         break;
-      case "taken-after":
+      case "taken-after": {
         led = "err";
-        text = `${rec.ticker} was claimed by another publish that came first — yours was ignored; the ${fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee and the network fees were still paid.`;
+        const n = rowConfirmations(cr.row, indexed);
+        const tentative = Number.isInteger(n) && n < FINAL_DEPTH ? ` (the other publish has ${confirmationsText(n)} — a chain reorganization could still change this)` : "";
+        text = `${rec.ticker} was claimed by another publish that came first — yours was ignored; the ${fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee and the network fees were still paid${tentative}.`;
         actions = doneBtn;
         break;
+      }
       case "refused":
         led = "err";
         text = `The indexer did not register ${rec.ticker} from your publish${cr.commitInfo?.reveal_reason ? `: ${revealReasonText(cr.commitInfo.reveal_reason)}` : ""}. The fees were paid.`;
@@ -959,6 +1080,61 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Created names that are not final yet (settling notes): each says where it
+ * stands, until its block has FINAL_DEPTH confirmations — and plainly when
+ * a chain reorganization changed it.
+ */
+function SettlingNotes({ cr, indexed }) {
+  const notes = (cr.settling || []).filter((n) => n.revealTxid !== cr.finished?.revealTxid || n.verdict !== "provisional");
+  if (!notes.length) return null;
+  return (
+    <div className="status" role="status" aria-live="polite">
+      {notes.map((n) => {
+        const conf = confirmationsAt(n.height, indexed);
+        let led = "busy";
+        let text;
+        let actions = null;
+        if (n.verdict === "changed-taken") {
+          led = "err";
+          text = `A chain reorganization changed this result: ${n.ticker} is now registered to another publish. This page keeps checking until it is final.`;
+        } else if (n.verdict === "changed-missing") {
+          led = "err";
+          text = `A chain reorganization took your publish of ${n.ticker} out of its block — it is not in the registry right now. It usually confirms again within a block or two; this page keeps checking.`;
+          if (!cr.rec) {
+            actions = (
+              <button className="btn btn-sm" type="button" onClick={() => cr.restoreSettling(n.revealTxid)} disabled={cr.busy}>
+                Track the reservation again
+              </button>
+            );
+          }
+        } else {
+          text = `Created ${n.ticker}${Number.isInteger(n.height) ? ` in block #${fmtInt(n.height)}` : ""} — provisional${Number.isInteger(conf) ? `, ${confirmationsText(conf)}` : ""}; final after ${FINAL_DEPTH}.`;
+        }
+        return (
+          <div key={n.revealTxid}>
+            <div className="line">
+              <Led state={led} />
+              <span>
+                {text}{" "}
+                <a href={txUrl(n.revealTxid)} target="_blank" rel="noopener noreferrer" className="mono" title={n.revealTxid}>
+                  {shortTxid(n.revealTxid)}
+                </a>
+              </span>
+            </div>
+            <div className="actions">
+              {actions}
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => cr.dismissSettling(n.revealTxid)}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

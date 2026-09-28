@@ -12,19 +12,24 @@ import { fmtInt, txUrl } from "../lib/format.js";
 import { syncPauseText } from "../lib/sync.js";
 import { YIELD_HIGH, yieldDigit } from "../lib/yield.js";
 import { activationNotice, activationState } from "../lib/activation.js";
-import { mineIdleReason, readyText } from "../lib/statusText.js";
+import { deployWaitText, mineIdleReason, readyText, recentMintRate, tailWarning } from "../lib/statusText.js";
+import { deployDeepEnough } from "../lib/finality.js";
 import { inMempoolCount, isFinished, mineButtonLabel, pendingMineRow } from "../lib/minePending.js";
 import {
   acceptedLine,
+  againAfterReorg,
   blockFoundLine,
+  blockLineKey,
   broadcastingLine,
   buildLine,
   digitLine,
   errorLine,
   feeQuoteLine,
+  finalLine,
   heartbeatLine,
   mempoolLine,
   reconcileLine,
+  reorgLine,
   resumedLine,
   settledYoursLine,
   settlementLine,
@@ -43,6 +48,9 @@ import Led from "./hud/Led.jsx";
 const HEARTBEAT_MS = 60_000;
 const FEED_POLL_MS = 30_000;
 const FEED_MAX_PER_POLL = 5;
+// The settlements feed also gives the recent minting rate for the
+// end-of-supply warning, so it reads a page of this size.
+const FEED_LIMIT = 50;
 const FEE_LOG_MIN_MS = 10 * 60_000;
 
 /**
@@ -74,6 +82,10 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     tokenInfo,
     feeRateSatVb: fee.satVb,
     onSettled: settled,
+    // confirmations are counted on the indexer's applied height; its node's
+    // "unknown" drops nothing while it lags or has no peers
+    tip: sync.indexed,
+    trustUnseen: sync.trustUnseen,
   });
   const { lines, push, clear, meta } = useMinerLog(ticker);
 
@@ -99,7 +111,12 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   // older than the chain: a ticker may already be exhausted in a block it
   // has not applied, and a MINE then pays 546 + fee for 0 (audit usertx-1).
   const lagText = indexerOk ? syncPauseText(sync, "mining") : null;
-  const canMine = connected && indexerOk && !lagText && !busy && !!tokenInfo && !exhausted && !preActivation && !!feeRate;
+  // A brand-new ticker opens to mining at its DEPLOY's 2nd confirmation: a
+  // MINE in the DEPLOY's block is invalid, and one a reorganization puts
+  // ahead of the DEPLOY is too (fees paid for nothing).
+  const deployBlock = Number.isInteger(tokenInfo?.deploy_block) ? tokenInfo.deploy_block : null;
+  const deployTooNew = !!tokenInfo && !deployDeepEnough(sync.indexed, deployBlock);
+  const canMine = connected && indexerOk && !lagText && !busy && !!tokenInfo && !exhausted && !preActivation && !deployTooNew && !!feeRate;
   const waiting = inMempoolCount(pendings);
 
   // Refs so the event effects read the latest state / tip without re-running on every change.
@@ -182,12 +199,20 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   // → its lit confirming block + digit → the indexer's credit (✓ yours) —
   // or dropped. Several can be in flight at once; every line is keyed by
   // its txid (or its block), so the order of events never mixes them up.
-  const loggedRef = useRef(new Map()); // txid → "pending" | "confirmed" | "reconciled" | "dropped"
+  // txid → { stage: "pending" | "confirmed" | "reconciled" | "final" | "dropped", reorgs }.
+  // A chain reorganization that moved a MINE (item.reorgs grew) prints its
+  // line and sends the stage back to "pending", so the new block, digit and
+  // credit print again — their keys carry the block hash and, after a move,
+  // the move's count (againAfterReorg), so none is dropped as a repeat, not
+  // even when the MINE confirms again in the very block it left.
+  const loggedRef = useRef(new Map());
   useEffect(() => {
     loggedRef.current = new Map();
   }, [ticker, wallet.address]);
   useEffect(() => {
     const logged = loggedRef.current;
+    const stageOf = (txid) => logged.get(txid)?.stage;
+    const setStage = (txid, stage, reorgs) => logged.set(txid, { stage, reorgs: reorgs ?? logged.get(txid)?.reorgs ?? 0 });
     for (const item of pendings) {
       const was = logged.get(item.txid);
       if (!was) {
@@ -202,32 +227,42 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
           push(acceptedLine(item.txid));
           push(mempoolLine(Number.isInteger(tip) ? tip + 1 : null, item.txid, Date.now(), { count: inMempoolCount(pendings) }));
         }
-        logged.set(item.txid, "pending");
+        setStage(item.txid, "pending", item.reorgs || 0);
       }
-      const stage = logged.get(item.txid);
-      if (item.phase === "confirmed" && stage === "pending") {
+      if ((item.reorgs || 0) > (logged.get(item.txid)?.reorgs ?? 0)) {
+        push(reorgLine(item, ticker));
+        setStage(item.txid, "pending", item.reorgs || 0);
+      }
+      const stage = stageOf(item.txid);
+      if (item.phase === "confirmed" && (stage === "pending" || stage === "dropped")) {
         // The lit block line is re-appended (`move`) so it sits right before
         // the digit and banner lines even when feed or heartbeat lines landed
         // after the plain "block found" print; its txs/weight come from the
         // tip poll when it already names this block, else from that plain line.
         const tip = tipRef.current;
-        const prev = linesRef.current.find((l) => l.key === `block:${item.blockHeight}`);
-        const stats = tip && tip.height === item.blockHeight ? { tx_count: tip.tx_count, weight: tip.weight } : prev ? { tx_count: prev.tx_count, weight: prev.weight } : {};
+        const prev = linesRef.current.find((l) => l.key === blockLineKey(item.blockHeight, item.blockHash));
+        const stats = tip && tip.height === item.blockHeight && tip.hash === item.blockHash ? { tx_count: tip.tx_count, weight: tip.weight } : prev ? { tx_count: prev.tx_count, weight: prev.weight } : {};
         push(blockFoundLine({ height: item.blockHeight, hash: item.blockHash, ...stats }, { lit: true }), { move: true });
-        push(digitLine(item.blockHash, item.yieldLocal));
-        logged.set(item.txid, "confirmed");
+        push(againAfterReorg(digitLine(item.blockHash, item.yieldLocal), item.reorgs));
+        setStage(item.txid, "confirmed");
       }
       // The ✓ yours banner waits for the indexer's credit: near the cap the
-      // tier and the credit differ (audit mine-1).
-      if (item.phase === "confirmed" && item.reconcile && item.reconcile !== "pending" && logged.get(item.txid) !== "reconciled") {
-        push(settledYoursLine(ticker, item));
-        push(reconcileLine(item));
-        logged.set(item.txid, "reconciled");
+      // tier and the credit differ (audit mine-1). It says "provisional"
+      // until the block is final; the final line follows then.
+      if (item.phase === "confirmed" && item.reconcile && item.reconcile !== "pending" && stageOf(item.txid) === "confirmed") {
+        push(againAfterReorg(settledYoursLine(ticker, item), item.reorgs));
+        push(againAfterReorg(reconcileLine(item), item.reorgs));
+        setStage(item.txid, "reconciled");
       }
-      if (item.phase === "dropped" && stage !== "dropped") {
+      if (item.phase === "confirmed" && item.final && stageOf(item.txid) === "reconciled") {
+        push(againAfterReorg(finalLine(ticker, item), item.reorgs));
+        setStage(item.txid, "final");
+      }
+      if (item.phase === "dropped" && stageOf(item.txid) !== "dropped") {
         push(errorLine(droppedMessage(item.txid, "MINE"), item.txid));
-        logged.set(item.txid, "dropped");
+        setStage(item.txid, "dropped");
       }
+      if (item.phase === "pending" && stageOf(item.txid) === "dropped") setStage(item.txid, "pending");
     }
   }, [pendings, ticker, push]);
 
@@ -254,10 +289,10 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     const prev = prevTipRef.current;
     prevTipRef.current = tipHeight;
     if (prev === null || prev === tipHeight) return;
-    const own = pendingsRef.current.find((x) => x.phase === "confirmed" && x.blockHeight === tipHeight);
+    const own = pendingsRef.current.find((x) => x.phase === "confirmed" && x.blockHeight === tipHeight && (!tipRef.current?.hash || x.blockHash === tipRef.current.hash));
     if (own) {
       const tip = tipRef.current;
-      const existing = linesRef.current.find((l) => l.key === `block:${tipHeight}`);
+      const existing = linesRef.current.find((l) => l.key === blockLineKey(tipHeight, own.blockHash));
       if (existing && existing.lit && !existing.post && tip && (tip.tx_count != null || tip.weight != null)) {
         push(blockFoundLine({ height: tipHeight, hash: own.blockHash, tx_count: tip.tx_count, weight: tip.weight }, { lit: true, at: existing.ts }), { replace: true });
       }
@@ -276,7 +311,11 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   );
 
   // (h) other miners' settlements for this ticker, diffed by txid.
-  const feed = usePoll((s) => indexer.minesFeed({ ticker, limit: 10 }, s), FEED_POLL_MS, [ticker]);
+  const feed = usePoll((s) => indexer.minesFeed({ ticker, limit: FEED_LIMIT }, s), FEED_POLL_MS, [ticker]);
+  // Near the end of the supply: MINEs already queued in the mempool may use
+  // up the rest — said from the recent minting rate the feed shows.
+  const mintRate = useMemo(() => recentMintRate(feed.data?.items, sync.indexed, { limit: FEED_LIMIT }), [feed.data, sync.indexed]);
+  const tailText = !exhausted && !nearCap && remaining !== null ? tailWarning({ ticker, remaining, rate: mintRate }) : null;
   const seenRef = useRef({ ticker: null, txids: new Set() });
   useEffect(() => {
     const items = feed.data?.items;
@@ -338,6 +377,8 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
           the network fee are paid either way.
         </div>
       )}
+      {tailText && !preActivation && <div className="notice">{tailText}</div>}
+      {deployTooNew && Number.isInteger(sync.indexed) && !exhausted && !preActivation && <div className="notice">{deployWaitText(ticker, deployBlock)}</div>}
       {lagText && !exhausted && !preActivation && <div className="notice">{lagText} The remaining supply shown may already be gone.</div>}
       {preActivation && <div className="notice">{activationNotice(tipNow, "Mining")}</div>}
 
@@ -360,6 +401,8 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
         exhausted={exhausted}
         preActivation={preActivation}
         ticker={ticker}
+        deployBlock={deployBlock}
+        deployTooNew={deployTooNew}
       />
 
       <PendingMines pendings={pendings} ticker={ticker} onDismiss={dismissMine} onClearFinished={clearFinished} />
@@ -415,7 +458,7 @@ function PendingMines({ pendings, ticker, onDismiss, onClearFinished }) {
 }
 
 /** One-line status above the terminal: why MINE is off (or Ready), the in-flight phases, and the error with its Reset. */
-function StatusLine({ flow, waiting, wallet, onReset, indexerOk, lagText, fee, feeRate, exhausted, preActivation, ticker }) {
+function StatusLine({ flow, waiting, wallet, onReset, indexerOk, lagText, fee, feeRate, exhausted, preActivation, ticker, deployBlock, deployTooNew }) {
   let led = "idle";
   let text;
   let detail = null;
@@ -453,7 +496,7 @@ function StatusLine({ flow, waiting, wallet, onReset, indexerOk, lagText, fee, f
       );
       break;
     default: {
-      const reason = mineIdleReason({ connected: wallet.status === "connected", indexerOk, preActivation, exhausted, lagText, ticker });
+      const reason = mineIdleReason({ connected: wallet.status === "connected", indexerOk, preActivation, exhausted, lagText, ticker, deployBlock, deployTooNew });
       if (reason) text = reason;
       else if (!feeRate) text = missingFeeHint(fee.choice, feeRate, "mine", { awaitingAck: !!fee.highFee?.pending });
       else if (waiting) {

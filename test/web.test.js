@@ -196,6 +196,9 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   const stale = served.replace(/\| `SNAPSHOT_VERSION` \| \d+ \|/, "| `SNAPSHOT_VERSION` | 15 |");
   assert.deepEqual(specConstantMismatches(stale, payloads), [`SNAPSHOT_VERSION: spec 15, code ${payloads.SNAPSHOT_VERSION}`]);
   assert.deepEqual(specConstantMismatches(served, { ...payloads, DEPLOY_PROTOCOL_FEE_SATS: 546 }), ["DEPLOY_PROTOCOL_FEE_SATS: spec 5460, code 546"]);
+  assert.equal(payloads.FINAL_DEPTH, 6, "the finality depth is checked like every §1 constant");
+  assert.deepEqual(specConstantMismatches(served, { ...payloads, FINAL_DEPTH: 3 }), ["FINAL_DEPTH: spec 6, code 3"]);
+  assert.deepEqual(specConstantMismatches(served.replace(/\| `FINAL_DEPTH` \| 6 \|/, "| `FINAL_DEPTH` | 12 |"), payloads), ["FINAL_DEPTH: spec 12, code 6"], "a spec edit alone fails too");
   assert.throws(() => parseSpecConstants("# no constants"), /constants section/);
   console.log("spec constants: the served spec's §1 table matches payloads.js; a drifted constant fails the build");
 }

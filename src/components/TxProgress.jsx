@@ -1,4 +1,5 @@
 import { fmtInt, txUrl, shortTxid } from "../lib/format.js";
+import { finalityText } from "../lib/finality.js";
 import { MIN_FEE_INPUT_SATS_UNSAFE } from "../lib/psbt.js";
 import { isMobileBrowser } from "../lib/wallet.js";
 import { useApp } from "../context.js";
@@ -31,10 +32,22 @@ export function SpentInputs({ inputs, assetSafe }) {
   );
 }
 
+/** "Its block was replaced by a chain reorganization — …" for a tx useTxStatus saw move, or null. */
+export function reorgNote(status) {
+  if (!status?.reorged) return null;
+  return status.backInMempool
+    ? "Its block was replaced by a chain reorganization: it is back in the mempool and confirms again in a new block."
+    : status.confirmed
+      ? "A chain reorganization moved it to another block — the block below is the one that counts now."
+      : null;
+}
+
 /**
  * One status line for every sign-and-broadcast flow (buy / sell / split /
- * cancel / create). `flow` = { phase, txid, error, feeSats, detail, inputs, assetSafe } with
- * phase ∈ idle | verifying | building | signing | broadcasting | pending | confirmed | error.
+ * cancel / create). `flow` = { phase, txid, error, note, feeSats, detail, inputs, assetSafe } with
+ * phase ∈ idle | verifying | building | signing | broadcasting | pending | unseen | confirmed | error.
+ * `status` (useTxStatus) adds the confirmation depth — a confirmed result is
+ * provisional until FINAL_DEPTH — and any chain reorganization it saw.
  */
 export default function TxProgress({ flow, status, labels = {}, onReset, idleText }) {
   let cls = "status";
@@ -55,7 +68,7 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
       break;
     case "building":
       cls += " s-busy";
-      text = labels.building || "Building transaction — selecting fee inputs, laying out outputs.";
+      text = flow.waitNote || labels.building || "Building transaction — selecting fee inputs, laying out outputs.";
       break;
     case "signing":
       cls += " s-busy";
@@ -80,17 +93,39 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
         <>
           tx {txLink}
           {status?.pollError ? ` · last check failed: ${status.pollError}` : ""}
+          {reorgNote(status) ? ` · ${reorgNote(status)}` : ""}
         </>
       );
       break;
-    case "confirmed":
-      cls += " s-ok";
-      text = labels.confirmed || "Confirmed.";
+    case "unseen":
+      cls += " s-busy";
+      // After an hour unseen the page stops asking: say so instead of "keeps checking".
+      text = status?.watchEnded
+        ? "Not seen by the indexer's node for over an hour — this page no longer checks it. Look at your Portfolio before sending anything again."
+        : labels.unseen || flow.note || "Not seen by the indexer's node for a while — it may still confirm; this page keeps checking.";
+      detail = (
+        <>
+          tx {txLink}
+          {status?.pollError ? ` · last check failed: ${status.pollError}` : ""}
+        </>
+      );
+      actions = status?.watchEnded && onReset && (
+        <button className="btn btn-sm" type="button" onClick={onReset}>
+          Done
+        </button>
+      );
+      break;
+    case "confirmed": {
+      const fin = finalityText(status?.confirmations);
+      cls += status?.final ? " s-ok" : " s-busy";
+      text = (status?.final && labels.final) || labels.confirmed || "Confirmed.";
       detail = (
         <>
           tx {txLink}
           {status?.block_height ? ` · block ${fmtInt(status.block_height)}` : ""}
+          {fin ? ` · ${fin}` : ""}
           {flow.detail ? ` · ${flow.detail}` : ""}
+          {reorgNote(status) ? ` · ${reorgNote(status)}` : ""}
         </>
       );
       actions = onReset && (
@@ -99,6 +134,7 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
         </button>
       );
       break;
+    }
     case "error":
       cls += " s-err";
       text = flow.error || "Failed.";

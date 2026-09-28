@@ -9,7 +9,7 @@ import { fundingMessage, isFundingError } from "../src/lib/funding.js";
 import { insufficientFundsError, noSpendableError, p2trAddressOfXOnly } from "../src/lib/psbt.js";
 import { mineIdleReason, readyText } from "../src/lib/statusText.js";
 import { syncRetryText, syncStateOf } from "../src/lib/sync.js";
-import { createTxRecordStore, ownPendingSpendOf, parseTxRecords, trimRecords, TXREC_MAX } from "../src/lib/txrecords.js";
+import { createTxRecordStore, ownPendingSpendOf, parseTxRecords, replacedOwnSpendOf, trimRecords, TXREC_MAX } from "../src/lib/txrecords.js";
 import { resumeMineState } from "../src/hooks/useMine.js";
 import { afterConnectFailure } from "../src/hooks/useWallet.js";
 import { deployResumedLine, deployUntrackedLine, resumeDeployState } from "../src/lib/deploylog.js";
@@ -21,7 +21,7 @@ import { indexerErrorText, isIndexerOffline } from "../src/lib/errors.js";
 import { MAX_ERROR_TEXT, serverErrorText } from "../src/lib/httpError.js";
 import { orderHttpError } from "../src/lib/indexer.js";
 import { hashRouteForPath } from "../src/lib/canonicalHost.js";
-import { fmtCandleTime, fmtTimeTick, listingRefusalText, parseUnitInput, splitAmountError } from "../src/lib/market.js";
+import { BOOK_NOT_SAVED_TEXT, fmtCandleTime, fmtTimeTick, listingRefusalText, parseUnitInput, splitAmountError } from "../src/lib/market.js";
 import { EXPECTED_YIELD, expectedYieldCapped } from "../src/lib/yield.js";
 import { marketClosedNotice, mintedOutFlipNotice } from "../src/lib/tokenTabs.js";
 import { MAX_UNIT_PRICE_SATS, buildListingPsbt, maxPriceSats } from "../src/lib/swap.js";
@@ -198,7 +198,14 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(ownPendingSpendOf(own, `${TX("7")}:1`, null).txid, TX("f"), "matched by input before the indexer marks it filling");
   assert.equal(ownPendingSpendOf(own, `${TX("8")}:0`, TX("f")).txid, TX("f"), "matched by the order's pending_spend_txid");
   assert.equal(ownPendingSpendOf(own, `${TX("8")}:0`, TX("d")), null, "someone else's fill");
-  assert.equal(ownPendingSpendOf([{ ...own[0], confirmed: true }], `${TX("7")}:1`, TX("f")), null, "a confirmed one no longer pends");
+  // audit (withdrawal replaced by a fill): the indexer names ANOTHER spend of an outpoint my record spends —
+  // my withdrawal was replaced; it is not "your withdrawal is pending" any more
+  assert.equal(ownPendingSpendOf(own, `${TX("7")}:1`, TX("d")), null, "the outpoint is in my record, but the named spend is someone else's");
+  assert.equal(replacedOwnSpendOf(own, `${TX("7")}:1`, TX("d")).txid, TX("f"), "…my withdrawal was replaced");
+  assert.equal(replacedOwnSpendOf(own, `${TX("7")}:1`, TX("f")), null, "the named spend is mine: not replaced");
+  assert.equal(replacedOwnSpendOf(own, `${TX("7")}:1`, null), null, "nothing named yet");
+  assert.equal(ownPendingSpendOf([{ ...own[0], confirmed: true }], `${TX("7")}:1`, null), null, "a confirmed one no longer pends by its inputs");
+  assert.equal(ownPendingSpendOf([{ ...own[0], confirmed: true }], `${TX("7")}:1`, TX("f")).txid, TX("f"), "…but when the indexer names it in the mempool again (a chain reorganization), it is mine");
   assert.equal(ownPendingSpendOf([{ ...own[0], kind: "fill" }], `${TX("7")}:1`, null), null, "an own FILL (buying) is not a withdrawal");
   console.log("txrecords: confirmed MINEs resume, DEPLOYs resume, trim keeps unconfirmed records, own withdrawals are recognised");
 }
@@ -257,10 +264,11 @@ const ADDR = MOCK_WALLET.address;
 // ---- mine-3: the tab stays put when a token flips to minted out ------------------------------------------------------
 {
   const minting = { ticker: "LUCKY", minted: 20_999_900, supply: 21_000_000 };
-  const out = { ...minting, minted: 21_000_000, minted_out: true };
-  assert.equal(mintedOutFlipNotice({ tab: "mine", mintedOut: false }, out), "LUCKY is now fully minted — its market is open.");
-  assert.equal(mintedOutFlipNotice({ tab: "mine", mintedOut: false }, minting), null);
-  assert.equal(mintedOutFlipNotice({ tab: "market", mintedOut: true }, out), null, "opened minted out: nothing flipped");
+  const out = { ...minting, minted: 21_000_000, minted_out: true, market_open: true };
+  assert.equal(mintedOutFlipNotice({ tab: "mine", marketOpen: false }, out), "LUCKY is fully minted — its market is open.");
+  assert.equal(mintedOutFlipNotice({ tab: "mine", marketOpen: false }, minting), null);
+  assert.equal(mintedOutFlipNotice({ tab: "market", marketOpen: true }, out), null, "opened with the market open: nothing flipped");
+  assert.equal(mintedOutFlipNotice({ tab: "mine", marketOpen: false }, { ...out, market_open: false }), null, "minted out, but its market not open yet: no notice");
   assert.equal(mintedOutFlipNotice(null, out), null);
   console.log("token tabs: a mid-visit flip is a notice, not a navigation");
 }
@@ -342,6 +350,11 @@ const ADDR = MOCK_WALLET.address;
   assert.match(listingRefusalText(orderHttpError("/orders", 409, '{"error":"outpoint has a pending spend in the mempool (abc)"}')), /already in the mempool/);
   assert.match(listingRefusalText(orderHttpError("/orders", 400, '{"error":"price_sats must be in [546, 100000000]"}')), /at most 1 BTC per whole token/);
   assert.equal(listingRefusalText(new Error("Signature declined in the wallet.")), null, "a wallet error keeps its own text");
+  // The book could not save the listing: not confirmed, safe to post again, still fillable until withdrawn.
+  const unsaved = listingRefusalText(orderHttpError("/orders", 503, '{"error":"the order book cannot be saved right now; retry shortly"}'));
+  assert.equal(unsaved, BOOK_NOT_SAVED_TEXT);
+  assert.match(unsaved, /may not be listed.*can be filled at your price.*posting the same listing again is safe/);
+  assert.equal(listingRefusalText(orderHttpError("/orders", 503, "")), null, "a busy indexer (503 without that sentence) keeps its own text");
   console.log("errors: the indexer offline in one sentence; order-book refusals as the book's own words");
 }
 

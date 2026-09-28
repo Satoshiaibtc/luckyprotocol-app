@@ -16,7 +16,8 @@ export default function FeeSelector({ fee, disabled = false }) {
     <div className="fee-sel">
       <div className="fee-sel-head">
         <span className="label">Fee rate</span>
-        {!fee.feesAvailable && !overCap && <span className="fee-sel-note">No estimates from the indexer — presets off, Custom still works.</span>}
+        {!fee.feesAvailable && !overCap && <span className="fee-sel-note">No fee estimates from the indexer or mempool.space — presets off, Custom still works.</span>}
+        {fee.feesAvailable && fee.sourceNote && <span className="fee-sel-note">{fee.sourceNote}</span>}
         {overCap && <span className="fee-sel-note">Fee estimate unavailable — the indexer reports rates above the {MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB safety cap; they are rejected, not clamped. Custom still works.</span>}
       </div>
       <div className="fee-seg" role="radiogroup" aria-label="Fee rate">

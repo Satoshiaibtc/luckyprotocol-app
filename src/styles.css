@@ -5491,6 +5491,22 @@ button.wallet-addr:focus-visible {
   gap: 8px;
   flex-wrap: wrap;
 }
+.cr-speedup-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cr-speedup-rate .input {
+  width: 96px;
+}
+.cr-speedup-rate .input.invalid {
+  border-color: var(--danger);
+}
+.cr-speedup-rate .unit {
+  font-family: var(--mono);
+  font-size: 12px;
+}
 .cr-confirm {
   flex: 1 1 100%;
   font-size: 13px;

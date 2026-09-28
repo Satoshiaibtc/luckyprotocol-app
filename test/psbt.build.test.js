@@ -31,6 +31,7 @@ import {
   COMMIT_CARRIER_VOUT,
   COMMIT_CHANGE_VOUT,
   REVEAL_CHANGE_VOUT,
+  REVEAL_CARRIER_SEQUENCE,
   RBF_SEQUENCE,
   SEND_TO_OUT,
   SEND_CHANGE_OUT,
@@ -407,7 +408,11 @@ assert.throws(
     assert.equal(ins[0].witnessUtxo.amount, 546n, "the carrier is spent at its exact value");
     assert.equal(ins.filter((i) => hex.encode(i.txid) === CARRIER.txid).length, 1, "the carrier is spent once (never also as a fee input)");
     for (const inp of ins.slice(1)) assert.ok(inp.witnessUtxo.amount > 546n && hex.encode(inp.txid) !== T(3), `REVEAL ${label}: fee inputs are plain BTC`);
-    for (const inp of ins) assert.equal(inp.sequence, RBF_SEQUENCE);
+    // input 0: a BIP68 relative lock of one block (version 2), so the REVEAL can never share its COMMIT's block
+    assert.equal(REVEAL_CARRIER_SEQUENCE, 1);
+    assert.equal(ins[0].sequence, REVEAL_CARRIER_SEQUENCE, `REVEAL ${label}: the carrier input has nSequence 1`);
+    assert.equal(tx.version, 2, "BIP68 needs a version-2 transaction");
+    for (const inp of ins.slice(1)) assert.equal(inp.sequence, RBF_SEQUENCE);
     assert.equal(tx.lockTime, PROTOCOL_LOCKTIME);
     assert.equal(outs.length, 4);
     assert.equal(addrOf(outs[0].script), address, `REVEAL ${label}: vout0 proof → deployer`);
@@ -418,14 +423,15 @@ assert.throws(
     assert.equal(r.changeVout, REVEAL_CHANGE_VOUT);
     assert.equal(addrOf(outs[3].script), address);
     assert.equal(ins.reduce((a, i) => a + i.witnessUtxo.amount, 0n) - outs.reduce((a, o) => a + o.amount, 0n), BigInt(r.feeSats));
-    assert.equal(expectPsbtPayload(r.psbtHex, { op: "DEPLOY", ticker: "NEWTKN", salt: SALT, input0: CARRIER, lockTime: PROTOCOL_LOCKTIME }).salt, SALT);
+    assert.equal(expectPsbtPayload(r.psbtHex, { op: "DEPLOY", ticker: "NEWTKN", salt: SALT, input0: CARRIER, input0Sequence: REVEAL_CARRIER_SEQUENCE, lockTime: PROTOCOL_LOCKTIME }).salt, SALT);
+    assert.throws(() => expectPsbtPayload(r.psbtHex, { op: "DEPLOY", input0Sequence: RBF_SEQUENCE }), /input 0 has nSequence 0x00000001, expected 0xfffffffd/);
     assert.throws(() => expectPsbtPayload(r.psbtHex, { op: "DEPLOY", salt: "f".repeat(32) }), /salt/);
     assert.throws(() => expectPsbtPayload(r.psbtHex, { op: "DEPLOY", input0: { txid: T(4), vout: 2 } }), /input 0 is/);
   }
   assert.throws(() => buildRevealPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "NEWTKN", salt: SALT, carrier: { ...CARRIER, vout: 1 } }), /vout 0/);
   assert.throws(() => buildRevealPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "lucky", salt: SALT, carrier: CARRIER }), /A-Z 0-9/);
   assert.throws(() => buildRevealPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "NEWTKN", salt: "00", carrier: CARRIER }), /32 lowercase hex/);
-  console.log("psbt REVEAL: carrier as input 0, proof / 5,460 fee / DEPLOY|T|SALT / change, nLockTime 969,299");
+  console.log("psbt REVEAL: carrier as input 0 (nSequence 1: never in its COMMIT's block), proof / 5,460 fee / DEPLOY|T|SALT / change, nLockTime 969,299");
 }
 
 // ---- nLockTime + RBF on MINE and SEND too (decision B) ---------------------------------------------
@@ -471,6 +477,8 @@ assert.throws(
   assert.equal(psbtFeeSats(q.psbtHex), q.feeSats);
   assert.equal(after.tx.lockTime, PROTOCOL_LOCKTIME);
   assert.deepEqual(after.ins.map((i) => `${hex.encode(i.txid)}:${i.index}:${i.sequence}`), before.ins.map((i) => `${hex.encode(i.txid)}:${i.index}:${i.sequence}`), "same inputs, same sequences");
+  assert.equal(after.ins[0].sequence, REVEAL_CARRIER_SEQUENCE, "a faster REVEAL keeps the carrier's relative lock");
+  assert.equal(expectPsbtPayload(q.psbtHex, { op: "DEPLOY", salt: SALT, input0Sequence: REVEAL_CARRIER_SEQUENCE }).salt, SALT);
   after.outs.forEach((o, i) => {
     assert.equal(hex.encode(o.script), hex.encode(before.outs[i].script), `output ${i}: same script`);
     if (i !== r.changeVout) assert.equal(o.amount, before.outs[i].amount, `output ${i}: same amount`);

@@ -4,9 +4,9 @@
 // Every chain-derived read goes through the indexer. There is NO
 // third-party fallback: if the indexer is unreachable, reads throw and the
 // UI shows the offline state. mempool.space is an explorer LINK target
-// and — only for the buyer-side second check of a listing's outpoint
-// (audit M-12, src/lib/secondSource.js) — a read-only second source; this
-// module never talks to it.
+// and a read-only second source: the buyer-side check of a listing's
+// outpoint (audit M-12, src/lib/secondSource.js), plus the network tip and
+// fee rates (src/lib/network.js). This module never talks to it.
 //
 // Base URL: `VITE_INDEXER_URL` at build time (default http://127.0.0.1:8765),
 // validated by `_isAllowedIndexerUrl` (https, or http to loopback).
@@ -50,6 +50,7 @@ import { serverErrorText } from "./httpError.js";
 import { blockStats } from "./blocks.js";
 import { DAYS_DEFAULT, DAYS_MAX, DIGITS_DEFAULT, DIGITS_MAX } from "./digits.js";
 import { MAX_COMMIT_AGE, MIN_COMMIT_AGE } from "./payloads.js";
+import { MARKET_OPEN_DELAY } from "./finality.js";
 
 export const DEFAULT_INDEXER_URL = "http://127.0.0.1:8765";
 // `import.meta.env` is Vite's; plain Node (the sanitizer tests) has none.
@@ -303,7 +304,9 @@ function _sanitizeBtcUtxo(u) {
 }
 
 // MineView (indexer API): identity fields must be well-formed; yield clamps to the
-// supply cap; status is coerced to the two documented values.
+// supply cap; status is coerced to the two documented values. `confirmations`
+// / `final` are the indexer's depth of the row's block at response time
+// (null when it does not say): a credit is provisional until `final`.
 function _sanitizeMineRow(m) {
   if (!m || typeof m !== "object") return null;
   if (!_TXID_RE.test(String(m.txid || ""))) return null;
@@ -323,6 +326,11 @@ function _sanitizeMineRow(m) {
     status: m.status === "invalid" ? "invalid" : "settled",
     yield_smallest: y,
     cap_exhausted: m.cap_exhausted === true,
+    confirmations: _safeInt(m.confirmations, 1e9),
+    final: typeof m.final === "boolean" ? m.final : null,
+    // the §2.2 rule an invalid MINE failed (not_deployed, deploy_same_block,
+    // fee_missing, vout0_unusable), or null
+    reason: m.status === "invalid" && typeof m.reason === "string" && /^[a-z0-9_]{1,40}$/.test(m.reason) ? m.reason : null,
   };
 }
 
@@ -410,6 +418,9 @@ function _sanitizeOrderRow(o) {
     pending_fee_sats: filling ? _safeInt(o.pending_fee_sats, _MAX_SATS) : null,
     pending_vsize: filling ? _safeInt(o.pending_vsize, 4_000_000) : null,
     pending_feerate: filling ? _safeFloat(o.pending_feerate, 1_000_000) : null,
+    // false while the ticker's market is not open yet (the book then offers
+    // no fill of it); anything but an explicit false is an open market
+    market_open: o.market_open !== false,
     ...(psbt ? { psbt } : {}),
     ...(o.replaced === true ? { replaced: true } : {}),
   };
@@ -452,8 +463,11 @@ function _sanitizeMarket(m) {
     change_pct: _safeSignedFloat(m.change_pct),
     // a count, or a plain flag — either shape is shown as "self-trades excluded"
     self_trades_excluded: typeof excluded === "boolean" ? excluded : _safeInt(excluded, 1e9),
-    // the market gate — only an explicit true opens it
     minted_out: m.minted_out === true,
+    // the market gate: minted out AND the completing block FINAL_DEPTH deep —
+    // only an explicit true opens it
+    market_open: m.market_open === true,
+    market_opens_at_height: _safeInt(m.market_opens_at_height, 1e9),
   };
 }
 
@@ -560,16 +574,24 @@ function _sanitizeTokenRow(t) {
   const holders = _safeInt(t.holders, 1e9);
   const lastTrade = t.last_trade ? _sanitizeTradeRow(t.last_trade) : null;
   // Market gate: `minted_out` is the indexer's own flag (cumulative credited
-  // yield reached the supply — it never comes back down); a row without it
-  // falls back to `minted >= supply`. `minted_out_height` is the block of the
-  // MINE whose credit completed the supply, or null when unknown.
+  // yield reached the supply; only a chain reorganization brings it back
+  // down); a row without it falls back to `minted >= supply`.
+  // `minted_out_height` is the block of the MINE whose credit completed the
+  // supply, or null when unknown. `market_open` is the indexer's gate: minted
+  // out AND that block has FINAL_DEPTH confirmations, from
+  // `market_opens_at_height` on. A row from an indexer that predates the
+  // field keeps the older rule (open when minted out).
   const mintedOut = t.minted_out === true || minted >= supply;
+  const mintedOutHeight = mintedOut ? _safeInt(t.minted_out_height, 1e9) : null;
+  const opensAt = _safeInt(t.market_opens_at_height, 1e9);
   return {
     ticker: t.ticker,
     supply,
     minted,
     minted_out: mintedOut,
-    minted_out_height: mintedOut ? _safeInt(t.minted_out_height, 1e9) : null,
+    minted_out_height: mintedOutHeight,
+    market_open: mintedOut && (typeof t.market_open === "boolean" ? t.market_open : true),
+    market_opens_at_height: mintedOut ? (opensAt ?? (mintedOutHeight !== null ? mintedOutHeight + MARKET_OPEN_DELAY : null)) : null,
     deployer,
     deploy_txid: String(t.deploy_txid).toLowerCase(),
     deploy_block: block,
@@ -603,7 +625,7 @@ function _sanitizeHolderRow(h) {
 // when it does not provide one.
 function _sanitizeTxStatus(txid, s, known = true) {
   if (!s || typeof s !== "object") {
-    return { txid, confirmed: false, seen: false, in_mempool: known ? null : false, block_height: null, block_hash: null, block_time: null };
+    return { txid, confirmed: false, seen: false, in_mempool: known ? null : false, block_height: null, block_hash: null, block_time: null, confirmations: null, final: false };
   }
   const confirmed = s.confirmed === true;
   const inMempool = typeof s.in_mempool === "boolean" ? s.in_mempool : null;
@@ -616,6 +638,10 @@ function _sanitizeTxStatus(txid, s, known = true) {
     block_height: confirmed ? _safeInt(s.block_height, 1e9) : null,
     block_hash: confirmed ? _safeHash(s.block_hash) : null,
     block_time: confirmed ? _safeInt(s.block_time, 1e12) : null,
+    // the depth of the block the indexer recorded for the tx, at response
+    // time (null when it does not say); `final` only when explicitly true
+    confirmations: confirmed ? _safeInt(s.confirmations, 1e9) : null,
+    final: confirmed && s.final === true,
   };
 }
 
@@ -623,9 +649,13 @@ function _sanitizeTxStatus(txid, s, known = true) {
 // absurd one (> 1e6 sat/vB) is dropped here; anything above the
 // MAX_FEE_RATE_SAT_VB safety cap survives as-is so feechoice can REJECT
 // it visibly ("estimate unavailable") instead of clamping (audit L-11).
+// `ok: false` means the node could not estimate and the numbers are floors:
+// they are never used — every tier is null then, like a missing one.
 function _sanitizeFees(f) {
-  const pick = (k) => _safeFloat(f && f[k], 1_000_000);
+  const ok = !(f && f.ok === false);
+  const pick = (k) => (ok ? _safeFloat(f && f[k], 1_000_000) : null);
   return {
+    ok,
     fastestFee: pick("fastestFee"),
     halfHourFee: pick("halfHourFee"),
     hourFee: pick("hourFee"),
@@ -633,7 +663,7 @@ function _sanitizeFees(f) {
     minimumFee: pick("minimumFee"),
     // The node's BIP125 increment (sat/vB), used by the M-9 cancel rule;
     // null when the indexer does not report it (the rule then assumes 1).
-    incrementalrelayfee: pick("incrementalrelayfee"),
+    incrementalrelayfee: _safeFloat(f && f.incrementalrelayfee, 1_000_000),
   };
 }
 
@@ -690,6 +720,18 @@ export async function health(signal) {
     // open orders with a spend already in the mempool (audit M-9); 0 when the indexer predates it
     filling_order_count: _safeInt(env && env.filling_order_count, 1e9) ?? 0,
     last_progress_at: _safeInt(env && env.last_progress_at, 1e12),
+    // unix s of the indexer's last completed poll of its node (null = not reported)
+    last_poll_at: _safeInt(env && env.last_poll_at, 1e12),
+    // the node's peer count, or null when unknown — 0 means it hears no one
+    node_peers: _safeInt(env && env.node_peers, 1e6),
+    // header time of the tip block (unix s), or null
+    tip_time: _safeTime(env && env.tip_time),
+    // a full rebuild / cold scan is running: every answer is incomplete
+    rebuilding: !!(env && env.rebuilding),
+    final_depth: _safeInt(env && env.final_depth, 1_000),
+    // false while the order book cannot save listings (a new one is refused
+    // meanwhile); absent = it can
+    persist_ok: !(env && env.persist_ok === false),
     stalled: !!(env && env.stalled),
     mock: !!(env && env.mock),
   };
@@ -1059,7 +1101,8 @@ export async function ordersByAddress(address, opts = {}, signal) {
  * 400 with a reason when the indexer rejects the listing, 409 when the
  * outpoint is spent / has a pending spend, or when the ticker's market is
  * not open yet (`{ "error": "market opens when TICKER is fully minted …" }`
- * — the token is not minted out).
+ * — not minted out — or `{ "error": "market opens at block N" }` — minted
+ * out, but the block that completed the supply is not FINAL_DEPTH deep).
  */
 export async function postOrder({ psbt, ticker, amount, price_sats }, signal) {
   const hexPsbt = _safeHex(psbt);
@@ -1189,4 +1232,6 @@ export {
   _sanitizeDigits,
   _sanitizeDigitsByDays,
   _sanitizeCommit,
+  _sanitizeMineRow,
+  _sanitizeTxStatus,
 };

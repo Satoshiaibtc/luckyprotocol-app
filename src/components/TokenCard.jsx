@@ -4,7 +4,7 @@ import { fmtCompact, fmtInt, fmtMintedPct, fmtUnit, shortAddr } from "../lib/for
 import { changeSign, fmtChangePct } from "../lib/market.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
-import { isMintedOut } from "../lib/marketBoard.js";
+import { isMarketOpen, isMarketPending } from "../lib/marketBoard.js";
 import { mintedProgressNote } from "../lib/tokenTabs.js";
 
 /**
@@ -16,7 +16,21 @@ import { mintedProgressNote } from "../lib/tokenTabs.js";
  * reachable through its Mine tab).
  */
 function CardActions({ t, preview }) {
-  if (isMintedOut(t)) {
+  if (isMarketPending(t)) {
+    // Minted out, but the block that completed the supply is not deep
+    // enough yet: no market, and mines credit 0 — two notes, no button.
+    return (
+      <div className="token-card-actions">
+        <span className="market-note" title="Supply fully minted — new mines credit 0">
+          Minted out · mines credit 0
+        </span>
+        <span className="market-note" title={mintedProgressNote(t)}>
+          {mintedProgressNote(t).replace(/^Minted out · /, "")}
+        </span>
+      </div>
+    );
+  }
+  if (isMarketOpen(t)) {
     return (
       <div className="token-card-actions">
         <span className="market-note" title="Supply fully minted — new mines credit 0">

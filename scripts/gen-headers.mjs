@@ -15,16 +15,23 @@
 // identicon drawn as inline SVG — token avatars were withdrawn from the
 // protocol (PROTOCOL.md §8), so the indexer serves no images.
 // connect-src lists the indexer named by VITE_INDEXER_URL plus
-// https://mempool.space — the read-only SECOND SOURCE the buy flow
-// consults before a fill is signed (audit M-12, src/lib/secondSource.js:
-// GET /api/tx/<txid>/outspend/<vout> and GET /api/tx/<txid>, nothing but
-// the outpoint in the URL, no headers, no credentials). Nothing else is
-// ever fetched or loaded (fonts are self-hosted). A production build
-// therefore carries no loopback origins; a loopback VITE_INDEXER_URL (a
-// local build pointed at a local indexer) is listed as such. style-src is
-// 'self' without 'unsafe-inline': React writes the few dynamic styles
-// through the CSSOM (element.style), which CSP does not restrict, and
-// there are no <style> elements or style="" attributes in the markup.
+// https://mempool.space, the read-only SECOND SOURCE, never read with
+// headers, credentials or a body:
+//   - the buy flow re-checks a listing's outpoint before a fill is signed
+//     (audit M-12, src/lib/secondSource.js: GET /api/tx/<txid>/outspend/<vout>
+//     and GET /api/tx/<txid>; nothing but the outpoint in the URL);
+//   - every page compares the chain tip (GET /api/blocks/tip/height) with
+//     the indexer's node and reads the recommended fee rates
+//     (GET /api/v1/fees/recommended), each every 2 minutes
+//     (src/lib/network.js). These carry no user data, but mempool.space
+//     sees every visitor's IP address, not only the buyers'.
+// Nothing else is ever fetched or loaded (fonts are self-hosted). A
+// production build therefore carries no loopback origins; a loopback
+// VITE_INDEXER_URL (a local build pointed at a local indexer) is listed
+// as such. style-src is 'self' without 'unsafe-inline': React writes the
+// few dynamic styles through the CSSOM (element.style), which CSP does not
+// restrict, and there are no <style> elements or style="" attributes in
+// the markup.
 //
 // Why the HTML document is served by a Pages Function: Bot Fight Mode's
 // JavaScript Detections inject an inline bootstrap <script> into every HTML
@@ -126,7 +133,7 @@ function originOf(opts) {
 /** The script-src directive; the generated middleware appends its per-response nonce to exactly this. */
 export const SCRIPT_SRC = "script-src 'self'";
 
-/** The buy flow's second source for a listing's outpoint (audit M-12) — connect-src only, never img-src. */
+/** The second source (a listing's outpoint re-check, the network tip, fee rates) — connect-src only, never img-src. */
 export const SECOND_SOURCE_ORIGIN = "https://mempool.space";
 
 /** CSP directives for a build. Pure: (origin, nonce?) → string[]; a nonce extends script-src only. */
@@ -174,8 +181,9 @@ export function buildHeaders(opts = {}) {
     "# scripts or styles), so script-src and style-src are 'self' only, and",
     "# img-src names no remote origin (token pictures are inline SVG). The",
     "# remote origins are the indexer (connect-src, reads only) and",
-    "# https://mempool.space (connect-src only: the buy flow re-checks a",
-    "# listing's outpoint there before signing).",
+    "# https://mempool.space (connect-src only: every page reads the network",
+    "# tip and fee rates there, and the buy flow re-checks a listing's",
+    "# outpoint there before signing).",
     "#",
     "# The HTML document itself is served by functions/_middleware.js (see",
     "# _routes.json), which sets these same headers plus a per-response",

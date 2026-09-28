@@ -47,9 +47,12 @@ const hasExactFee = (outputs, sats) => (outputs || []).some((o) => o.address ===
  *   { op, valid, applied, yieldVout, send: { vout, ticker, amount } | null, residualVout }
  *
  * `residualVout` null = the residual pool burns. MINE: `valid` iff the
- * ticker is deployed, the exact 546-sat fee output exists and vout0 is a
- * real non-OP_RETURN output; the pool → vout0 whether valid or not, burning
- * only when vout0 is missing / an OP_RETURN (§2.2, no fall-back). SEND:
+ * ticker is deployed in an EARLIER block than `height` (`deployBlockOf`),
+ * the exact 546-sat fee output exists and vout0 is a real non-OP_RETURN
+ * output — else `reason` names the first rule it failed (§2.2:
+ * not_deployed, deploy_same_block, fee_missing, vout0_unusable); the pool
+ * → vout0 whether valid or not, burning only when vout0 is missing / an
+ * OP_RETURN (§2.2, no fall-back). SEND:
  * `applied` iff pool ≥ AMT, the fee output exists and vout[TO_OUT] is a
  * real non-OP_RETURN output; the rest → CHANGE_OUT, else the default
  * output (§2.3). COMMIT: `valid` iff vout0 exists, is not an OP_RETURN
@@ -66,7 +69,7 @@ const hasExactFee = (outputs, sats) => (outputs || []).some((o) => o.address ===
  * committer, status: "open" | "invalid" }) or null; `height` is the block
  * the tx confirms in.
  */
-export function routeDecision(d, { pool = {}, isDeployed = () => false, commitAt = () => null, height = null } = {}) {
+export function routeDecision(d, { pool = {}, isDeployed = () => false, deployBlockOf = () => null, commitAt = () => null, height = null } = {}) {
   const outputs = d.outputs || [];
   const p = d.payload;
   if (p && p.op === "COMMIT") {
@@ -92,8 +95,18 @@ export function routeDecision(d, { pool = {}, isDeployed = () => false, commitAt
   }
   if (p && p.op === "MINE") {
     const v0 = usableOut(outputs, 0);
-    const valid = !!v0 && isDeployed(p.ticker) && hasExactFee(outputs, MINE_PROTOCOL_FEE_SATS);
-    return { op: "MINE", valid, applied: valid, yieldVout: valid ? 0 : null, send: null, residualVout: v0 ? 0 : null };
+    const deployBlock = deployBlockOf(p.ticker);
+    const reason = !isDeployed(p.ticker)
+      ? "not_deployed"
+      : Number.isInteger(deployBlock) && Number.isInteger(height) && height <= deployBlock
+        ? "deploy_same_block"
+        : !hasExactFee(outputs, MINE_PROTOCOL_FEE_SATS)
+          ? "fee_missing"
+          : !v0
+            ? "vout0_unusable"
+            : null;
+    const valid = reason === null;
+    return { op: "MINE", valid, applied: valid, reason, yieldVout: valid ? 0 : null, send: null, residualVout: v0 ? 0 : null };
   }
   if (p && p.op === "SEND") {
     const to = usableOut(outputs, p.toOutIdx);

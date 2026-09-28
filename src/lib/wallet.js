@@ -416,13 +416,18 @@ export async function getBalance() {
  * the first transaction (a listing withdrawal undone by the next MINE).
  *
  * The first query of an address makes the indexer scan the UTXO set for
- * it (a minute or two); `onWait({ waitMs, busy, elapsedMs })` fires before
- * each retry so the flow can say so (src/lib/retry.js).
+ * it (a minute or two) — and so does the next query after a chain
+ * reorganization or an indexer restart, which make it scan every address
+ * again. `onWait({ waitMs, busy, elapsedMs, rescan })` fires before each
+ * retry so the flow can say so (src/lib/retry.js); `rescan` is true when
+ * this browser has read the address's UTXOs before, so the wait is not a
+ * first use.
  */
 export async function getBitcoinUtxos(address, { onWait } = {}) {
   const p = need();
   const name = providerName();
-  const onRetry = onWait ? (_n, info) => onWait(info) : undefined;
+  const rescan = scannedBefore(address);
+  const onRetry = onWait ? (_n, info) => onWait({ ...info, rescan }) : undefined;
   let res;
   if (typeof p.getBitcoinUtxos === "function") {
     let raw;
@@ -437,9 +442,10 @@ export async function getBitcoinUtxos(address, { onWait } = {}) {
     } catch (e) {
       throw new Error(
         `Could not confirm your UTXOs with the indexer (${_msg(e)}) — a fee input must be an output the indexer lists as confirmed, so nothing is built until it answers; ` +
-          "the first use of an address makes the indexer scan for it, which can take a few minutes — try again shortly",
+          `${SCAN_NOTE} — try again shortly`,
       );
     }
+    markScanned(address);
     const listed = normalizeUtxoList(raw);
     const { utxos, unconfirmedOutpoints, unlistedOutpoints, mismatchedOutpoints } = intersectConfirmed(listed, rows);
     res = {
@@ -460,10 +466,9 @@ export async function getBitcoinUtxos(address, { onWait } = {}) {
     try {
       rows = await retryWhileSeeding(() => indexer.btcUtxos(address), { onRetry });
     } catch (e) {
-      throw new Error(
-        `Could not read your UTXOs from the indexer (${_msg(e)}) — the first use of an address makes the indexer scan for it, which can take a few minutes; try again shortly`,
-      );
+      throw new Error(`Could not read your UTXOs from the indexer (${_msg(e)}) — ${SCAN_NOTE}; try again shortly`);
     }
+    markScanned(address);
     let utxos = rows.filter((u) => u.confirmed).map(({ txid, vout, sats }) => ({ txid, vout, sats }));
     let assetSafe = false;
     let excludedOutpoints = [];
@@ -484,6 +489,29 @@ export async function getBitcoinUtxos(address, { onWait } = {}) {
   return excludePendingSpends(address, res);
 }
 
+// The indexer scans an address's UTXOs on its first use and again after a
+// chain reorganization or a restart; this browser remembers which addresses
+// it has read before, so a later wait is not called a "first use" (audit:
+// the rescan after every reorganization).
+const SCAN_NOTE = "the indexer scans an address's UTXOs on its first use and again after a chain reorganization, which can take a few minutes";
+const SCANNED_KEY_PREFIX = "lp.scanned.";
+
+function scannedBefore(address) {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(`${SCANNED_KEY_PREFIX}${String(address).toLowerCase()}`) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markScanned(address) {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(`${SCANNED_KEY_PREFIX}${String(address).toLowerCase()}`, "1");
+  } catch {
+    /* no storage — a later wait is simply called a first use */
+  }
+}
+
 /** Sum of the `sats` of the rows in `list` whose outpoint is in `outpoints` and worth more than `floor`. */
 function waitingSatsOf(list, outpoints, floor) {
   const keys = new Set((outpoints || []).map((o) => `${o.txid}:${o.vout}`));
@@ -491,9 +519,11 @@ function waitingSatsOf(list, outpoints, floor) {
 }
 
 /**
- * Drop the inputs of this address's own unconfirmed broadcasts from a
- * `getBitcoinUtxos` result (see txrecords.js). A record whose status
- * cannot be read keeps its inputs excluded (fail closed).
+ * Drop the inputs of this address's own broadcasts from a `getBitcoinUtxos`
+ * result (see txrecords.js): unconfirmed ones, and confirmed ones whose
+ * block is not final yet — a chain reorganization can put such a tx back
+ * in the mempool and its inputs back in the indexer's confirmed view. A
+ * record whose status cannot be read keeps its inputs excluded (fail closed).
  */
 async function excludePendingSpends(address, res) {
   const records = await refreshTxRecords(address, (txid) => indexer.txStatus(txid));
@@ -505,12 +535,12 @@ async function excludePendingSpends(address, res) {
   if (utxos.length === 0 && pendingSpent.length > 0) {
     const keys = new Set(pendingSpent.map(key));
     const ids = records
-      .filter((r) => !r.confirmed && r.inputs.some((k) => keys.has(k)))
+      .filter((r) => r.inputs.some((k) => keys.has(k)))
       .map((r) => `${r.txid.slice(0, 8)}…`)
       .join(", ");
     throw new Error(
-      `Every spendable output of this wallet is an input of a transaction you already broadcast that has not confirmed yet (tx ${ids}). ` +
-        "Spending one again would replace that transaction — wait for it to confirm, then try again.",
+      `Every spendable output of this wallet is an input of a transaction you already broadcast that is not final yet (tx ${ids}). ` +
+        "Spending one again could replace that transaction — wait for it to confirm, then try again.",
     );
   }
   return { ...res, utxos, excludedOutpoints: [...(res.excludedOutpoints || []), ...pendingSpent], pendingSpentOutpoints: pendingSpent };

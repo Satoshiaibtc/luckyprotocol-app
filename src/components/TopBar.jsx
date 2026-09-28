@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useApp } from "../context.js";
 import { fmtInt, shortAddr, walletBalanceText } from "../lib/format.js";
 import { chipLabel } from "../lib/walletShapes.js";
+import { chainTipOf } from "../lib/sync.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Led from "./hud/Led.jsx";
@@ -39,12 +40,25 @@ export default function TopBar() {
     pillText = <>SYS · offline</>;
     compactText = <>offline</>;
   } else if (h) {
-    const height = <span className="num">#{fmtInt(h.tip_height)}</span>;
+    const height = <span className="num">#{fmtInt(chainTipOf(h))}</span>;
     compactText = height;
     if (h.stalled) {
       pillClass += " pill-warn";
       led = "busy";
-      pillText = <>SYS · {height} · stalled</>;
+      pillText = <>SYS · {height} · {sync.noPeers ? "no peers" : "stalled"}</>;
+    } else if (sync.rebuilding) {
+      pillClass += " pill-warn";
+      led = "busy";
+      pillText = <>SYS · {height} · rebuilding</>;
+    } else if (sync.networkLag > 0) {
+      // The node's own tip trails an independent one (src/lib/network.js).
+      pillClass += " pill-warn";
+      led = "busy";
+      pillText = (
+        <>
+          SYS · {height} · behind network<span className="num"> −{fmtInt(sync.networkLag)}</span>
+        </>
+      );
     } else if (!sync.synced) {
       // "synced" is said only when the indexer has applied the tip block
       // (audit usertx-1) — during a cold scan it can be thousands behind.
@@ -55,21 +69,17 @@ export default function TopBar() {
           SYS · {height} · syncing{sync.lag ? <span className="num"> −{fmtInt(sync.lag)}</span> : null}
         </>
       );
+    } else if (sync.noPeers) {
+      pillClass += " pill-warn";
+      led = "busy";
+      pillText = <>SYS · {height} · no peers</>;
     } else {
       pillClass += " pill-ok";
       led = "ok";
       pillText = <>SYS · {height} · synced</>;
     }
   }
-  const syncWord = h?.stalled
-    ? "stalled"
-    : h && !sync.synced
-      ? sync.lag !== null
-        ? `syncing — indexed #${fmtInt(sync.indexed)} of #${fmtInt(sync.tip)}`
-        : "syncing"
-      : h
-        ? "synced"
-        : "";
+  const syncWord = syncWordOf(h, sync);
   const pillTitle = health.error
     ? String(health.error.message)
     : `indexer ${h?.network || ""} · block height${syncWord ? ` · ${syncWord}` : ""}${mock ? " · VITE_MOCK=1 (fake indexer)" : ""}`;
@@ -138,7 +148,7 @@ export default function TopBar() {
               mock
             </span>
           )}
-          <span className={pillClass} title={pillTitle} aria-label={mobile ? `System: ${h ? `block #${fmtInt(h.tip_height)}${syncWord ? `, ${syncWord}` : ""}` : health.error ? "offline" : "connecting"}` : undefined}>
+          <span className={pillClass} title={pillTitle} aria-label={mobile ? `System: ${h ? `block #${fmtInt(chainTipOf(h))}${syncWord ? `, ${syncWord}` : ""}` : health.error ? "offline" : "connecting"}` : undefined}>
             <Led state={led} />
             {mobile ? compactText : pillText}
           </span>
@@ -147,6 +157,16 @@ export default function TopBar() {
       </div>
     </header>
   );
+}
+
+/** The pill's title word for the indexer's state ("" before the first answer). */
+function syncWordOf(h, sync) {
+  if (!h) return "";
+  if (h.stalled) return sync.noPeers ? "stalled — the node has no peers" : "stalled";
+  if (sync.rebuilding) return "rebuilding";
+  if (sync.networkLag > 0) return `our node is ${fmtInt(sync.networkLag)} blocks behind the network`;
+  if (!sync.synced) return sync.lag !== null ? `syncing — indexed #${fmtInt(sync.indexed)} of #${fmtInt(sync.tip)}` : "syncing";
+  return sync.noPeers ? "synced, but the node has no peers" : "synced";
 }
 
 /**

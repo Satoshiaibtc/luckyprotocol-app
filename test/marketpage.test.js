@@ -3,11 +3,15 @@
 // src/lib/tokenTabs.js (which tabs a token page shows and how `?tab=`
 // resolves). Plain Node, no framework.
 import assert from "node:assert/strict";
-import { MARKET_SORTS, NEXT_LIMIT, isMintedOut, mintedOutFirst, mintedPct, partitionMarkets, sortOpenMarkets } from "../src/lib/marketBoard.js";
+import { MARKET_SORTS, NEXT_LIMIT, isMarketOpen, isMarketPending, isMintedOut, mintedOutFirst, mintedPct, partitionMarkets, sortOpenMarkets } from "../src/lib/marketBoard.js";
+import { MARKET_OPEN_DELAY, marketOpensAt, marketPendingText } from "../src/lib/finality.js";
+import { _sanitizeTokenRow } from "../src/lib/indexer.js";
 import { ALL_TABS, TAB_LABEL, defaultTab, marketClosedNotice, mintedProgressNote, resolveTab, tabsFor } from "../src/lib/tokenTabs.js";
 
 const S = 21_000_000;
-const row = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted_out: minted >= S, minted_out_height: minted >= S ? 969_790 : null, mine_count: Math.round(minted / 250), holders: 1, open_orders: 0, floor_unit_price: null, last_trade: null, market_24h: null, ...extra });
+// A registry row as the sanitizer leaves it: `market_open` is the indexer's
+// gate (minted out AND the completing block 6 deep).
+const row = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted_out: minted >= S, minted_out_height: minted >= S ? 969_790 : null, market_open: minted >= S, mine_count: Math.round(minted / 250), holders: 1, open_orders: 0, floor_unit_price: null, last_trade: null, market_24h: null, ...extra });
 
 // ---- the gate --------------------------------------------------------------------------------
 {
@@ -107,6 +111,33 @@ const row = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted
   assert.equal(mintedProgressNote(closed), "Market opens at 100% · minted 1,234,567 of 21,000,000");
   assert.equal(mintedProgressNote(null), "Market opens at 100%");
   console.log("marketpage tabs: Market tab only when minted out; ?tab=market resolves to Mine with the notice");
+}
+
+// ---- reorg audit: minted out, but the market opens only when the completing block is 6 deep ---------------
+{
+  const pending = row("DUNE", S, { minted_out_height: 969_798, market_open: false, market_opens_at_height: 969_803 });
+  assert.equal(MARKET_OPEN_DELAY, 5, "opens at minted_out_height + 5: that block then has 6 confirmations");
+  assert.deepEqual([isMintedOut(pending), isMarketOpen(pending), isMarketPending(pending)], [true, false, true]);
+  assert.equal(marketOpensAt(pending), 969_803);
+  assert.equal(marketOpensAt({ ...pending, market_opens_at_height: undefined }), 969_803, "derived from minted_out_height when the row does not say");
+  assert.deepEqual(tabsFor(pending), ["mine"], "no Market tab before it opens");
+  assert.equal(defaultTab(pending), "mine");
+  const r = resolveTab("market", "DUNE", pending);
+  assert.equal(r.tab, "mine");
+  assert.equal(r.notice, "DUNE is minted out — the market opens at block #969,803, once the block that completed the supply has 6 confirmations.");
+  assert.equal(marketPendingText(pending), r.notice);
+  assert.equal(mintedProgressNote(pending), "Minted out · market opens at block #969,803");
+  const { open, next } = partitionMarkets([row("BLOK", S), pending, row("SATS", 8_400_000)]);
+  assert.deepEqual(open.map((t) => t.ticker), ["BLOK"]);
+  assert.deepEqual(next.map((t) => t.ticker), ["DUNE", "SATS"], "a minted-out token waiting for depth leads the next-to-open strip");
+  assert.deepEqual(mintedOutFirst([pending, row("BLOK", S)]).map((t) => t.ticker), ["BLOK", "DUNE"], "open markets first");
+  // the sanitizer: the indexer's gate, else (a row from before the field) the older rule
+  const base = { ticker: "DUNE", supply: S, minted: S, deployer: "", deploy_txid: "a".repeat(64), deploy_block: 969_700, minted_out: true, minted_out_height: 969_798 };
+  const clean = _sanitizeTokenRow({ ...base, market_open: false, market_opens_at_height: 969_803 });
+  assert.deepEqual([clean.market_open, clean.market_opens_at_height], [false, 969_803]);
+  assert.deepEqual([_sanitizeTokenRow(base).market_open, _sanitizeTokenRow(base).market_opens_at_height], [true, 969_803], "no field: open when minted out; the height derived");
+  assert.equal(_sanitizeTokenRow({ ...base, minted: 5, minted_out: false, market_open: true }).market_open, false, "never open before minted out");
+  console.log("marketpage depth gate: minted out opens the market only once the completing block has 6 confirmations");
 }
 
 console.log("marketpage: all checks passed");
