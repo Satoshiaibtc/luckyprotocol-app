@@ -68,7 +68,6 @@ export default function WalletModal() {
             {current ? "Connected" : installed ? "Installed" : detecting ? "Detecting…" : phone ? "Not detected" : "Not installed"}
           </span>
         </div>
-        <p className="wallet-card-desc">{meta.description}</p>
         {!installed && !detecting && phone && <p className="wallet-card-hint">{meta.mobileHint}</p>}
         <div className="wallet-card-action">
           {current ? (

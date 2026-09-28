@@ -32,7 +32,6 @@ export const PROVIDER_META = {
     logo: "/wallets/unisat.svg",
     installUrl: "https://unisat.io",
     appUrl: "https://unisat.io/download",
-    description: "Extension and mobile app. Its asset-aware UTXO list keeps Ordinals and Runes out of fee inputs.",
     mobileHint: "On a phone, open this site inside the UniSat app (Discover tab), then connect.",
   },
   okx: {
@@ -42,7 +41,6 @@ export const PROVIDER_META = {
     logo: "/wallets/okx.png",
     installUrl: "https://web3.okx.com/download",
     appUrl: "https://web3.okx.com/download",
-    description: "Extension and mobile app via its Bitcoin mainnet provider. It has no asset-safe UTXO list: fee inputs come from the indexer and outputs of 10,000 sats or less are skipped, but Ordinals or Runes on larger outputs cannot be detected — use an address that holds none.",
     mobileHint: "On a phone, open this site inside the OKX Wallet app (DApp browser), then connect.",
   },
   mock: {

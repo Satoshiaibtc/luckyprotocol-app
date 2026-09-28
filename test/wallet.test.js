@@ -60,7 +60,8 @@ assert.equal(chipLabel("okx", "bc1p…62s"), "OKX · bc1p…62s");
 assert.equal(chipLabel("unisat", "bc1p…62s"), "UniSat · bc1p…62s");
 assert.equal(chipLabel("nope", "bc1p…62s"), "bc1p…62s");
 for (const id of PROVIDER_IDS) {
-  assert.ok(PROVIDER_META[id].description.length > 20, `${id}: card description`);
+  // The wallet cards show only the logo, name, status and action (owner, 2026-09-29).
+  assert.equal(PROVIDER_META[id].description, undefined, `${id}: no card description`);
   assert.ok(PROVIDER_META[id].mobileHint.includes("app"), `${id}: phone guidance names the app`);
 }
 
