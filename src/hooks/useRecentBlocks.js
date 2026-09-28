@@ -2,6 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
 import { bucketOfHash } from "../lib/yield.js";
 import { emptyCounts } from "../lib/mix.js";
+import { startPolling } from "../lib/poller.js";
+
+/** The tape re-reads its window this often (and on every new block). */
+const REFRESH_MS = 30_000;
 
 /**
  * Does any height of a fresh `/blocks/recent` read (`fresh`: height →
@@ -32,13 +36,24 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
   const cacheRef = useRef(new Map());
   const seenRef = useRef(new Set());
   const newRef = useRef(new Set());
+  const fetchingRef = useRef(false);
   const [version, setVersion] = useState(0);
   const [refresh, setRefresh] = useState(0);
 
-  useEffect(() => {
-    const id = setInterval(() => setRefresh((v) => v + 1), 30_000);
-    return () => clearInterval(id);
-  }, []);
+  // The periodic re-read (src/lib/poller.js): none while the tab is hidden
+  // — one on its return instead — and none while the last read is still
+  // running (a new one would abort it, and under load none would finish).
+  useEffect(
+    () =>
+      startPolling(
+        () => {
+          if (!fetchingRef.current) setRefresh((v) => v + 1);
+        },
+        REFRESH_MS,
+        { immediate: false },
+      ),
+    [],
+  );
 
   useEffect(() => {
     if (ceiling === null || ceiling === undefined) return undefined;
@@ -65,7 +80,9 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       };
       const byHeight = new Map();
       try {
-        const res = await indexer.recentBlocks(Math.min(32, count + 8), ctrl.signal);
+        // One fixed limit for every screen size (a shared, cacheable URL):
+        // only the heights of this window are kept below.
+        const res = await indexer.recentBlocks(ctrl.signal);
         if (res) for (const b of res.blocks) byHeight.set(b.height, b);
       } catch (e) {
         if (e && e.name === "AbortError") return false;
@@ -111,18 +128,24 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       if (!firstFill) for (const h of wanted) if (!cache.has(h)) newRef.current.add(h);
       const need = wanted.filter((h) => !cache.has(h) || cache.get(h).missing || cache.get(h).weight == null || h === ceiling);
       if (need.length === 0) return;
-      const reorg = await fetchHeights(need);
-      if (!alive) return;
-      if (reorg) {
-        cache.clear();
-        await fetchHeights(wanted);
+      fetchingRef.current = true;
+      try {
+        const reorg = await fetchHeights(need);
         if (!alive) return;
+        if (reorg) {
+          cache.clear();
+          await fetchHeights(wanted);
+          if (!alive) return;
+        }
+      } finally {
+        if (alive) fetchingRef.current = false;
       }
       setVersion((v) => v + 1);
     })();
 
     return () => {
       alive = false;
+      fetchingRef.current = false;
       ctrl.abort();
     };
   }, [ceiling, count, refresh]);

@@ -131,7 +131,7 @@ export default function App() {
 
   // Start the indexer's UTXO scan for a wallet as soon as it connects (api-1):
   // the first /btc-utxos query of an address queues a scan that takes a
-  // minute or two, and it is better spent while the user looks around than
+  // few minutes, and it is better spent while the user looks around than
   // after they press Mine. Fire-and-forget: the 503 / 429 is expected.
   const connectedAddress = w.connected ? w.address : null;
   useEffect(() => {

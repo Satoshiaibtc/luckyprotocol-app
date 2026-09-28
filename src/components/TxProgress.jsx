@@ -43,13 +43,28 @@ export function reorgNote(status) {
 }
 
 /**
+ * The button that ends a flow's wait for the indexer's scan of the wallet
+ * (a first use can take minutes): the flow goes back to idle, nothing is
+ * signed, and the scan itself keeps running on the indexer.
+ */
+export function StopWaitingButton({ onClick }) {
+  return (
+    <button className="btn btn-sm" type="button" onClick={onClick} title="Nothing has been signed. The indexer keeps scanning this wallet — start again later and it may be ready.">
+      Stop waiting
+    </button>
+  );
+}
+
+/**
  * One status line for every sign-and-broadcast flow (buy / sell / split /
- * cancel / create). `flow` = { phase, txid, error, note, feeSats, detail, inputs, assetSafe } with
+ * cancel / create). `flow` = { phase, txid, error, note, feeSats, detail, inputs, assetSafe, waitNote } with
  * phase ∈ idle | verifying | building | signing | broadcasting | pending | unseen | confirmed | error.
  * `status` (useTxStatus) adds the confirmation depth — a confirmed result is
  * provisional until FINAL_DEPTH — and any chain reorganization it saw.
+ * `onStopWaiting` adds Stop waiting while the build waits for the
+ * indexer's scan of the wallet (`flow.waitNote`).
  */
-export default function TxProgress({ flow, status, labels = {}, onReset, idleText }) {
+export default function TxProgress({ flow, status, labels = {}, onReset, onStopWaiting, idleText }) {
   let cls = "status";
   let text = idleText || "";
   let detail = null;
@@ -69,6 +84,7 @@ export default function TxProgress({ flow, status, labels = {}, onReset, idleTex
     case "building":
       cls += " s-busy";
       text = flow.waitNote || labels.building || "Building transaction — selecting fee inputs, laying out outputs.";
+      if (flow.waitNote && onStopWaiting) actions = <StopWaitingButton onClick={onStopWaiting} />;
       break;
     case "signing":
       cls += " s-busy";

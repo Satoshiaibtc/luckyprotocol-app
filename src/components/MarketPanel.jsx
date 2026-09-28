@@ -31,6 +31,17 @@ export default function MarketPanel({ ticker, token, onSettled }) {
   const [interval, setInterval_] = useState("1h");
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedId, setSelectedId] = useState(null);
+  // The List / Split / Withdraw fold starts closed: its panel mounts the
+  // first time it is opened (a closed fold reads nothing), and stays
+  // mounted — a split or withdrawal in progress keeps its state — with its
+  // reads paused while the fold is closed again.
+  const [sellOpen, setSellOpen] = useState(false);
+  const [sellMounted, setSellMounted] = useState(false);
+  const onSellToggle = useCallback((e) => {
+    const open = !!e.currentTarget.open;
+    setSellOpen(open);
+    if (open) setSellMounted(true);
+  }, []);
 
   const marketQ = usePoll((s) => indexer.market(ticker, range, s), POLL_MS, [ticker, range]);
   const candlesQ = usePoll((s) => indexer.candles(ticker, { interval, limit: INTERVALS.find((i) => i.id === interval)?.limit ?? 168 }, s), POLL_MS, [ticker, interval]);
@@ -148,8 +159,8 @@ export default function MarketPanel({ ticker, token, onSettled }) {
 
       <BuyPanel ticker={ticker} token={token} order={selected} onClear={() => setSelectedId(null)} onSettled={settled} usd={usd} />
 
-      <Fold title="List / Split / Withdraw" summary="List a whole carrier at a unit or total price · split part of it off first · renew or withdraw your listings" led={address ? "ok" : "idle"} aria-label="Sell">
-        <SellPanel ticker={ticker} token={token} onSettled={settled} usd={usd} />
+      <Fold title="List / Split / Withdraw" summary="List a whole carrier at a unit or total price · split part of it off first · renew or withdraw your listings" led={address ? "ok" : "idle"} aria-label="Sell" onToggle={onSellToggle}>
+        {sellMounted && <SellPanel ticker={ticker} token={token} onSettled={settled} usd={usd} active={sellOpen} />}
       </Fold>
 
       <Panel title="Recent trades" led={tradesPaged.error ? "err" : tradesPaged.loading && tradesPaged.rows.length === 0 ? "busy" : "ok"} right={<span className="label">{fmtInt(tradesPaged.total)} total</span>} aria-label="Recent trades">

@@ -41,7 +41,7 @@ export default function SendPage({ ticker, params = {} }) {
   const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
   const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
   const orders = usePoll(address ? (s) => indexer.ordersByAddress(address, { limit: indexer.ADDR_LIST_MAX_LIMIT }, s) : null, POLL_MS, [address]);
-  const { chain, status, run, reset, busy } = useSendToSelf({
+  const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({
     onSettled: () => {
       tokenUtxos.refresh();
       btcUtxos.refresh();
@@ -447,6 +447,7 @@ export default function SendPage({ ticker, params = {} }) {
                 flow={chain}
                 status={status}
                 onReset={done}
+                onStopWaiting={stopWaiting}
                 labels={{
                   building: "Building the SEND — your fee inputs are filtered so no other token carrier is ever spent as fee.",
                   signing: `Awaiting signature — confirm in ${w.providerName || "your wallet"}.`,

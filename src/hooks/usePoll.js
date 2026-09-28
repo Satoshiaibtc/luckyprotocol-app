@@ -1,17 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { startPolling } from "../lib/poller.js";
 
 /**
  * Poll an async function on an interval.
  *
- *   const q = usePoll(fn | null, intervalMs, deps)
+ *   const q = usePoll(fn | null, intervalMs, deps, { paused })
  *   q.data / q.error / q.loading / q.updatedAt / q.refresh()
  *
  * `fn` receives an AbortSignal that fires on unmount / deps change. Passing
  * `null` disables polling and clears state. `intervalMs <= 0` runs once
- * per deps change. Polling pauses while the tab is hidden and resumes
- * (with an immediate refresh) when it becomes visible again.
+ * per deps change. A tick while the previous call is still in flight is
+ * skipped (a slow answer is never joined by a second request). Polling
+ * pauses while the tab is hidden and catches up with one call when it is
+ * visible again (src/lib/poller.js). `paused` stops polling but keeps the
+ * last answer; un-pausing reads again at once.
  */
-export function usePoll(fn, intervalMs, deps = []) {
+export function usePoll(fn, intervalMs, deps = [], { paused = false } = {}) {
   const [state, setState] = useState({
     data: null,
     error: null,
@@ -28,12 +32,12 @@ export function usePoll(fn, intervalMs, deps = []) {
       setState({ data: null, error: null, loading: false, updatedAt: null });
       return undefined;
     }
+    if (paused) return undefined;
     let alive = true;
     const ctrl = new AbortController();
     setState((s) => ({ ...s, loading: s.data === null }));
 
     const run = async () => {
-      if (document.visibilityState === "hidden") return;
       try {
         const data = await f(ctrl.signal);
         if (alive) setState({ data, error: null, loading: false, updatedAt: Date.now() });
@@ -44,20 +48,14 @@ export function usePoll(fn, intervalMs, deps = []) {
       }
     };
 
-    run();
-    const id = intervalMs > 0 ? setInterval(run, intervalMs) : null;
-    const onVisible = () => {
-      if (document.visibilityState === "visible") run();
-    };
-    document.addEventListener("visibilitychange", onVisible);
+    const stop = startPolling(run, intervalMs);
     return () => {
       alive = false;
       ctrl.abort();
-      if (id) clearInterval(id);
-      document.removeEventListener("visibilitychange", onVisible);
+      stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deps are caller-declared
-  }, [intervalMs, tick, ...deps]);
+  }, [intervalMs, tick, paused, ...deps]);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
   return { ...state, refresh };

@@ -21,7 +21,8 @@ import {
   updatePendingMine,
   withDepth,
 } from "../src/lib/minePending.js";
-import { resumeMineState, seedWaitNote } from "../src/hooks/useMine.js";
+import { resumeMineState } from "../src/hooks/useMine.js";
+import { seedWaitNote } from "../src/lib/retry.js";
 import { blockFoundLine, blockLineKey, finalLine, mempoolLine, reconcileLine, reorgLine, settledYoursLine } from "../src/lib/minerlog.js";
 import { FINAL_DEPTH } from "../src/lib/finality.js";
 
@@ -234,9 +235,9 @@ const GRACE = 180_000;
 
 // ---- reorg audit: the scan wait after a reorganization is not called a first use ----------------------------------------
 {
-  assert.match(seedWaitNote({ elapsedMs: 5_000 }), /\(first use\)/);
+  assert.match(seedWaitNote({ elapsedMs: 5_000 }), /^Setting up this wallet: /);
   const again = seedWaitNote({ elapsedMs: 5_000, rescan: true });
-  assert.ok(!/first use/.test(again) && /again \(after a chain reorganization or an indexer restart\)/.test(again), again);
+  assert.ok(/^Setting up this wallet again \(after a chain reorganization or an indexer restart\): /.test(again), again);
   console.log("minepending seed wait: a rescan after a reorganization is said as such");
 }
 

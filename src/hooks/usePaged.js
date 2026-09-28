@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { startPolling } from "../lib/poller.js";
 
 /**
  * Offset-paginated list with "load more" + periodic refresh of what is loaded.
@@ -7,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *   q.rows / q.total / q.loading / q.error / q.hasMore / q.loadMore() / q.refresh()
  *
  * `fetchPage` must resolve to `{ items, total }`. Passing `null` disables.
+ * `refreshMs <= 0` loads once per deps change / refresh().
  */
 export function usePaged(fetchPage, { limit = 25, deps = [], refreshMs = 0 } = {}) {
   const [state, setState] = useState({ rows: [], total: 0, loading: !!fetchPage, error: null });
@@ -41,23 +43,23 @@ export function usePaged(fetchPage, { limit = 25, deps = [], refreshMs = 0 } = {
   }, []);
 
   // (Re)load the first page on deps change / manual refresh; refresh keeps
-  // everything already loaded by refetching the same span.
+  // everything already loaded by refetching the same span. The periodic
+  // refresh follows src/lib/poller.js: skipped while the previous one is
+  // in flight, paused while the tab is hidden, caught up on its return.
   useEffect(() => {
     if (!fnRef.current) {
       setState({ rows: [], total: 0, loading: false, error: null });
       return undefined;
     }
-    const span = Math.max(limit, rowsRef.current.length);
-    run({ offset: 0, count: tick === 0 ? limit : span, append: false });
-    let id = null;
-    if (refreshMs > 0) {
-      id = setInterval(() => {
-        if (document.visibilityState === "hidden") return;
-        run({ offset: 0, count: Math.max(limit, rowsRef.current.length), append: false });
-      }, refreshMs);
-    }
+    let first = true;
+    const load = () => {
+      const count = first && tick === 0 ? limit : Math.max(limit, rowsRef.current.length);
+      first = false;
+      return run({ offset: 0, count, append: false });
+    };
+    const stop = startPolling(load, refreshMs);
     return () => {
-      if (id) clearInterval(id);
+      stop();
       ctrlRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deps are caller-declared

@@ -1,5 +1,13 @@
 export const MAX_BLOCK_WEIGHT = 4_000_000;
 
+/**
+ * The one `/blocks/recent` limit the block tape asks for, whatever the
+ * screen size: every visitor then shares one URL (one cached answer) and
+ * the tape keeps the last `count` blocks of it — never more than the 20
+ * visibleBlockCount allows.
+ */
+export const RECENT_BLOCKS_LIMIT = 32;
+
 /** Missing capacity is unknown, never an empty block. */
 export function blockStats(raw) {
   const weight = raw?.weight;

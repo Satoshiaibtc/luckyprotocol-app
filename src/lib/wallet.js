@@ -27,7 +27,7 @@ import * as indexer from "./indexer.js";
 import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
 import { MIN_FEE_INPUT_SATS_UNSAFE, assertSingleOpReturn, extractRawTxHex, p2trAddressOfXOnly, rawTxSummary } from "./psbt.js";
 import { DUST_SATS } from "./payloads.js";
-import { retryWhileSeeding } from "./retry.js";
+import { isAbortError, retryWhileSeeding, seedFailureText } from "./retry.js";
 import { pendingSpentOutpoints, recordBroadcastTx, refreshTxRecords } from "./txrecords.js";
 import {
   PROVIDER_IDS,
@@ -416,18 +416,18 @@ export async function getBalance() {
  * the first transaction (a listing withdrawal undone by the next MINE).
  *
  * The first query of an address makes the indexer scan the UTXO set for
- * it (a minute or two) — and so does the next query after a chain
- * reorganization or an indexer restart, which make it scan every address
- * again. `onWait({ waitMs, busy, elapsedMs, rescan })` fires before each
- * retry so the flow can say so (src/lib/retry.js); `rescan` is true when
- * this browser has read the address's UTXOs before, so the wait is not a
- * first use.
+ * it (a few minutes) — and so does the next query after an indexer
+ * restart (every address) or a chain reorganization that touched this
+ * address's outputs. `onWait({ waitMs, busy, elapsedMs, queuePosition, etaSecs,
+ * reason, rescan })` fires before each retry so the flow can say so
+ * (src/lib/retry.js seedWaitNote); `rescan` is true when this browser has
+ * read the address's UTXOs before, so the wait is not a first use.
+ * `signal` stops the wait (the flow's Stop waiting): the AbortError is
+ * thrown as is.
  */
-export async function getBitcoinUtxos(address, { onWait } = {}) {
+export async function getBitcoinUtxos(address, { onWait, signal } = {}) {
   const p = need();
   const name = providerName();
-  const rescan = scannedBefore(address);
-  const onRetry = onWait ? (_n, info) => onWait({ ...info, rescan }) : undefined;
   let res;
   if (typeof p.getBitcoinUtxos === "function") {
     let raw;
@@ -436,16 +436,13 @@ export async function getBitcoinUtxos(address, { onWait } = {}) {
     } catch (e) {
       throw new Error(`${name} getBitcoinUtxos failed: ${e?.message || e}`);
     }
-    let rows;
-    try {
-      rows = await retryWhileSeeding(() => indexer.btcUtxos(address), { onRetry });
-    } catch (e) {
-      throw new Error(
+    const rows = await indexerBtcRows(address, {
+      onWait,
+      signal,
+      failure: (e) =>
         `Could not confirm your UTXOs with the indexer (${_msg(e)}) — a fee input must be an output the indexer lists as confirmed, so nothing is built until it answers; ` +
-          `${SCAN_NOTE} — try again shortly`,
-      );
-    }
-    markScanned(address);
+        `${SCAN_NOTE} — try again shortly`,
+    });
     const listed = normalizeUtxoList(raw);
     const { utxos, unconfirmedOutpoints, unlistedOutpoints, mismatchedOutpoints } = intersectConfirmed(listed, rows);
     res = {
@@ -462,13 +459,11 @@ export async function getBitcoinUtxos(address, { onWait } = {}) {
       waitingSats: waitingSatsOf(listed, [...unconfirmedOutpoints, ...unlistedOutpoints], DUST_SATS),
     };
   } else {
-    let rows;
-    try {
-      rows = await retryWhileSeeding(() => indexer.btcUtxos(address), { onRetry });
-    } catch (e) {
-      throw new Error(`Could not read your UTXOs from the indexer (${_msg(e)}) — ${SCAN_NOTE}; try again shortly`);
-    }
-    markScanned(address);
+    const rows = await indexerBtcRows(address, {
+      onWait,
+      signal,
+      failure: (e) => `Could not read your UTXOs from the indexer (${_msg(e)}) — ${SCAN_NOTE}; try again shortly`,
+    });
     let utxos = rows.filter((u) => u.confirmed).map(({ txid, vout, sats }) => ({ txid, vout, sats }));
     let assetSafe = false;
     let excludedOutpoints = [];
@@ -489,10 +484,34 @@ export async function getBitcoinUtxos(address, { onWait } = {}) {
   return excludePendingSpends(address, res);
 }
 
+/**
+ * The indexer's `/btc-utxos/:addr` rows, waiting out its scan of the
+ * address (retryWhileSeeding, `onWait` / `signal` as getBitcoinUtxos). A
+ * stopped wait throws its AbortError as is; a wait that ended without the
+ * rows throws one plain sentence — this network's new-scan limit, a queue
+ * that stayed full, a scan still running (seedFailureText) — and any other
+ * failure `failure(e)`'s sentence (by default the indexer's own message).
+ */
+export async function indexerBtcRows(address, { onWait, signal, failure } = {}) {
+  const rescan = scannedBefore(address);
+  const onRetry = onWait ? (_n, info) => onWait({ ...info, rescan }) : undefined;
+  let rows;
+  try {
+    rows = await retryWhileSeeding(() => indexer.btcUtxos(address, signal), { onRetry, signal });
+  } catch (e) {
+    if (isAbortError(e) || (signal && signal.aborted)) throw e;
+    const seed = seedFailureText(e);
+    if (seed) throw new Error(seed);
+    throw failure ? new Error(failure(e)) : e;
+  }
+  markScanned(address);
+  return rows;
+}
+
 // The indexer scans an address's UTXOs on its first use and again after a
-// chain reorganization or a restart; this browser remembers which addresses
-// it has read before, so a later wait is not called a "first use" (audit:
-// the rescan after every reorganization).
+// restart or a chain reorganization that touched the address; this browser
+// remembers which addresses it has read before, so a later wait is not
+// called a "first use".
 const SCAN_NOTE = "the indexer scans an address's UTXOs on its first use and again after a chain reorganization, which can take a few minutes";
 const SCANNED_KEY_PREFIX = "lp.scanned.";
 

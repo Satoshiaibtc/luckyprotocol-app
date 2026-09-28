@@ -15,13 +15,19 @@
 //   4. the depth and finality values read back through the readers;
 //   5. the depth / market-gate / health fields: every key the route table
 //      and the documented MineView / OrderView / token rows name is served
-//      by the mock on every route that serves that view.
+//      by the mock on every route that serves that view;
+//   6. the first-use UTXO scan of /btc-utxos: the mock's "not yet" (503)
+//      and "turned away" (429) answers are the same errors the live
+//      transport builds from the indexer's JSON body and Retry-After —
+//      the same fields and the same sentence.
 //
 // Plain Node, no framework.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { mockGet, MOCK_WALLET } from "../src/lib/mock.js";
 import * as indexer from "../src/lib/indexer.js";
+import { indexerBtcRows } from "../src/lib/wallet.js";
+import { isAbortError, seedFailureText } from "../src/lib/retry.js";
 
 const API_DOC = new URL("../../luckyprotocol-indexer/docs/API.md", import.meta.url);
 const TABLE = existsSync(API_DOC) ? readFileSync(API_DOC, "utf8") : null;
@@ -195,6 +201,76 @@ if (TABLE) {
   const live = book.filter((o) => o.status === "open" || o.status === "filling");
   assert.ok(live.every((o) => o.market_open === true), "GET /orders lists no live order of a market that is not open");
   console.log("apiparity keys: /health, /fees, /tx-status, /tokens/:ticker/market, MineView, OrderView and /tokens rows carry every documented key");
+}
+
+// ---- 6. /btc-utxos while the indexer scans a new wallet: mock and live transport agree ----------------
+{
+  const SEED_FIELDS = ["status", "retryAfter", "queuePosition", "etaSecs", "reason"];
+  const pick = (e) => Object.fromEntries(SEED_FIELDS.map((k) => [k, e[k]]));
+  const store = new Map();
+  globalThis.sessionStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+  const addr = (n) => `bc1q${"q".repeat(37)}${n}`;
+  try {
+    // No knob: served at once, as before.
+    assert.ok(Array.isArray((await mockGet(`/btc-utxos/${addr(0)}`)).utxos));
+    // A scan of 60 s: queued first (addresses ahead), then in the running pass, then served.
+    store.set("lp.mock.seedWait", "60");
+    const first = await mockGet(`/btc-utxos/${addr(1)}`).catch((e) => e);
+    assert.equal(first.status, 503);
+    assert.ok(first.queuePosition > 0 && first.etaSecs > 30 && first.etaSecs <= 60 && first.retryAfter === 15, JSON.stringify(pick(first)));
+    // In the running pass with a second left (a 2 s scan, asked again after 1 s): still
+    // asked again in 15 s, and never estimated at under 15 s — as live.
+    store.set("lp.mock.seedWait", "2");
+    assert.equal((await mockGet(`/btc-utxos/${addr(5)}`).catch((e) => e)).status, 503);
+    await new Promise((r) => setTimeout(r, 1_000));
+    const ending = await mockGet(`/btc-utxos/${addr(5)}`).catch((e) => e);
+    assert.deepEqual([ending.status, ending.queuePosition, ending.etaSecs, ending.retryAfter], [503, 0, 15, 15], JSON.stringify(pick(ending)));
+    store.set("lp.mock.seedWait", "60");
+    // Turned away: this network's limit, and the full queue.
+    store.set("lp.mock.seedBusy", "client_limit");
+    const limited = await mockGet(`/btc-utxos/${addr(2)}`).catch((e) => e);
+    assert.deepEqual(pick(limited), { status: 429, retryAfter: 240, queuePosition: null, etaSecs: null, reason: "client_limit" });
+    store.set("lp.mock.seedBusy", "queue_full");
+    const full = await mockGet(`/btc-utxos/${addr(3)}`).catch((e) => e);
+    assert.equal(full.reason, "queue_full");
+    const started = await mockGet(`/btc-utxos/${addr(1)}`).catch((e) => e);
+    assert.equal(started.status, 503, "a scan already started is not turned away");
+
+    // The live transport builds the same errors from the indexer's answers.
+    const answers = [
+      [503, { "Retry-After": "15" }, JSON.stringify({ error: "this address's UTXO scan is queued or running; retry shortly", queue_position: first.queuePosition, eta_secs: first.etaSecs })],
+      [429, { "Retry-After": "240" }, JSON.stringify({ error: "too many new wallet scans from this client; retry later", reason: "client_limit" })],
+    ];
+    let at = 0;
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      const [status, headers, body] = answers[at++ % answers.length];
+      return { ok: false, status, headers: { get: (k) => headers[k] ?? null }, text: async () => body, json: async () => JSON.parse(body) };
+    };
+    try {
+      const live503 = await indexer.btcUtxos(addr(4)).catch((e) => e);
+      assert.deepEqual(pick(live503), pick(first), "503: the same fields as the mock's");
+      const live429 = await indexer.btcUtxos(addr(4)).catch((e) => e);
+      assert.deepEqual(pick(live429), pick(limited), "429: the same fields as the mock's");
+      // And the same sentence (the addresses differ: compare what follows "HTTP <status>: ").
+      const sentence = (e) => e.message.slice(e.message.indexOf(`HTTP ${e.status}: `));
+      assert.equal(sentence(live503), sentence(first), "503: the mock's sentence is the indexer's");
+      assert.equal(sentence(live429), sentence(limited), "429: the mock's sentence is the indexer's");
+      assert.ok(!/queue_position|\{/.test(live503.message), "no JSON punctuation in the message");
+      // The flows' read says the per-network limit in one sentence, at once.
+      at = 1;
+      await assert.rejects(indexerBtcRows(addr(4)), (e) => e.message === seedFailureText(limited) && /try again in 4 min/.test(e.message));
+      // A stopped wait is an AbortError, not an error sentence.
+      const ctrl = new AbortController();
+      ctrl.abort();
+      assert.equal(isAbortError(await indexerBtcRows(addr(4), { signal: ctrl.signal }).catch((e) => e)), true);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  } finally {
+    delete globalThis.sessionStorage;
+  }
+  console.log("apiparity seed wait: the mock's 503 / 429 scan answers carry the live transport's fields; the limit is one sentence");
 }
 
 console.log(

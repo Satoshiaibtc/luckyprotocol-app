@@ -38,7 +38,7 @@ import {
   untrackedLine,
   walletLine,
 } from "../lib/minerlog.js";
-import { ConnectPrompt, SpentInputs } from "./TxProgress.jsx";
+import { ConnectPrompt, SpentInputs, StopWaitingButton } from "./TxProgress.jsx";
 import TipReadout from "./TipReadout.jsx";
 import EVReadout from "./EVReadout.jsx";
 import FeeSelector from "./FeeSelector.jsx";
@@ -76,7 +76,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     refreshAll();
     onSettled?.();
   }, [refreshAll, onSettled]);
-  const { mine, flow, pendings, startMine, resetMine, dismissMine, clearFinished, busy } = useMine({
+  const { mine, flow, pendings, startMine, resetMine, stopWaiting, dismissMine, clearFinished, busy } = useMine({
     wallet,
     ticker,
     tokenInfo,
@@ -394,6 +394,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
         waiting={waiting}
         wallet={wallet}
         onReset={resetMine}
+        onStopWaiting={stopWaiting}
         indexerOk={indexerOk}
         lagText={lagText}
         fee={fee}
@@ -457,8 +458,12 @@ function PendingMines({ pendings, ticker, onDismiss, onClearFinished }) {
   );
 }
 
-/** One-line status above the terminal: why MINE is off (or Ready), the in-flight phases, and the error with its Reset. */
-function StatusLine({ flow, waiting, wallet, onReset, indexerOk, lagText, fee, feeRate, exhausted, preActivation, ticker, deployBlock, deployTooNew }) {
+/**
+ * One-line status above the terminal: why MINE is off (or Ready), the
+ * in-flight phases, the error with its Reset — and, while the build waits
+ * for the indexer's scan of this wallet, Stop waiting.
+ */
+function StatusLine({ flow, waiting, wallet, onReset, onStopWaiting, indexerOk, lagText, fee, feeRate, exhausted, preActivation, ticker, deployBlock, deployTooNew }) {
   let led = "idle";
   let text;
   let detail = null;
@@ -469,6 +474,7 @@ function StatusLine({ flow, waiting, wallet, onReset, indexerOk, lagText, fee, f
       led = "busy";
       text = flow.waitNote || "Building transaction — selecting fee inputs, laying out outputs.";
       if (waiting) detail = `Inputs of your ${waiting === 1 ? "MINE" : `${fmtInt(waiting)} MINEs`} still waiting for a block are left out, so this one cannot replace ${waiting === 1 ? "it" : "them"}.`;
+      if (flow.waitNote && onStopWaiting) actions = <StopWaitingButton onClick={onStopWaiting} />;
       break;
     case "signing":
       led = "busy";

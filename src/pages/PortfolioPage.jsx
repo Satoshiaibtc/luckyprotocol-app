@@ -68,7 +68,7 @@ export default function PortfolioPage() {
   const fillingCount = listings.filter((o) => o.status === "filling").length;
 
   // Withdraw = SEND-to-self of the listed carrier (the spec's cancel; M-9 rule inside the hook); Renew = re-POST.
-  const { chain, status, run, reset, busy } = useSendToSelf({ onSettled: () => orders.refresh() });
+  const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({ onSettled: () => orders.refresh() });
   // This browser's own pending transactions: a listing whose pending spend
   // is one of them is the user's own withdrawal, not a buyer's fill.
   // Re-read whenever the listings poll answers.
@@ -224,6 +224,7 @@ export default function PortfolioPage() {
                 flow={chain}
                 status={status}
                 onReset={reset}
+                onStopWaiting={stopWaiting}
                 labels={{
                   building: "Building the withdrawal — a SEND of the listed UTXO to yourself.",
                   pending: WITHDRAW_PENDING_TEXT,

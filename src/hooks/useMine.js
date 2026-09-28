@@ -21,6 +21,8 @@ import {
   withDepth,
 } from "../lib/minePending.js";
 import { friendlyError } from "./useWallet.js";
+import { useSeedWait } from "./useSeedWait.js";
+import { seedWaitNote } from "../lib/retry.js";
 
 const STATUS_POLL_MS = 15_000;
 /** A confirmed MINE is re-checked this often until its block is final. */
@@ -44,19 +46,6 @@ export function resumeMineState(address, ticker, records = address ? txRecords(a
   const rec = all[all.length - 1];
   if (!rec) return IDLE_MINE;
   return { phase: "pending", ticker, txid: rec.txid, broadcastAt: rec.broadcastAt, resumed: true };
-}
-
-/**
- * A line saying the indexer is still scanning this wallet (src/lib/retry.js):
- * on an address's first use, or — `rescan`, this browser has read it
- * before — again after a chain reorganization or an indexer restart.
- */
-export function seedWaitNote({ elapsedMs = 0, busy = false, rescan = false } = {}) {
-  const s = Math.round(elapsedMs / 1000);
-  if (busy) return `The indexer's UTXO-scan queue is full — waiting for room in it (${s} s).`;
-  return rescan
-    ? `The indexer is scanning this address's UTXOs again (after a chain reorganization or an indexer restart) — this takes a minute or two (${s} s).`
-    : `The indexer is scanning the UTXO set for this address (first use) — this takes a minute or two (${s} s).`;
 }
 
 /**
@@ -97,14 +86,17 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
   flowRef.current = flow;
   const trustRef = useRef(trustUnseen);
   trustRef.current = trustUnseen;
+  const seedWait = useSeedWait();
 
-  // A wallet change or disconnect abandons the flow; this ticker's MINEs
-  // whose result has not been shown are resumed from the broadcast records.
+  // A wallet change or disconnect abandons the flow (and any wait for the
+  // indexer's scan of the old address); this ticker's MINEs whose result
+  // has not been shown are resumed from the broadcast records.
   const address = walletState.status === "connected" ? walletState.address : null;
   useEffect(() => {
+    seedWait.stop();
     setFlow(IDLE_MINE);
     setPendings(address ? resumeMinePendings(txRecords(address), ticker) : []);
-  }, [address, ticker]);
+  }, [address, ticker, seedWait]);
 
   const startMine = useCallback(async () => {
     if (walletState.status !== "connected" || !tokenInfo) return;
@@ -113,6 +105,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
     const startedAt = Date.now(); // keys the terminal's per-attempt lines
     setFlow({ phase: "building", ticker, startedAt });
     let utxoRes = null;
+    const signal = seedWait.begin();
     try {
       if (!isUsableFeeRate(feeRateSatVb)) {
         throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
@@ -120,7 +113,8 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       const onWait = (info) => setFlow((m) => (m.phase === "building" ? { ...m, waitNote: seedWaitNote(info) } : m));
       // getBitcoinUtxos drops the inputs of every broadcast that has not
       // confirmed yet — the earlier MINEs in the pending list included.
-      const [utxoList, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { onWait }), indexer.tokenUtxos(addr)]);
+      const [utxoList, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { onWait, signal }), indexer.tokenUtxos(addr, signal)]);
+      seedWait.done(signal);
       utxoRes = utxoList;
       const tokenOutpoints = withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), addr);
       const built = buildMinePsbt({
@@ -155,13 +149,22 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       setPendings((l) => addPendingMine(l, newPendingMine({ txid, ticker })));
       setFlow(IDLE_MINE);
     } catch (e) {
+      // Stop waiting (or the page left): back to idle, nothing to report.
+      if (signal.aborted) {
+        setFlow((m) => (m.startedAt === startedAt ? IDLE_MINE : m));
+        return;
+      }
       const error = fundingMessage(e, utxoRes, { action: "this MINE" }) ?? friendlyError(e);
       setFlow((m) => ({ ...m, phase: "error", error }));
+    } finally {
+      seedWait.done(signal);
     }
-  }, [walletState, tokenInfo, ticker, feeRateSatVb]);
+  }, [walletState, tokenInfo, ticker, feeRateSatVb, seedWait]);
 
   /** Clear the flow's error (the pending list is untouched). */
   const resetMine = useCallback(() => setFlow((f) => (MINE_FLOW_BUSY.has(f.phase) ? f : IDLE_MINE)), []);
+  /** Stop waiting for the indexer's scan of this wallet (the flow returns to idle). */
+  const stopWaiting = seedWait.stop;
   /** Remove one finished item from the list. */
   const dismissMine = useCallback((txid) => setPendings((l) => l.filter((x) => x.txid !== txid || !isFinished(x))), []);
   /** Remove every finished item. */
@@ -314,6 +317,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
     pendings,
     startMine,
     resetMine,
+    stopWaiting,
     dismissMine,
     clearFinished,
     busy: MINE_FLOW_BUSY.has(flow.phase),

@@ -4,13 +4,13 @@ import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { droppedMessage, useTxStatus } from "./useTxStatus.js";
 import { friendlyError } from "./useWallet.js";
-import { seedWaitNote } from "./useMine.js";
+import { useSeedWait } from "./useSeedWait.js";
 import { buildSendPsbt, estimateSendFeeSats, expectPsbtPayload, minFeeInputSats, MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
 import { cancelFeeRate } from "../lib/market.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { isConflictError } from "../lib/walletShapes.js";
-import { retryWhileSeeding } from "../lib/retry.js";
+import { seedWaitNote } from "../lib/retry.js";
 import { fundingMessage } from "../lib/funding.js";
 import { forgetTx, markTxConfirmed, markTxUnconfirmed } from "../lib/txrecords.js";
 import { sendPendingOutpoints } from "../lib/send.js";
@@ -40,7 +40,7 @@ const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
  *   send    — `amount` of `ticker` from the carriers in `utxos` to
  *             `toAddress` (anyone, or yourself — then it is a split)
  *
- *   const { chain, status, run, reset, busy } = useSendToSelf({ onSettled })
+ *   const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({ onSettled })
  *   run({ kind: "split" | "cancel" | "send", ticker, amount, utxo: { txid, vout, sats? } | utxos: [...], toAddress?, order? })
  *
  * `chain` = { phase, kind, ticker, amount, toAddress, txid, feeSats,
@@ -49,17 +49,20 @@ const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
  * A confirmed tx is tracked until its block is final (`status.final`): a
  * chain reorganization can still put it back in the mempool — the chain
  * then returns to "pending" and its record guards its inputs again. A
- * wallet change resets it.
+ * wallet change resets it. `stopWaiting()` ends the build's wait for the
+ * indexer's scan of the wallet (back to idle).
  */
 export function useSendToSelf({ onSettled } = {}) {
   const { wallet: w, address, pubkeyHex, fees, fee, refreshAll } = useApp();
   const [chain, setChain] = useState(IDLE);
   const settledRef = useRef(onSettled);
   settledRef.current = onSettled;
+  const seedWait = useSeedWait();
 
   useEffect(() => {
+    seedWait.stop();
     setChain(IDLE);
-  }, [address]);
+  }, [address, seedWait]);
 
   const status = useTxStatus(TRACKED.has(chain.phase) ? chain.txid : null, {
     onConfirmed: (s) => {
@@ -99,6 +102,7 @@ export function useSendToSelf({ onSettled } = {}) {
       const picked = Array.isArray(utxos) && utxos.length ? utxos : utxo ? [utxo] : [];
       setChain({ phase: "building", kind, ticker, amount, toAddress: to, order, rule: null });
       let utxoRes = null;
+      const signal = seedWait.begin();
       try {
         if (picked.length === 0) throw new Error(`No ${ticker} carrier selected to spend.`);
         const chosen = fee.satVb;
@@ -116,13 +120,13 @@ export function useSendToSelf({ onSettled } = {}) {
         }
         const rate = rule ? rule.satVb : chosen;
         // /btc-utxos may still be scanning a first-time address (503 / 429):
-        // both reads wait for it the same way (src/lib/retry.js).
+        // the wallet read waits for it (src/lib/retry.js); the indexer's
+        // own rows are read after it, when the scan is done — one wait,
+        // not two polling side by side.
         const onWait = (info) => setChain((c) => (c.phase === "building" ? { ...c, waitNote: seedWaitNote(info) } : c));
-        const [utxoList, tokenRows, btcRows] = await Promise.all([
-          wallet.getBitcoinUtxos(address, { onWait }),
-          indexer.tokenUtxos(address),
-          retryWhileSeeding(() => indexer.btcUtxos(address)),
-        ]);
+        const [utxoList, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { onWait, signal }), indexer.tokenUtxos(address, signal)]);
+        const btcRows = await wallet.indexerBtcRows(address, { onWait, signal });
+        seedWait.done(signal);
         utxoRes = utxoList;
         // Each carrier's exact sats come from the indexer's BTC view (a wallet's
         // asset-safe list may omit 546-sat dust); the sighash commits to it.
@@ -165,13 +169,20 @@ export function useSendToSelf({ onSettled } = {}) {
         addPendingTokenOutpoints(sendPendingOutpoints(txid, { toSelf: to === address }), address);
         setChain((c) => ({ ...c, phase: "pending", txid }));
       } catch (e) {
+        // Stop waiting (or the page left): back to idle, nothing to report.
+        if (signal.aborted) {
+          setChain((c) => (c.phase === "building" ? IDLE : c));
+          return;
+        }
         const error = fundingMessage(e, utxoRes, { action: `this ${WHAT[kind] || "send"}` }) ?? friendlyError(e);
         setChain((c) => ({ ...c, phase: "error", error }));
+      } finally {
+        seedWait.done(signal);
       }
     },
-    [w.status, address, pubkeyHex, fee.satVb, fee.choice, fee.highFee, fees.data],
+    [w.status, address, pubkeyHex, fee.satVb, fee.choice, fee.highFee, fees.data, seedWait],
   );
 
   const reset = useCallback(() => setChain(IDLE), []);
-  return { chain, status, run, reset, busy: BUSY.has(chain.phase) };
+  return { chain, status, run, reset, stopWaiting: seedWait.stop, busy: BUSY.has(chain.phase) };
 }

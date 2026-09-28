@@ -3,7 +3,8 @@ import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { useTxStatus } from "./useTxStatus.js";
 import { friendlyError } from "./useWallet.js";
-import { seedWaitNote } from "./useMine.js";
+import { useSeedWait } from "./useSeedWait.js";
+import { seedWaitNote } from "../lib/retry.js";
 import {
   buildCommitPsbt,
   buildRevealPsbt,
@@ -159,10 +160,13 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
   indexedRef.current = indexed;
   const tipRef = useRef(tip);
   tipRef.current = tip;
+  const seedWait = useSeedWait();
 
   // ---- the record ---------------------------------------------------------------------------
-  // On mount and on an account switch: load that address's reservation.
+  // On mount and on an account switch: load that address's reservation
+  // (a build still waiting for the indexer's scan of the old one stops).
   useEffect(() => {
+    seedWait.stop();
     const r = address ? loadDeployRecord(address) : null;
     setRec(r);
     setOp(null);
@@ -186,7 +190,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
     const step = r.reveal ? 2 : 1;
     const tx = r.reveal ? r.reveal.txid : r.commit.txid;
     emit(reservationResumedLine(r.ticker, step, tx));
-  }, [address, emit]);
+  }, [address, emit, seedWait]);
 
   const persist = useCallback(
     (fn) => {
@@ -608,6 +612,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       let utxoRes = null;
       let signedTxid = null;
       let salt = null;
+      const signal = seedWait.begin();
       try {
         if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
         // Re-check at the moment of the click, not from the last poll.
@@ -617,7 +622,8 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         if (!fresh.synced) throw new Error(syncRetryText(fresh, `${t}'s availability`, "Reserve"));
         if (existing) throw new Error(`${t} is already created (tx ${existing.deploy_txid.slice(0, 12)}…) — pick another name.`);
         const onWait = (info) => setOp((o) => (o && o.phase === "building" ? { ...o, waitNote: seedWaitNote(info) } : o));
-        const [list, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { onWait }), indexer.tokenUtxos(address)]);
+        const [list, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { onWait, signal }), indexer.tokenUtxos(address, signal)]);
+        seedWait.done(signal);
         utxoRes = list;
         salt = newSalt();
         // The builder computes H from the REVEAL payload and the script of
@@ -679,14 +685,23 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
           const cur = loadDeployRecord(address);
           if (salt && cur && cur.salt === salt && !cur.commit?.sentAt) clearDeployRecord(address);
         }
+        // Stop waiting, an account switch or the page left: nothing was
+        // built, and the page may show another address's record by now —
+        // so the record is not reloaded here and no error is shown.
+        if (signal.aborted) {
+          setOp((o) => (o && o.startedAt === startedAt ? null : o));
+          return;
+        }
         setRec(loadDeployRecord(address));
         const message = e?.code === "busy" ? e.message : fundingMessage(e, utxoRes, { action: "this reservation" }) ?? friendlyError(e);
         emit(errorLine(message, startedAt));
         setError({ kind: "reserve", message });
         setOp(null);
+      } finally {
+        seedWait.done(signal);
       }
     },
-    [address, pubkeyHex, providerName, busy, emit],
+    [address, pubkeyHex, providerName, busy, emit, seedWait],
   );
 
   /** Step 2: publish the reserved ticker (the REVEAL) at `feeRate` sat/vB. */
@@ -700,6 +715,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       setOp({ kind: "publish", phase: "building", ticker: t, startedAt });
       let utxoRes = null;
       let signedTxid = null;
+      const signal = seedWait.begin();
       try {
         if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
         // Re-check right before the reveal: the indexer is synced, the name
@@ -732,7 +748,8 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         // likely confirm too late (fees paid, the name public for nothing).
         if (tm.closing) throw new Error(`Fewer than ${PUBLISH_CUTOFF_BLOCKS} blocks are left before your reservation expires — a publish sent now would most likely confirm too late. Nothing was sent.`);
         const onWait = (info) => setOp((o) => (o && o.phase === "building" ? { ...o, waitNote: seedWaitNote(info) } : o));
-        const [list, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { onWait }), indexer.tokenUtxos(address)]);
+        const [list, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { onWait, signal }), indexer.tokenUtxos(address, signal)]);
+        seedWait.done(signal);
         utxoRes = list;
         const carrier = { txid: r.commit.txid, vout: COMMIT_CARRIER_VOUT, sats: r.carrierSats ?? DUST_SATS };
         const listed = (utxoRes.utxos || []).find((u) => u.txid === carrier.txid && u.vout === carrier.vout);
@@ -778,14 +795,23 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
           const cur = loadDeployRecord(address);
           if (cur?.reveal && !cur.reveal.sentAt) updateDeployRecord(address, (x) => ({ ...x, reveal: null }));
         }
+        // Stop waiting, an account switch or the page left: nothing was
+        // built, and the page may show another address's record by now —
+        // so the record is not reloaded here and no error is shown.
+        if (signal.aborted) {
+          setOp((o) => (o && o.startedAt === startedAt ? null : o));
+          return;
+        }
         setRec(loadDeployRecord(address));
         const message = fundingMessage(e, utxoRes, { action: "this publish" }) ?? friendlyError(e);
         emit(errorLine(message, startedAt));
         setError({ kind: "publish", message });
         setOp(null);
+      } finally {
+        seedWait.done(signal);
       }
     },
-    [address, pubkeyHex, providerName, busy, emit],
+    [address, pubkeyHex, providerName, busy, emit, seedWait],
   );
 
   /** The replacement a Speed up of `step` ("commit" | "reveal") at `feeRate` would sign, or `{ error }`. Pure preview. */
@@ -928,6 +954,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       settling,
       reserve,
       publish,
+      stopWaiting: seedWait.stop,
       speedUp,
       speedUpQuote,
       abandon,
@@ -937,6 +964,6 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       restoreSettling,
       refreshCommit,
     }),
-    [rec, phase, op, busy, error, finished, timing, commitData, commitInfo, commitTxid, row, tokenInfo, ticker, commitStatus, revealStatus, settling, reserve, publish, speedUp, speedUpQuote, abandon, finish, dismiss, dismissSettling, restoreSettling, refreshCommit],
+    [rec, phase, op, busy, error, finished, timing, commitData, commitInfo, commitTxid, row, tokenInfo, ticker, commitStatus, revealStatus, settling, reserve, publish, seedWait, speedUp, speedUpQuote, abandon, finish, dismiss, dismissSettling, restoreSettling, refreshCommit],
   );
 }

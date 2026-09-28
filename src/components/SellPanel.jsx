@@ -36,13 +36,17 @@ const RELIST_WARNING =
  * to yourself; the M-9 replacement rule applies while a fill is pending).
  * One word for one action on every surface: the button, the fold, the
  * notices and the progress labels all say "withdraw".
+ *
+ * `active` false (the fold is closed): its reads pause and resume when it
+ * opens again; a split or withdrawal already sent is still followed.
  */
-export default function SellPanel({ ticker, token, onSettled, usd = null }) {
+export default function SellPanel({ ticker, token, onSettled, usd = null, active = true }) {
   const { wallet: w, address, pubkeyHex, fees, fee, indexerOk, sync, health } = useApp();
   const connected = w.status === "connected";
+  const pollOpts = { paused: !active };
 
-  const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
-  const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
+  const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address], pollOpts);
+  const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address], pollOpts);
   // The seller's listings: the per-address history is PAGED by the indexer
   // (newest first, 200 a page, every status and ticker) and read page by
   // page; the ticker's live book (open + filling, ≤ 200 each, the same reads
@@ -66,6 +70,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
       : null,
     POLL_MS,
     [address, ticker],
+    pollOpts,
   );
   const myRows = myOrders.data?.rows;
   // "N of 10 listings used": open listings of this address, all tickers (null until read).
@@ -286,7 +291,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
   };
 
   // ---- on-chain flows: split / withdraw (the spec's "cancel", §7.3) ------------------------
-  const { chain, status, run, reset, busy: chainBusy } = useSendToSelf({ onSettled: settled });
+  const { chain, status, run, reset, stopWaiting, busy: chainBusy } = useSendToSelf({ onSettled: settled });
   const [splitStr, setSplitStr] = useState("");
   useEffect(() => {
     setSplitStr("");
@@ -625,6 +630,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null }) {
             flow={chain}
             status={status}
             onReset={reset}
+            onStopWaiting={stopWaiting}
             labels={{
               building: chain.kind === "cancel" ? "Building the withdrawal — a SEND of the listed UTXO to yourself." : "Building the split — a SEND to yourself.",
               pending: chain.kind === "cancel" ? WITHDRAW_PENDING_TEXT : "Split broadcast. Pending confirmation — checking every 15 s.",

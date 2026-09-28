@@ -45,7 +45,7 @@ import { makeOpReturnScript } from "./psbt.js";
 import { compareSecondSource } from "./secondSource.js";
 import { isFillOf, isOpReturnOut, routeDecision } from "./mockRouting.js";
 import { MAX_COMMIT_AGE, MIN_COMMIT_AGE } from "./payloads.js";
-import { serverErrorText } from "./httpError.js";
+import { seedWaitFields, serverErrorText } from "./httpError.js";
 import { FINAL_DEPTH, MARKET_OPEN_DELAY, confirmationsAt } from "./finality.js";
 import { COMMIT_CARRIER_LISTING_TEXT, MAX_OPEN_LISTINGS_PER_ADDRESS, WITHDRAW_FIRST_TEXT, sellerCapError } from "./listingRules.js";
 
@@ -1069,6 +1069,55 @@ function mockNetworkAhead() {
   }
 }
 
+/**
+ * Dev knobs for the indexer's first-use UTXO scan behind `/btc-utxos` —
+ * the live answers, same shape (503 + Retry-After + `{ error,
+ * queue_position, eta_secs }` while the scan is queued or runs, 429 +
+ * Retry-After + `{ error, reason }` when it is turned away):
+ *
+ *   `sessionStorage["lp.mock.seedWait"] = "N"` (1–900): the first query of
+ *     an address in this tab starts an N-second scan — queued behind other
+ *     addresses for the first half, in the running pass for the second;
+ *   `sessionStorage["lp.mock.seedBusy"] = "client_limit" | "queue_full"`:
+ *     every query of an address whose scan has not started is turned away.
+ */
+const seedStartedAt = new Map(); // address → ms of the query that started its scan (this tab)
+
+function mockSeedKnobs() {
+  try {
+    if (typeof sessionStorage === "undefined") return { wait: 0, busy: null };
+    const n = Number(sessionStorage.getItem("lp.mock.seedWait"));
+    const b = sessionStorage.getItem("lp.mock.seedBusy");
+    return { wait: Number.isInteger(n) && n > 0 && n <= 900 ? n : 0, busy: b === "client_limit" || b === "queue_full" ? b : null };
+  } catch {
+    return { wait: 0, busy: null };
+  }
+}
+
+/** The live transport's error for a 503 / 429 with a JSON body (indexer.js `_httpGet`). */
+function seedHttpError(path, status, retryAfter, body) {
+  const text = JSON.stringify(body);
+  return Object.assign(new Error(`Indexer ${path} -> HTTP ${status}: ${serverErrorText(text)}`), { status, retryAfter, ...seedWaitFields(text) });
+}
+
+/** The "not yet" / "turned away" answer for `addr` at `now`, or null when its UTXOs can be served. */
+function mockSeedAnswer(addr, path, now = Date.now()) {
+  const { wait, busy } = mockSeedKnobs();
+  if (!seedStartedAt.has(addr)) {
+    if (busy === "client_limit") return seedHttpError(path, 429, 240, { error: "too many new wallet scans from this client; retry later", reason: busy });
+    if (busy === "queue_full") return seedHttpError(path, 429, 30, { error: "the UTXO-scan queue is full; retry later", reason: busy });
+    if (!wait) return null;
+    seedStartedAt.set(addr, now);
+  }
+  const left = Math.ceil((seedStartedAt.get(addr) + wait * 1000 - now) / 1000);
+  if (left <= 0) return null;
+  const half = wait / 2;
+  const ahead = left > half ? Math.max(1, Math.ceil(((left - half) / half) * 3)) : 0;
+  // As live: Retry-After is always 15 s, and an address in the running pass
+  // is never estimated at less than that.
+  return seedHttpError(path, 503, 15, { error: "this address's UTXO scan is queued or running; retry shortly", queue_position: ahead, eta_secs: ahead === 0 ? Math.max(left, 15) : left });
+}
+
 /** The mock second source's chain tip (src/lib/network.js) — nothing leaves the browser. */
 export async function mockNetworkTip() {
   await sleep(LATENCY_MS);
@@ -1373,6 +1422,8 @@ export async function mockGet(path) {
   }
   if ((m = p.match(/^\/btc-utxos\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);
+    const notYet = mockSeedAnswer(addr, path);
+    if (notYet) throw notYet;
     const utxos = liveUtxos(addr).map(({ txid, vout, sats, confirmed, block_height }) => ({ txid, vout, sats, confirmed, block_height }));
     return { address: addr, scanned_at_height: tipHeight(), utxos };
   }

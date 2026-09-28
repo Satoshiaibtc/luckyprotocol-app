@@ -46,8 +46,8 @@
 //   GET  /trades/:addr              tradesByAddress
 
 import { mockGet, mockPostText, mockPostJson } from "./mock.js";
-import { serverErrorText } from "./httpError.js";
-import { blockStats } from "./blocks.js";
+import { seedWaitFields, serverErrorText } from "./httpError.js";
+import { RECENT_BLOCKS_LIMIT, blockStats } from "./blocks.js";
 import { DAYS_DEFAULT, DAYS_MAX, DIGITS_DEFAULT, DIGITS_MAX } from "./digits.js";
 import { MAX_COMMIT_AGE, MIN_COMMIT_AGE } from "./payloads.js";
 import { MARKET_OPEN_DELAY } from "./finality.js";
@@ -114,87 +114,122 @@ async function _httpGet(path, signal) {
   if (MOCK) return mockGet(path);
   const url = `${INDEXER_URL}${path}`;
   const t = _timedSignal(signal);
-  let res;
+  // The timer runs until the body is read, not only until the headers
+  // arrive: a body that stalls after its headers is aborted by the same
+  // timeout (a poll that skips ticks while a call is in flight would
+  // otherwise wait on it forever).
   try {
-    res = await fetch(url, { signal: t.signal });
-  } catch (e) {
-    if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
-    if (signal && signal.aborted) throw e;
-    throw new Error(`Indexer unreachable: ${url} — ${e.message || e}`);
+    let res;
+    try {
+      res = await fetch(url, { signal: t.signal });
+    } catch (e) {
+      if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
+      if (signal && signal.aborted) throw e;
+      throw new Error(`Indexer unreachable: ${url} — ${e.message || e}`);
+    }
+    if (!res.ok) {
+      let text = "";
+      try { text = await res.text(); } catch { /* ignore */ }
+      const body = serverErrorText(text);
+      const err = new Error(`Indexer ${path} -> HTTP ${res.status}${body ? `: ${body}` : ""}`);
+      err.status = res.status;
+      // Seconds the server asked us to wait when it answers "not yet" or
+      // "busy" (retry.js waits that long before asking again).
+      const ra = Number(res.headers?.get?.("Retry-After"));
+      if (Number.isFinite(ra) && ra > 0) err.retryAfter = ra;
+      // A "not yet" / "busy" answer of the first-use UTXO scan also says where
+      // the wallet stands: queue position, estimate, why it was turned away.
+      if (res.status === 503 || res.status === 429) Object.assign(err, seedWaitFields(text));
+      throw err;
+    }
+    try {
+      return await res.json();
+    } catch (e) {
+      if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
+      throw e;
+    }
   } finally {
     t.done();
   }
-  if (!res.ok) {
-    let body = "";
-    try { body = serverErrorText(await res.text()); } catch { /* ignore */ }
-    const err = new Error(`Indexer ${path} -> HTTP ${res.status}${body ? `: ${body}` : ""}`);
-    err.status = res.status;
-    // Seconds the server asked us to wait when it answers "not yet" or
-    // "busy" (retry.js waits that long before asking again).
-    const ra = Number(res.headers?.get?.("Retry-After"));
-    if (Number.isFinite(ra) && ra > 0) err.retryAfter = ra;
-    throw err;
-  }
-  return await res.json();
 }
 
 async function _httpPostText(path, body, signal, meta) {
   if (MOCK) return mockPostText(path, body, meta);
   const url = `${INDEXER_URL}${path}`;
   const t = _timedSignal(signal);
-  let res;
+  // As in _httpGet, the timer also covers the body.
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body,
-      signal: t.signal,
-    });
-  } catch (e) {
-    if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
-    throw new Error(`Indexer unreachable: ${url} — ${e.message || e}`);
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body,
+        signal: t.signal,
+      });
+    } catch (e) {
+      if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
+      throw new Error(`Indexer unreachable: ${url} — ${e.message || e}`);
+    }
+    const text = (await _bodyText(res, t, url)).trim();
+    if (!res.ok) {
+      const body = serverErrorText(text);
+      const err = new Error(`${path} HTTP ${res.status}${body ? `: ${body}` : ""}`);
+      err.status = res.status;
+      throw err;
+    }
+    return text;
   } finally {
     t.done();
   }
-  const text = (await res.text().catch(() => "")).trim();
-  if (!res.ok) {
-    const body = serverErrorText(text);
-    const err = new Error(`${path} HTTP ${res.status}${body ? `: ${body}` : ""}`);
-    err.status = res.status;
-    throw err;
-  }
-  return text;
 }
 
 async function _httpPostJson(path, bodyObj, signal) {
   if (MOCK) return mockPostJson(path, bodyObj);
   const url = `${INDEXER_URL}${path}`;
   const t = _timedSignal(signal);
-  let res;
+  // As in _httpGet, the timer also covers the body.
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(bodyObj),
-      signal: t.signal,
-    });
-  } catch (e) {
-    if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
-    throw new Error(`Indexer unreachable: ${url} — ${e.message || e}`);
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyObj),
+        signal: t.signal,
+      });
+    } catch (e) {
+      if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
+      throw new Error(`Indexer unreachable: ${url} — ${e.message || e}`);
+    }
+    const text = (await _bodyText(res, t, url)).trim();
+    if (!res.ok) {
+      // The indexer answers every trading route with `{ "error": "…" }`: the
+      // sentence itself is what a seller reads — no HTTP prefix, no JSON
+      // punctuation, never cut mid-sentence (audit market-6).
+      throw orderHttpError(path, res.status, text);
+    }
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`${path}: response is not JSON`);
+    }
   } finally {
     t.done();
   }
-  const text = (await res.text().catch(() => "")).trim();
-  if (!res.ok) {
-    // The indexer answers every trading route with `{ "error": "…" }`: the
-    // sentence itself is what a seller reads — no HTTP prefix, no JSON
-    // punctuation, never cut mid-sentence (audit market-6).
-    throw orderHttpError(path, res.status, text);
-  }
+}
+
+/**
+ * The body of a POST's answer as text ("" when it cannot be read). A read
+ * cut off by the timeout is the timeout error when the status was a
+ * success: an empty body there would pass for the server's answer.
+ */
+async function _bodyText(res, t, url) {
   try {
-    return text ? JSON.parse(text) : null;
+    return await res.text();
   } catch {
-    throw new Error(`${path}: response is not JSON`);
+    if (res.ok && t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
+    return "";
   }
 }
 
@@ -752,8 +787,10 @@ export async function tokenUtxos(address, signal) {
 /**
  * GET /btc-utxos/:addr → `[{ txid, vout, sats, confirmed, block_height }]`.
  * The first query for an address returns 503 while the indexer's scan of
- * it is queued or running, and 429 while the scan queue is full; both
- * surface as thrown errors (with `retryAfter`) the caller retries — see
+ * it is queued or running (with `queuePosition` / `etaSecs` when the
+ * indexer names them), and 429 while the scan queue is full or this
+ * network started too many new scans lately (`reason`); both surface as
+ * thrown errors (with `retryAfter`) the caller retries or explains — see
  * src/lib/retry.js.
  */
 export async function btcUtxos(address, signal) {
@@ -922,12 +959,15 @@ export async function txStatus(txid, signal) {
 }
 
 /**
- * GET /blocks/recent?limit=N → blocks with hash, time, weight and tx_count.
- * newest first (indexer API). One request replaces N /block-info reads for the
- * block tape. Returns null when the indexer predates the route (404).
+ * GET /blocks/recent?limit=RECENT_BLOCKS_LIMIT → blocks with hash, time,
+ * weight and tx_count, newest first (indexer API). One request replaces N
+ * /block-info reads for the block tape. Always the same limit, whatever
+ * the screen: every visitor asks the same URL, so one cached answer serves
+ * them all, and the tape keeps the heights it shows. Returns null when the
+ * indexer predates the route (404).
  */
-export async function recentBlocks(limit = 16, signal) {
-  const n = Math.min(32, Math.max(1, Number(limit) || 16));
+export async function recentBlocks(signal) {
+  const n = RECENT_BLOCKS_LIMIT;
   let env;
   try {
     env = await _httpGet(`/blocks/recent?limit=${n}`, signal);

@@ -32,7 +32,7 @@ import { blockUrl, fmtDec, fmtInt, fmtSats, shortTxid, txUrl } from "../lib/form
 import { blockLineKey } from "../lib/minerlog.js";
 import { DEPLOY_PHASES, blockFoundLine, deployHeartbeatLine, deployUntrackedLine, deployedLine, feeQuoteLine, registrationLine, tipLine, walletLine } from "../lib/deploylog.js";
 import TokenCard from "../components/TokenCard.jsx";
-import { ConnectPrompt, SpentInputs } from "../components/TxProgress.jsx";
+import { ConnectPrompt, SpentInputs, StopWaitingButton } from "../components/TxProgress.jsx";
 import FeeSelector from "../components/FeeSelector.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
@@ -882,8 +882,10 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
   if (op && op.kind !== "speedup") {
     led = "busy";
     const what = op.kind === "reserve" ? "step 1 (reserve)" : "step 2 (publish)";
-    if (op.phase === "building") text = op.waitNote || `Building ${what} — fee inputs never include token-bearing outputs.`;
-    else if (op.phase === "signing") text = `Awaiting signature for ${what} — confirm in ${who}.`;
+    if (op.phase === "building") {
+      text = op.waitNote || `Building ${what} — fee inputs never include token-bearing outputs.`;
+      if (op.waitNote) actions = <StopWaitingButton onClick={cr.stopWaiting} />;
+    } else if (op.phase === "signing") text = `Awaiting signature for ${what} — confirm in ${who}.`;
     else text = `Broadcasting ${what}…`;
     if (op.phase !== "building" && op.feeSats != null) {
       detail = (

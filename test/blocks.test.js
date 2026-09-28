@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { blockStats, blockFullness, visibleBlockCount, MAX_BLOCK_WEIGHT } from "../src/lib/blocks.js";
+import { blockStats, blockFullness, visibleBlockCount, MAX_BLOCK_WEIGHT, RECENT_BLOCKS_LIMIT } from "../src/lib/blocks.js";
 import { hashesDisagree } from "../src/hooks/useRecentBlocks.js";
+import * as indexer from "../src/lib/indexer.js";
 
 assert.deepEqual(blockStats({ weight: 3_200_000, tx_count: 2_500 }), { weight: 3_200_000, tx_count: 2_500 });
 assert.equal(blockFullness(1_000_000), 25);
@@ -37,4 +38,30 @@ console.log("blocks: true weight occupancy, unknown data, full labels and bounde
   assert.equal(hashesDisagree(cache, new Map([[969_798, { hash: B }]])), false, "a height cached as missing is not a disagreement");
   assert.equal(hashesDisagree(new Map(), new Map([[1, { hash: A }]])), false);
   console.log("blocks: a replaced block anywhere in the window resets the tape");
+}
+
+// Capacity: the tape asks /blocks/recent with ONE limit on every screen
+// size, so every visitor shares one cached URL; the tape keeps the heights
+// it shows. The limit covers the widest tape.
+{
+  assert.ok(RECENT_BLOCKS_LIMIT >= visibleBlockCount(1e6), "the widest tape fits in one read");
+  assert.ok(RECENT_BLOCKS_LIMIT <= 32, "within the indexer's maximum");
+  const urls = [];
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    const blocks = Array.from({ length: RECENT_BLOCKS_LIMIT }, (_, i) => ({ height: 969_900 - i, hash: "0".repeat(63) + "a", time: 1_790_000_000, weight: 3_000_000, tx_count: 2_000 }));
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ tip_height: 969_900, blocks }) };
+  };
+  try {
+    const a = await indexer.recentBlocks();
+    const b = await indexer.recentBlocks(new AbortController().signal);
+    assert.equal(a.blocks.length, RECENT_BLOCKS_LIMIT);
+    assert.equal(b.blocks.length, RECENT_BLOCKS_LIMIT);
+  } finally {
+    globalThis.fetch = saved;
+  }
+  assert.equal(new Set(urls).size, 1, "one URL for every caller");
+  assert.ok(urls[0].endsWith(`/blocks/recent?limit=${RECENT_BLOCKS_LIMIT}`), urls[0]);
+  console.log("blocks: one shared /blocks/recent URL for every screen size");
 }
