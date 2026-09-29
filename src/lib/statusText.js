@@ -29,12 +29,28 @@ export function readyText(assetSafe, action) {
  */
 export function mineIdleReason({ connected, indexerOk, preActivation, exhausted, lagText, ticker, deployBlock = null, deployTooNew = false }) {
   if (!connected) return "Connect a wallet to mine.";
-  if (!indexerOk) return "Indexer offline — mining paused until it is reachable.";
+  if (!indexerOk) return "The indexer is not answering right now — mining is paused until it does.";
   if (preActivation) return lockedHint();
   if (exhausted) return `${ticker} is fully minted — mining is closed; a MINE would credit 0.`;
   if (lagText) return "Paused until the indexer catches up with the chain tip (see above).";
   if (deployTooNew) return deployWaitText(ticker, deployBlock);
   return null;
+}
+
+/**
+ * The status line while `waiting` MINEs wait for a block. `spare` = the
+ * fee inputs the wallet had left after the last MINE built here (null =
+ * not known, e.g. after a reload): only a known spare input is promised.
+ */
+export function waitingMineText(waiting, spare = null) {
+  const who = waiting === 1 ? "Your MINE is" : `${Number(waiting).toLocaleString("en-US")} of your MINEs are`;
+  if (spare === 0) {
+    return waiting === 1
+      ? `${who} waiting for a block (below). The next one can start once it confirms — its change is this wallet's only BTC left to spend.`
+      : `${who} waiting for a block (below). The next one can start once one of them confirms — their change is this wallet's only BTC left to spend.`;
+  }
+  if (Number.isInteger(spare) && spare > 0) return `${who} waiting for a block (below). You can start another one now — this wallet has other BTC for it.`;
+  return `${who} waiting for a block (below). You can start another one if this wallet has other confirmed BTC — a waiting MINE's change can be spent after its block.`;
 }
 
 /**

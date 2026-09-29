@@ -13,8 +13,14 @@
 // validity rule, the burn when the default output is missing or
 // address-less, the §2.1 deployer attribution (as far as the mock knows the
 // prevouts) — open orders whose outpoint was spent are settled per §7.5
-// (the payment is judged at the listed input's own index), and fills
-// append a TradeView. It is a simulator for browser checks: consensus is
+// (a fill is a spend signed with the listing's SIGHASH_SINGLE|ANYONECANPAY
+// signature that pays the seller at the listed input's own index; any
+// other spend cancels), and fills append a TradeView. A listing whose time
+// runs out leaves the book but stays the outpoint's listing floor, with
+// its seller: the seller still sees it (status "expired"), a higher
+// re-listing is still refused, and a fill of it is still a trade. Stored
+// listings are the canonical PSBT the order book serves (only the fields
+// a fill needs). It is a simulator for browser checks: consensus is
 // asserted by the indexer's own tests and the shared vector files.
 // That is what lets the whole listing → fill → trade loop run end-to-end
 // without a node.
@@ -39,11 +45,11 @@ import { pubECDSA, pubSchnorr } from "@scure/btc-signer/utils.js";
 import { EXPECTED_YIELD, bucketOfYield, mineYield } from "./yield.js";
 import { DAYS_MAX, DIGITS_DEFAULT, DIGITS_MAX } from "./digits.js";
 import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, buildMinePayload, buildSendPayload } from "./payloads.js";
-import { buildListingPsbt, verifyListing, parseListing, decodeRawTx, LISTING_SIGHASH } from "./swap.js";
+import { buildListingPsbt, parseListing, decodeRawTx, sellerPartialSig, LISTING_SIGHASH } from "./swap.js";
 import { aggregateDaily } from "./activity.js";
 import { makeOpReturnScript } from "./psbt.js";
 import { compareSecondSource } from "./secondSource.js";
-import { isFillOf, isOpReturnOut, routeDecision } from "./mockRouting.js";
+import { isOpReturnOut, routeDecision, settleListingSpend } from "./mockRouting.js";
 import { MAX_COMMIT_AGE, MIN_COMMIT_AGE } from "./payloads.js";
 import { seedWaitFields, serverErrorText } from "./httpError.js";
 import { FINAL_DEPTH, MARKET_OPEN_DELAY, confirmationsAt } from "./finality.js";
@@ -222,7 +228,8 @@ function signedOrder({ seller, utxo, ticker, amount, price_sats, created_at }) {
     pending_fee_sats: null,
     pending_vsize: null,
     pending_feerate: null,
-    psbt: hex.encode(tx.toPSBT()),
+    // stored like every listing the book accepts: its canonical PSBT
+    psbt: canonicalListingPsbt(hex.encode(tx.toPSBT())),
   };
 }
 
@@ -441,7 +448,7 @@ function world() {
   });
 
   const history = seededHistory(traderPool, tokens);
-  W = { tokens, trades, orders, knownUtxos, feed, history, sim: new Map(), simMines: [], simSends: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set(), commits: new Map(), commitByCarrier: new Map(), replaying: false };
+  W = { tokens, trades, orders, floors: new Map(), knownUtxos, feed, history, sim: new Map(), simMines: [], simSends: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set(), commits: new Map(), commitByCarrier: new Map(), replaying: false };
 
   // The simulated wallet's own `filling` listing: its 1,921-BLOK carrier
   // (seeded UTXO #5; BLOK is the one minted-out token, so the one the wallet
@@ -458,6 +465,7 @@ function world() {
     ...pendingFill("pending-fill:wallet", 99_000, 0.1),
   });
   seedMyListings(Number.isFinite(blokFloor) ? blokFloor : 50);
+  seedMyOffBook(Number.isFinite(blokFloor) ? blokFloor : 50);
   replaySimLog();
   return W;
 }
@@ -651,6 +659,27 @@ function feeOf(d) {
   return inSum - d.outputs.reduce((s, o) => s + o.sats, 0);
 }
 
+/**
+ * The `pending_*` fields the order book shows for a mempool spend of a
+ * listed outpoint: the spend's fee, its vsize and its own feerate (sat/vB,
+ * two decimals) — null each when the mock cannot tell.
+ */
+function pendingSpendOf(d, rawHex) {
+  const fee = feeOf(d);
+  let vsize = null;
+  try {
+    vsize = btc.Transaction.fromRaw(hex.decode(rawHex), { allowUnknownOutputs: true, allowUnknownInputs: true, disableScriptCheck: true }).vsize;
+  } catch {
+    vsize = null;
+  }
+  const known = Number.isInteger(fee) && fee >= 0 && Number.isInteger(vsize) && vsize > 0;
+  return {
+    pending_fee_sats: known ? fee : null,
+    pending_vsize: known ? vsize : null,
+    pending_feerate: known ? Math.round((fee / vsize) * 100) / 100 : null,
+  };
+}
+
 /** Take a replaced (unconfirmed) simulated tx back out of the mempool: its inputs unspent, its outputs gone. */
 function evictSim(txid) {
   const w = world();
@@ -659,6 +688,15 @@ function evictSim(txid) {
   w.sim.delete(txid);
   for (const i of e.decoded.inputs) w.spent.delete(key(i));
   for (const o of e.decoded.outputs) w.created.delete(`${txid}:${o.vout}`);
+  // A listing whose pending spend this was is back to `open` (the book's
+  // "filling + nothing in the mempool"); a replacement that spends it again
+  // marks it `filling` once more as it is registered.
+  for (const i of e.decoded.inputs) {
+    const o = w.orders.get(key(i));
+    if (o && o.status === "filling" && o.pending_spend_txid === txid) {
+      Object.assign(o, { status: "open", pending_spend_txid: null, pending_fee_sats: null, pending_vsize: null, pending_feerate: null });
+    }
+  }
 }
 
 /**
@@ -716,12 +754,16 @@ export function simulateBroadcast(rawHex, { at = null, height: loggedHeight = nu
   if (!w.replaying) appendSimLog(rawHex, Date.now(), height);
   for (const i of d.inputs) w.spent.add(key(i));
   // §7.3: the live indexer marks a listing `filling` for ANY mempool spend
-  // of its outpoint — a buyer's fill or the seller's own withdrawal alike.
+  // of its outpoint — a buyer's fill or the seller's own withdrawal alike —
+  // with that spend's fee, vsize and feerate (what a replacement must beat).
+  // An observation, not a seller action: `updated_at` (and so the expiry)
+  // does not move.
+  const pending = pendingSpendOf(d, rawHex);
   for (const i of d.inputs) {
     const o = w.orders.get(key(i));
     // (a `filling` one whose pending spend this tx replaces too)
     if (!o || (o.status !== "open" && o.status !== "filling")) continue;
-    Object.assign(o, { status: "filling", pending_spend_txid: d.txid, pending_fee_sats: null, pending_vsize: null, pending_feerate: null, updated_at: now() });
+    Object.assign(o, { status: "filling", pending_spend_txid: d.txid, ...pending });
   }
   for (const o of d.outputs) {
     // Every non-OP_RETURN output can carry tokens (§4 rule 5) — an
@@ -751,6 +793,7 @@ function mockTakeTicker() {
 /** Apply every confirmed-but-unapplied simulated tx (idempotent). */
 function settle() {
   const w = world();
+  expireOrders();
   const taken = mockTakeTicker();
   if (taken && !w.tokens.has(taken)) {
     w.tokens.set(taken, {
@@ -911,49 +954,248 @@ function applyTx(txid, e) {
     routeRest(); // not a protocol tx (incl. the withdrawn AVATAR op, §8) → the default output, burning when it is address-less
   }
 
-  // §7.5 order settlement for every spent outpoint (an order may be `filling`
-  // — the spend that confirms is the fill itself or a replacing withdrawal).
+  // §7.5 order settlement for every spent outpoint: a live order (it may be
+  // `filling` — the spend that confirms is a fill or a replacing
+  // withdrawal) or a listing that already left the book (its floor, whose
+  // signature was still valid). Only a spend signed with the listing's
+  // 0x83 signature that pays the seller at the listed input's own index
+  // (SIGHASH_SINGLE pairs them) fills; any other spend cancels. A fill is
+  // one trade, recorded once.
   for (const [idx, i] of d.inputs.entries()) {
-    const o = w.orders.get(key(i));
-    if (!o || (o.status !== "open" && o.status !== "filling")) continue;
-    // The payment is judged at the listed input's own index (SIGHASH_SINGLE
-    // pairs them), not at vout0 — §7.5.
-    const pay = d.outputs[idx];
-    const to = p && p.op === "SEND" ? d.outputs[p.toOutIdx] : null;
-    const isFill = isFillOf(d, dec, o, idx) && !!to;
-    o.updated_at = time;
-    o.spent_txid = txid;
-    o.spent_block = height;
-    o.pending_spend_txid = null;
-    o.pending_fee_sats = null;
-    o.pending_vsize = null;
-    o.pending_feerate = null;
-    if (isFill) {
-      o.status = "filled";
-      o.buyer = to.address;
-      const selfTrade = to.address === o.seller;
-      const trade = {
+    const k = key(i);
+    const o = w.orders.get(k);
+    const live = !!o && (o.status === "open" || o.status === "filling");
+    // A floor settles only for an outpoint the book holds no order for, and
+    // only when it names its seller (the book's rule).
+    const f = w.floors.get(k) || null;
+    const floor = !o && f && f.seller ? f : null;
+    w.floors.delete(k); // spent: the old signature is void now
+    if (!live && !floor) continue;
+    const listed = live ? o : floor;
+    const s = settleListingSpend(d, dec, listed, idx);
+    if (live) {
+      o.updated_at = time;
+      o.spent_txid = txid;
+      o.spent_block = height;
+      o.pending_spend_txid = null;
+      o.pending_fee_sats = null;
+      o.pending_vsize = null;
+      o.pending_feerate = null;
+      o.status = s.filled ? "filled" : "cancelled";
+      o.buyer = s.filled ? s.buyer : null;
+    }
+    if (s.filled && !w.trades.some((t) => t.txid === txid && t.order_id === listed.id)) {
+      w.trades.push({
         txid,
         block_height: height,
         block_hash: hash,
         block_time: time,
-        ticker: o.ticker,
-        amount: o.amount,
-        price_sats: pay.sats,
-        unit_price: pay.sats / o.amount,
-        seller: o.seller,
-        buyer: to.address,
-        order_id: o.id,
-        self_trade: selfTrade,
-      };
-      w.trades.push(trade);
-      const tok = w.tokens.get(o.ticker);
-      if (tok && !selfTrade) { tok.trade_count += 1; tok.volume_sats += pay.sats; }
-    } else {
-      o.status = "cancelled";
+        ticker: listed.ticker,
+        amount: listed.amount,
+        price_sats: s.priceSats,
+        unit_price: s.priceSats / listed.amount,
+        seller: listed.seller,
+        buyer: s.buyer,
+        order_id: listed.id,
+        self_trade: s.selfTrade,
+      });
+      const tok = w.tokens.get(listed.ticker);
+      if (tok && !s.selfTrade) { tok.trade_count += 1; tok.volume_sats += s.priceSats; }
     }
   }
 }
+
+// ---- listings that leave the book ---------------------------------------------------------
+
+/**
+ * §7.4 TTL, as the order book applies it: an OPEN listing whose
+ * `expires_at` has passed leaves the book, and its price stays behind as
+ * the outpoint's listing floor, with its seller — its signature can still
+ * be filled, so a higher re-listing is still refused, the seller still
+ * sees it (by-address, status "expired") and a fill of it is still a
+ * trade. A `filling` listing is exempt while its spend is in the mempool.
+ */
+function expireOrders(ts = now()) {
+  const w = world();
+  for (const [k, o] of w.orders) {
+    if (o.status !== "open" || !(o.expires_at <= ts)) continue;
+    w.orders.delete(k);
+    rememberFloor(o, ts);
+  }
+}
+
+/**
+ * Keep `o`'s price as its outpoint's floor (the cheaper of two signed
+ * listings stays; unit prices compared exactly, like the book: a/b < c/d ⇔
+ * a·d < c·b). A floor without a seller gets `o`'s — same outpoint, same
+ * script.
+ */
+function rememberFloor(o, ts) {
+  const w = world();
+  const prev = w.floors.get(o.id);
+  if (prev && !unitBelow(o, prev)) {
+    if (!prev.seller) Object.assign(prev, { seller: o.seller, carrier_sats: o.carrier_sats ?? null });
+    return;
+  }
+  w.floors.set(o.id, { id: o.id, ticker: o.ticker, amount: o.amount, price_sats: o.price_sats, unit_price: o.unit_price, seller: o.seller, carrier_sats: o.carrier_sats ?? null, created_at: o.created_at ?? null, dropped_at: ts });
+}
+
+/** Is the unit price of `a` ({ price_sats, amount }) strictly below that of `b`? Exact, in integers. */
+function unitBelow(a, b) {
+  return BigInt(a.price_sats) * BigInt(b.amount) < BigInt(b.price_sats) * BigInt(a.amount);
+}
+
+/** A floor as a row of the seller's by-address `expired` list (the order book's ExpiredListing). */
+function offBookRow(f, holder) {
+  return {
+    id: f.id,
+    ticker: f.ticker,
+    amount: f.amount,
+    price_sats: f.price_sats,
+    unit_price: f.price_sats / f.amount,
+    seller: f.seller || holder,
+    carrier_sats: f.carrier_sats ?? null,
+    status: "expired",
+    dropped_at: f.dropped_at,
+  };
+}
+
+// ---- a submitted listing, reduced to the fields a listing is judged by ----------------------------
+
+/** A Bitcoin CompactSize at `at` → [value, next offset]. */
+function readCompactSize(b, at) {
+  if (at >= b.length) throw new Error("unexpected end of data");
+  const x = b[at];
+  if (x < 0xfd) return [x, at + 1];
+  const n = x === 0xfd ? 2 : x === 0xfe ? 4 : 8;
+  if (at + 1 + n > b.length) throw new Error("unexpected end of data");
+  let v = 0;
+  for (let i = n - 1; i >= 0; i--) v = v * 256 + b[at + 1 + i];
+  if (!Number.isSafeInteger(v)) throw new Error("length out of range");
+  return [v, at + 1 + n];
+}
+
+function writeCompactSize(n) {
+  if (n < 0xfd) return Uint8Array.of(n);
+  if (n <= 0xffff) return Uint8Array.of(0xfd, n & 0xff, n >> 8);
+  return Uint8Array.of(0xfe, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >>> 24) & 0xff);
+}
+
+/** One PSBT key-value map at `at` → [[{ key, value }], next offset]. */
+function readPsbtMap(b, at) {
+  const entries = [];
+  for (let i = at; ;) {
+    const [keyLen, k] = readCompactSize(b, i);
+    if (keyLen === 0) return [entries, k];
+    const key = b.subarray(k, k + keyLen);
+    const [valueLen, v] = readCompactSize(b, k + keyLen);
+    const value = b.subarray(v, v + valueLen);
+    if (key.length !== keyLen || value.length !== valueLen) throw new Error("unexpected end of data");
+    entries.push({ key, value });
+    i = v + valueLen;
+  }
+}
+
+function writePsbtMap(entries) {
+  const parts = [];
+  for (const { key, value } of entries) parts.push(writeCompactSize(key.length), key, writeCompactSize(value.length), value);
+  parts.push(Uint8Array.of(0));
+  return parts;
+}
+
+// Input 0 key types a listing is judged by: witnessUtxo, partialSig,
+// sighashType, tapKeySig, tapInternalKey.
+const LISTING_INPUT_KEYS = new Set([0x01, 0x02, 0x03, 0x13, 0x17]);
+
+/**
+ * A submitted listing PSBT (bytes) reduced to what the order book reads
+ * from it: the unsigned tx, and on its inputs only witnessUtxo, partial
+ * signatures, sighashType, tapKeySig and a tapInternalKey that tweaks (no
+ * script tree) to the P2TR output key; no output fields, no other global
+ * fields, nothing after the last map. The book ignores everything else a
+ * PSBT carries (it keeps the canonical form), so a field the app's PSBT
+ * library would refuse to read never decides a listing here either.
+ */
+function listingPsbtFields(bytes) {
+  if (bytes.length < 5 || hex.encode(bytes.subarray(0, 5)) !== "70736274ff") throw new Error("not a PSBT (bad magic)");
+  const [globals, afterGlobals] = readPsbtMap(bytes, 5);
+  const txEntry = globals.find((e) => e.key.length === 1 && e.key[0] === 0x00);
+  if (!txEntry) throw new Error("no unsigned transaction");
+  const tx = btc.RawTx.decode(txEntry.value);
+  let at = afterGlobals;
+  const parts = [bytes.subarray(0, 5), ...writePsbtMap([txEntry])];
+  for (let i = 0; i < tx.inputs.length; i++) {
+    const [entries, next] = readPsbtMap(bytes, at);
+    at = next;
+    const utxo = entries.find((e) => e.key.length === 1 && e.key[0] === 0x01);
+    let spk = null;
+    if (utxo) {
+      const [len, s] = readCompactSize(utxo.value, 8);
+      spk = utxo.value.subarray(s, s + len);
+    }
+    const kept = entries.filter((e) => {
+      if (!LISTING_INPUT_KEYS.has(e.key[0])) return false;
+      if (e.key[0] !== 0x17) return true;
+      try {
+        return !!spk && e.value.length === 32 && hex.encode(btc.p2tr(e.value).script) === hex.encode(spk);
+      } catch {
+        return false;
+      }
+    });
+    parts.push(...writePsbtMap(kept));
+  }
+  for (let i = 0; i < tx.outputs.length; i++) {
+    const [, next] = readPsbtMap(bytes, at);
+    at = next;
+    parts.push(Uint8Array.of(0));
+  }
+  const len = parts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(len);
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
+/**
+ * The canonical listing PSBT the order book stores and serves after a
+ * listing passed its checks: the unsigned tx, input 0's witnessUtxo and
+ * sighash type 0x83, and the seller's signature — for P2WPKH only the
+ * partialSig whose key is the listed UTXO's, for P2TR only tapKeySig (and
+ * tapInternalKey only when it tweaks to the output key). Nothing else a
+ * PSBT can carry reaches a buyer.
+ */
+function canonicalListingPsbt(psbtHex) {
+  const src = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownOutputs: true });
+  const in0 = src.getInput(0);
+  const out0 = src.getOutput(0);
+  const script = in0.witnessUtxo.script;
+  const input = { txid: in0.txid, index: in0.index, sequence: in0.sequence, witnessUtxo: { script, amount: in0.witnessUtxo.amount }, sighashType: LISTING_SIGHASH };
+  const type = btc.OutScript.decode(script).type;
+  if (type === "wpkh") {
+    const own = sellerPartialSig(in0.partialSig, script);
+    if (own) input.partialSig = [own];
+  } else if (type === "tr") {
+    if (in0.tapKeySig) input.tapKeySig = in0.tapKeySig;
+    if (in0.tapInternalKey) {
+      try {
+        if (hex.encode(btc.p2tr(in0.tapInternalKey).script) === hex.encode(script)) input.tapInternalKey = in0.tapInternalKey;
+      } catch {
+        // not a key that tweaks to this output: left out
+      }
+    }
+  }
+  const tx = new btc.Transaction({ version: src.version, lockTime: src.lockTime, allowUnknownOutputs: true });
+  // The output first: once input 0 carries its SIGHASH_SINGLE signature, output 0 is fixed.
+  tx.addOutput({ script: out0.script, amount: out0.amount });
+  tx.addInput(input);
+  return hex.encode(tx.toPSBT());
+}
+
+/** The order book's refusal of a listed output below 546 sats. */
+export const SMALL_CARRIER_LISTING_TEXT = "listed output holds fewer than 546 sats; send the tokens to a 546-sat carrier first";
 
 /**
  * `{ address, sats }` of an outpoint the mock knows — one it created or
@@ -996,6 +1238,32 @@ function mockMyListings() {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Dev knob for a listing that left the book (§7.4):
+ * `sessionStorage["lp.mock.offBook"] = "1"` (this tab, read when the mock
+ * world is built — reload after setting it) gives the simulated wallet a
+ * 400-BLOK carrier whose listing below the floor ran out 15 days ago: the
+ * sell form and the portfolio show it as still fillable, with Withdraw.
+ */
+function mockOffBook() {
+  try {
+    return typeof sessionStorage !== "undefined" && sessionStorage.getItem("lp.mock.offBook") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function seedMyOffBook(floorUnit) {
+  if (!mockOffBook()) return;
+  const w = W;
+  const utxo = { txid: fakeTxid("my-offbook:0"), vout: 0, sats: DUST_SATS };
+  const amount = 400;
+  w.knownUtxos.set(key(utxo), { ...utxo, address: MOCK_WALLET.address, balances: { BLOK: amount }, confirmed: true, block_height: BASE_TIP - 3_000, origin: { op: "SEND", amount } });
+  const created = LOAD_TS - 29 * 86400;
+  const o = signedOrder({ seller: MOCK_ID, utxo, ticker: "BLOK", amount, price_sats: Math.max(DUST_SATS, Math.round(floorUnit * 0.8 * amount)), created_at: created });
+  rememberFloor(o, o.expires_at);
 }
 
 function seedMyListings(floorUnit) {
@@ -1092,6 +1360,26 @@ function mockSeedKnobs() {
   } catch {
     return { wait: 0, busy: null };
   }
+}
+
+/**
+ * Dev knob for a wallet with many outputs: `sessionStorage["lp.mock.manyUtxos"]
+ * = "N"` (1–5000) adds N confirmed 546-sat plain outputs to every address's
+ * `/btc-utxos` list, so its token carriers sort onto later pages (the
+ * list is paged like the indexer's). Outputs of 546 sats are never spent
+ * as fee inputs, so the knob changes what is listed, never what is spent.
+ */
+function mockExtraBtcUtxos(addr) {
+  let n = 0;
+  try {
+    n = Number(typeof sessionStorage !== "undefined" ? sessionStorage.getItem("lp.mock.manyUtxos") : 0);
+  } catch {
+    n = 0;
+  }
+  if (!Number.isInteger(n) || n <= 0) return [];
+  const count = Math.min(5000, n);
+  const salt = [...String(addr)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(8, "0");
+  return Array.from({ length: count }, (_, i) => ({ txid: `${salt}${i.toString(16).padStart(56, "0")}`, vout: 0, sats: DUST_SATS, confirmed: true, block_height: BASE_TIP - 10 }));
 }
 
 /** The live transport's error for a 503 / 429 with a JSON body (indexer.js `_httpGet`). */
@@ -1365,10 +1653,34 @@ const publicOrder = ({ psbt: _psbt, ...rest }) => ({ ...rest, market_open: isMar
 
 const notFound = (p) => Object.assign(new Error(`Indexer ${p} -> HTTP 404`), { status: 404 });
 
-function page(all, q, dfltLimit = 20) {
-  const limit = Math.max(1, Math.min(200, Number(q.get("limit") || dfltLimit)));
+/**
+ * One page of `all`, clamped like the indexer: `limit` defaults to
+ * `dfltLimit` and is at most `maxLimit`; at least 1 unless `allowZero` (the
+ * global lists — /mines, /tokens/:ticker/holders — only cap it, so
+ * `limit=0` there is an empty page).
+ */
+function page(all, q, dfltLimit = 20, maxLimit = 200, { allowZero = false } = {}) {
+  const raw = q.get("limit");
+  const asked = raw === null || raw === "" ? dfltLimit : Number(raw);
+  const limit = Math.max(allowZero ? 0 : 1, Math.min(maxLimit, Number.isFinite(asked) ? Math.floor(asked) : dfltLimit));
   const offset = Math.max(0, Number(q.get("offset") || 0));
   return { total: all.length, offset, limit, items: all.slice(offset, offset + limit) };
+}
+
+/** The global lists' page (`/mines`, `/tokens/:ticker/holders`): default 100 rows, at most 500. */
+export const MOCK_LIST_DEFAULT_LIMIT = 100;
+export const MOCK_LIST_MAX_LIMIT = 500;
+
+/** The indexer's `/tokens` page: default 10 rows, at most 500, oldest deploy first (then ticker). */
+export const MOCK_TOKENS_DEFAULT_LIMIT = 10;
+export const MOCK_TOKENS_MAX_LIMIT = 500;
+/** The indexer's `/btc-utxos` page: default 200 rows, at most 500, largest `sats` first. */
+export const MOCK_BTC_UTXOS_DEFAULT_LIMIT = 200;
+export const MOCK_BTC_UTXOS_MAX_LIMIT = 500;
+
+/** `/btc-utxos` rows in the indexer's order: sats desc, confirmed before pending, then txid, vout. */
+export function btcUtxoOrder(a, b) {
+  return b.sats - a.sats || Number(b.confirmed) - Number(a.confirmed) || (a.txid < b.txid ? -1 : a.txid > b.txid ? 1 : 0) || a.vout - b.vout;
 }
 
 /** Fake `GET path` → parsed JSON. Throws `HTTP 404` like the real transport. */
@@ -1424,8 +1736,10 @@ export async function mockGet(path) {
     const addr = decodeURIComponent(m[1]);
     const notYet = mockSeedAnswer(addr, path);
     if (notYet) throw notYet;
-    const utxos = liveUtxos(addr).map(({ txid, vout, sats, confirmed, block_height }) => ({ txid, vout, sats, confirmed, block_height }));
-    return { address: addr, scanned_at_height: tipHeight(), utxos };
+    const all = [...liveUtxos(addr), ...mockExtraBtcUtxos(addr)].map(({ txid, vout, sats, confirmed, block_height }) => ({ txid, vout, sats, confirmed, block_height })).sort(btcUtxoOrder);
+    // Paged like the indexer: a wallet's smallest outputs (its token carriers) are on the last page.
+    const pg = page(all, q, MOCK_BTC_UTXOS_DEFAULT_LIMIT, MOCK_BTC_UTXOS_MAX_LIMIT);
+    return { address: addr, scanned_at_height: tipHeight(), utxos: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset };
   }
   if ((m = p.match(/^\/mines\/by-txid\/([^/]+)$/))) {
     const txid = decodeURIComponent(m[1]).toLowerCase();
@@ -1447,19 +1761,22 @@ export async function mockGet(path) {
     const ticker = q.get("ticker");
     let all = [...w.simMines].sort((a, b) => b.block_height - a.block_height).concat(w.feed, w.history.mines);
     if (ticker) all = all.filter((r) => r.ticker === ticker);
-    const pg = page(all, q, 20);
+    const pg = page(all, q, MOCK_LIST_DEFAULT_LIMIT, MOCK_LIST_MAX_LIMIT, { allowZero: true });
     return { ...pg, items: pg.items.map(mineView) };
   }
   if (p === "/tokens") {
     const deployer = q.get("deployer");
-    const items = [...w.tokens.values()].filter((t) => !deployer || t.deployer === deployer).map(tokenView);
-    return page(items, q, 10);
+    const items = [...w.tokens.values()]
+      .filter((t) => !deployer || t.deployer === deployer)
+      .sort((a, b) => a.deploy_block - b.deploy_block || (a.ticker < b.ticker ? -1 : a.ticker > b.ticker ? 1 : 0))
+      .map(tokenView);
+    return page(items, q, MOCK_TOKENS_DEFAULT_LIMIT, MOCK_TOKENS_MAX_LIMIT);
   }
   if ((m = p.match(/^\/tokens\/([^/]+)\/holders$/))) {
     const t = w.tokens.get(decodeURIComponent(m[1]));
     if (!t) throw notFound(p);
     const all = holdersFor(t);
-    const pg = page(all, q, 25);
+    const pg = page(all, q, MOCK_LIST_DEFAULT_LIMIT, MOCK_LIST_MAX_LIMIT, { allowZero: true });
     return { ticker: t.ticker, total: Math.max(t.holders, all.length), limit: pg.limit, offset: pg.offset, holders: pg.items };
   }
   if ((m = p.match(/^\/tokens\/([^/]+)\/market$/))) {
@@ -1480,8 +1797,10 @@ export async function mockGet(path) {
   }
   if ((m = p.match(/^\/transfers\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);
-    const transfers = [...w.simSends, ...w.history.sends].filter((s) => s.sender === addr || s.to === addr).sort((a, b) => b.block_height - a.block_height);
-    return { address: addr, transfers, total: transfers.length, limit: transfers.length, offset: 0 };
+    const all = [...w.simSends, ...w.history.sends].filter((s) => s.sender === addr || s.to === addr).sort((a, b) => b.block_height - a.block_height);
+    // Paged like every per-address list of the indexer (default 50, max 200).
+    const pg = page(all, q, 50);
+    return { address: addr, transfers: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset };
   }
   if (p === "/activity/daily") {
     const days = Math.max(1, Math.min(365, Number(q.get("days") || 30)));
@@ -1609,10 +1928,20 @@ export async function mockGet(path) {
   }
   if ((m = p.match(/^\/orders\/by-address\/([^/]+)$/))) {
     // Paged like the live indexer (indexer API: limit default 50, max 200).
+    // Beside the book's rows: the seller's listings that left the book with
+    // their outpoint unspent (status "expired" — still fillable).
+    // `expired` — like the live indexer — is every such listing on every
+    // page, newest drop first (at most 500), outside the paging and `total`.
     const addr = decodeURIComponent(m[1]);
-    const rows = [...w.orders.values()].filter((o) => o.seller === addr).sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id)).map(publicOrder);
+    const book = [...w.orders.values()].filter((o) => o.seller === addr);
+    const live = new Set(book.filter((o) => o.status === "open" || o.status === "filling").map((o) => o.id));
+    // A floor is listed while the address still holds its (unspent) outpoint;
+    // a floor without a recorded seller counts as the holder's.
+    const heldBy = (f) => (prevoutOf(f.id)?.address ?? f.seller) === addr;
+    const offBook = [...w.floors.values()].filter((f) => (!f.seller || f.seller === addr) && heldBy(f) && !live.has(f.id)).sort((a, b) => (b.dropped_at ?? 0) - (a.dropped_at ?? 0) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    const rows = book.sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)).map(publicOrder);
     const pg = page(rows, q, 50);
-    return { address: addr, orders: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset };
+    return { address: addr, orders: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset, expired: offBook.slice(0, 500).map((f) => offBookRow(f, addr)), expired_total: offBook.length };
   }
   if ((m = p.match(/^\/orders\/([^/]+)$/))) {
     const o = w.orders.get(decodeURIComponent(m[1]).toLowerCase());
@@ -1623,16 +1952,18 @@ export async function mockGet(path) {
     const ticker = q.get("ticker");
     // `open` excludes `filling` (a spend is already in the mempool); ask for
     // `filling` or `all` explicitly — exactly the live indexer's contract.
-    const status = q.get("status") || "open";
+    const status = (q.get("status") || "").trim().toLowerCase() || "open";
+    if (!["open", "filling", "filled", "cancelled", "all"].includes(status)) {
+      throw Object.assign(new Error(`Indexer ${path} -> HTTP 400: status must be one of open | filling | filled | cancelled | all`), { status: 400 });
+    }
     let all = [...w.orders.values()];
     if (ticker) all = all.filter((o) => o.ticker === ticker);
     if (status !== "all") all = all.filter((o) => o.status === status);
     // No live orders (open or filling) of a ticker whose market is not open,
     // whatever `status` asks (the live book's rule); closed ones stay listed.
     all = all.filter((o) => (o.status !== "open" && o.status !== "filling") || isMarketOpen(w.tokens.get(o.ticker)));
-    all = status === "open" || status === "filling"
-      ? all.sort((a, b) => a.unit_price - b.unit_price || a.created_at - b.created_at)
-      : all.sort((a, b) => b.updated_at - a.updated_at);
+    // The book's one order for every status: unit price, then age, then id (byte order).
+    all.sort((a, b) => a.unit_price - b.unit_price || a.created_at - b.created_at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     return page(all.map(publicOrder), q, 50);
   }
   if ((m = p.match(/^\/trades\/([^/]+)$/))) {
@@ -1659,9 +1990,27 @@ export async function mockPostText(path, body) {
     if (typeof body !== "string" || body.length < 20) {
       throw Object.assign(new Error("broadcast HTTP 400: empty or malformed tx hex"), { status: 400 });
     }
+    // Dev knob for a relay that fails, while it is set:
+    // `sessionStorage["lp.mock.relayDown"]` = "1" — every relay answers 502
+    // and nothing is sent; = "silent" — the tx is sent, but the relay
+    // answers 502 all the same.
+    const down = mockRelayDown();
+    if (down === "silent") simulateBroadcast(body);
+    if (down) throw Object.assign(new Error("/broadcast HTTP 502: bad gateway"), { status: 502 });
     return simulateBroadcast(body);
   }
   throw notFound(path);
+}
+
+/** The relay-failure knob (see mockPostText): "1", "silent" or null. */
+function mockRelayDown() {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+    const v = sessionStorage.getItem("lp.mock.relayDown");
+    return v === "1" || v === "silent" ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 // The live transport's shape (indexer.orderHttpError): the server's `{ error }`
@@ -1671,77 +2020,164 @@ const bad = (msg, status = 400) => {
   return Object.assign(new Error(serverErrorText(body)), { status, path: "/orders", body });
 };
 
+/** The order book's 503 while it cannot write listings to disk. */
+const ORDERS_NOT_SAVED_TEXT = "the order book cannot be saved right now; retry shortly";
+
+/** A JSON number the book reads as an unsigned integer. */
+const isU64 = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+/** Names of the sighash types, as the order book prints them. */
+const TAP_SIGHASH_NAMES = { 0x00: "SIGHASH_DEFAULT", 0x01: "SIGHASH_ALL", 0x02: "SIGHASH_NONE", 0x03: "SIGHASH_SINGLE", 0x81: "SIGHASH_ALL|SIGHASH_ANYONECANPAY", 0x82: "SIGHASH_NONE|SIGHASH_ANYONECANPAY", 0x83: "SIGHASH_SINGLE|SIGHASH_ANYONECANPAY" };
+const sighashName = (b) => TAP_SIGHASH_NAMES[b] ?? `0x${Number(b).toString(16).padStart(2, "0")}`;
+
+/**
+ * The listing rules that need nothing but the PSBT, in the order book's
+ * order and with its texts: amount and price range, the PSBT itself, one
+ * input and one output, lock time 0, a version and input sequence a fill
+ * can relay, the output paying the listed UTXO's own script exactly the
+ * price, a carrier of at least 546 sats priced at least at its own value,
+ * sighash type 0x83 and the seller's signature carrying it (P2TR key path
+ * or the P2WPKH witness-program key). The mock checks the signature's
+ * type byte, not the signature itself. → { input0, seller, carrierSats,
+ * psbtHex: the listing reduced to the fields judged (listingPsbtFields) }
+ */
+function listingFacts(psbtHex, amount, price_sats) {
+  if (amount < 1 || amount > REQUIRED_TOKEN_SUPPLY) throw bad(`amount must be in [1, ${REQUIRED_TOKEN_SUPPLY}]`);
+  const maxPrice = amount * 100_000_000;
+  if (!(price_sats >= DUST_SATS && price_sats <= maxPrice)) {
+    throw bad(`price_sats must be in [${DUST_SATS}, ${maxPrice}] (≤ 1 BTC per whole token × ${amount})`);
+  }
+  const text = psbtHex.trim();
+  if (!/^([0-9a-fA-F]{2})*$/.test(text)) throw bad("psbt is not valid hex");
+  let L;
+  let judged;
+  try {
+    judged = hex.encode(listingPsbtFields(hex.decode(text)));
+    L = parseListing(judged);
+  } catch (e) {
+    throw bad(`psbt does not decode: ${e.message || e}`);
+  }
+  if (L.inputCount !== 1 || L.outputCount !== 1) throw bad("psbt must have exactly 1 input and 1 output");
+  if (L.lockTime !== 0) throw bad("nLockTime must be 0");
+  // §7.4: refuse a listing no fill could ever relay — the 0x83
+  // signature commits nVersion and input0's nSequence, so no buyer can fix
+  // them.
+  if (L.version !== 1 && L.version !== 2) throw bad(`listing tx version must be 1 or 2 (got ${L.version}): a listing with any other version can never be filled`);
+  const seq = L.input0.sequence;
+  if (!Number.isInteger(seq) || seq < 0x80000000) {
+    throw bad(`input0 nSequence 0x${(Number(seq) >>> 0).toString(16).padStart(8, "0")} sets a relative timelock: use 0xfffffffd, 0xfffffffe or 0xffffffff (any value >= 0x80000000) so the listing can be filled`);
+  }
+  const wu = L.input0.witnessUtxo;
+  if (!wu) throw bad("input0 missing witnessUtxo");
+  if (hex.encode(L.output0.script) !== hex.encode(wu.script)) throw bad("output0 must pay the seller's own script (== witnessUtxo.scriptPubKey)");
+  if (L.output0.amount !== BigInt(price_sats)) throw bad(`output0 value ${L.output0.amount} != price_sats ${price_sats}`);
+  const carrierSats = Number(wu.amount);
+  if (carrierSats < DUST_SATS) throw bad(SMALL_CARRIER_LISTING_TEXT);
+  if (price_sats < carrierSats) {
+    throw bad(`price_sats ${price_sats} is below the listed UTXO's own value ${carrierSats} sat — BTC above price on the carrier goes to the buyer, so the ask must cover it (split the tokens onto a 546-sat carrier first to sell only tokens)`);
+  }
+  const st = L.input0.sighashType;
+  if (st === null || st === undefined) throw bad("input0 missing sighashType (must be 0x83)");
+  if (st !== LISTING_SIGHASH) throw bad(`input0 sighashType must be 0x83 (SINGLE|ANYONECANPAY), got 0x${Number(st).toString(16).padStart(2, "0")}`);
+  if (L.input0.scriptType === "tr") {
+    const sig = L.input0.tapKeySig;
+    if (!sig) throw bad("input0 missing tapKeySig (P2TR listing must be key-path signed)");
+    const type = sig.length === 64 ? 0x00 : sig[sig.length - 1];
+    if (type !== LISTING_SIGHASH) throw bad(`tapKeySig sighash byte must be SINGLE|ANYONECANPAY, got ${sighashName(type)}`);
+  } else if (L.input0.scriptType === "wpkh") {
+    const own = sellerPartialSig(L.input0.partialSig, wu.script);
+    if (!own) throw bad("input0 has no partialSig for the witness-program key");
+    const type = own[1][own[1].length - 1];
+    if (type !== LISTING_SIGHASH) throw bad(`partialSig sighash byte must be SINGLE|ANYONECANPAY, got ${sighashName(type)}`);
+  } else {
+    throw bad("unsupported script type: only P2TR key-path and P2WPKH listings are accepted");
+  }
+  const seller = L.input0.address;
+  if (!seller) throw bad("listed script has no address form");
+  return { input0: L.input0, seller, carrierSats, psbtHex: judged };
+}
+
+/** The simulated tx spending outpoint `k`, as `{ txid, confirmed }`, or null. */
+function spendOf(k) {
+  for (const [txid, e] of world().sim) {
+    if (e.decoded.inputs.some((i) => key(i) === k)) return { txid, confirmed: simConfirmed(e) };
+  }
+  return null;
+}
+
 /** Fake `POST path` with a JSON body → JSON response. */
 export async function mockPostJson(path, body) {
   await sleep(LATENCY_MS * 2);
   const w = world();
   settle();
   if (path !== "/orders") throw notFound(path);
-  if (!body || typeof body !== "object") throw bad("body must be JSON");
-  const { psbt, ticker, amount, price_sats } = body;
-  if (!w.tokens.has(ticker)) throw bad(`unknown ticker ${ticker}`);
-  // The market gate comes first, before anything in the listing is read — as the live book checks it.
+  if (!body || typeof body !== "object" || typeof body.psbt !== "string" || typeof body.ticker !== "string" || !isU64(body.amount) || !isU64(body.price_sats)) {
+    throw bad("invalid JSON body: expected { psbt, ticker, amount, price_sats }");
+  }
+  const psbt = body.psbt;
+  const amount = Number(body.amount);
+  const price_sats = Number(body.price_sats);
+  const ticker = body.ticker.trim().toUpperCase();
+  if (!/^[A-Z0-9]{1,8}$/.test(ticker)) throw bad("ticker must match [A-Z0-9]{1,8}");
+  // 0. The market gate comes first, before anything in the listing is read,
+  //    then the book's ability to save it — as the live book checks them. A
+  //    ticker the registry does not hold is left to the UTXO checks.
   const tok = w.tokens.get(ticker);
-  if (!isMintedOut(tok)) throw bad(`market opens when ${ticker} is fully minted (minted ${tok.minted} of ${tok.supply})`, 409);
-  if (!isMarketOpen(tok)) throw bad(`market opens at block ${marketOpensAt(tok)}`, 409);
-  // §7.4: price_sats ≤ amount × 1 BTC (at most 1 BTC per whole token).
-  const maxPrice = Number(amount) * 100_000_000;
-  if (!(Number(price_sats) >= DUST_SATS && Number(price_sats) <= maxPrice)) {
-    throw bad(`price_sats must be in [${DUST_SATS}, ${maxPrice}] (≤ 1 BTC per whole token × ${amount})`);
-  }
-  let L;
-  try {
-    L = parseListing(psbt);
-  } catch (e) {
-    throw bad(`psbt does not decode: ${e.message || e}`);
-  }
-  if (L.inputCount !== 1 || L.outputCount !== 1 || L.lockTime !== 0) throw bad("listing must have exactly 1 input, 1 output and nLockTime 0");
-  // §7.4: refuse a listing no fill could ever relay — the 0x83
-  // signature commits nVersion and input0's nSequence, so no buyer can fix
-  // them. The texts are byte-identical to the order book's.
-  if (L.version !== 1 && L.version !== 2) throw bad(`listing tx version must be 1 or 2 (got ${L.version}): a listing with any other version can never be filled`);
-  const seq = L.input0.sequence;
-  if (!Number.isInteger(seq) || seq < 0x80000000) {
-    throw bad(`input0 nSequence 0x${(Number(seq) >>> 0).toString(16).padStart(8, "0")} sets a relative timelock: use 0xfffffffd, 0xfffffffe or 0xffffffff (any value >= 0x80000000) so the listing can be filled`);
-  }
+  if (tok && !isMintedOut(tok)) throw bad(`market opens when ${ticker} is fully minted (minted ${tok.minted} of ${tok.supply})`, 409);
+  if (tok && !isMarketOpen(tok)) throw bad(`market opens at block ${marketOpensAt(tok)}`, 409);
+  if (mockHealthOverride().persist_ok === false) throw bad(ORDERS_NOT_SAVED_TEXT, 503);
+  // 1. Everything decidable from the PSBT alone, in the book's order and
+  //    with its texts.
+  const L = listingFacts(psbt, amount, price_sats);
   const outpoint = `${L.input0.txid}:${L.input0.vout}`;
-  // §7.4: the carrier of an open COMMIT is never listed.
-  const reserving = L.input0.vout === 0 ? w.commits.get(String(L.input0.txid).toLowerCase()) : null;
-  if (reserving && reserving.status === "open" && !reserving.spent_txid && tipHeight() < reserving.height + MAX_COMMIT_AGE) throw bad(COMMIT_CARRIER_LISTING_TEXT, 409);
   if (L.input0.address) ensureSeeded(L.input0.address);
-  const u = lookupUtxo(outpoint);
-  if (!u || !u.confirmed) throw bad("input0 outpoint is not a known token UTXO", 400);
-  if (w.spent.has(outpoint)) throw bad("outpoint is spent or has a pending spend", 409);
-  const bal = Object.entries(u.balances || {});
-  if (bal.length !== 1 || bal[0][0] !== ticker || bal[0][1] !== Number(amount)) {
-    throw bad(`outpoint balances are ${JSON.stringify(u.balances)}, listing says { ${ticker}: ${amount} }`);
+  // 2. The book's state: no spend of it in flight, not a reservation's
+  //    carrier, no cheaper signed listing of it, and a confirmed token UTXO
+  //    carrying exactly this listing's tokens, held by the PSBT's script.
+  const existing = w.orders.get(outpoint);
+  if (existing && existing.status === "filling") throw bad(`outpoint has a pending spend in the mempool (${existing.pending_spend_txid || "unknown txid"})`, 409);
+  // §7.4: the carrier of an open COMMIT is never listed — nor, after it
+  // expired, until its last reveal block has FINAL_DEPTH confirmations at
+  // the indexed height (the book's own rule).
+  const reserving = L.input0.vout === 0 ? w.commits.get(String(L.input0.txid).toLowerCase()) : null;
+  if (reserving && reserving.status === "open" && !reserving.spent_txid && indexedHeight() < reserving.height + MAX_COMMIT_AGE + FINAL_DEPTH - 1) throw bad(COMMIT_CARRIER_LISTING_TEXT, 409);
+  // §7.4: the book keeps the CHEAPEST live signed listing of an
+  // outpoint — the cheaper PSBT stays fillable on-chain whatever the book
+  // shows, live or remembered as the outpoint's listing floor after it
+  // left the book (while the outpoint is unspent); the same or a lower
+  // price replaces it. Compared exactly, in integers.
+  const asked = { price_sats, amount };
+  const floor = w.floors.get(outpoint);
+  if ((existing && existing.status === "open" && unitBelow(existing, asked)) || (floor && unitBelow(floor, asked))) {
+    throw bad(WITHDRAW_FIRST_TEXT, 409);
   }
-  if (L.input0.address !== u.address) throw bad("witnessUtxo script does not match the outpoint");
+  const u = lookupUtxo(outpoint);
+  const spend = w.spent.has(outpoint) ? spendOf(outpoint) : null;
+  // A confirmed spend (or one the mock cannot place) leaves the outpoint unknown to the book.
+  if (!u || !u.confirmed || (w.spent.has(outpoint) && (!spend || spend.confirmed))) {
+    throw bad("outpoint is not a token-bearing UTXO known to the indexer (spent, unconfirmed, or never carried tokens)");
+  }
+  const bal = Object.entries(u.balances || {});
+  if (bal.length !== 1 || bal[0][0] !== ticker || bal[0][1] !== amount) {
+    const have = bal.map(([t, a]) => `${t}: ${a}`).sort();
+    throw bad(`outpoint carries { ${have.join(", ")} }, listing must be its whole balance { ${ticker}: ${amount} }`);
+  }
+  if (!u.address) throw bad("listed UTXO's script has no address form");
+  if (u.address !== L.seller) throw bad(`listed UTXO belongs to ${u.address}, PSBT script derives to ${L.seller}`);
+  // 3. The node (mempool-aware): the output must still be there, and match the PSBT's witnessUtxo.
+  if (spend) throw bad("outpoint spent or pending spend", 409);
+  if (Number(u.sats) !== L.carrierSats) {
+    throw bad(`witnessUtxo (${L.carrierSats} sat) does not match the on-chain output (${u.sats} sat / script)`);
+  }
   const order = {
     id: outpoint,
     ticker,
-    amount: Number(amount),
-    price_sats: Number(price_sats),
-    unit_price: Number(price_sats) / Number(amount),
+    amount,
+    price_sats,
+    unit_price: price_sats / amount,
     seller: u.address,
     carrier_sats: u.sats,
   };
-  const v = verifyListing({ psbtHex: psbt, order });
-  if (!v.ok) {
-    const first = v.checks.find((c) => !c.ok);
-    throw bad(`${first.label}: ${first.detail}`);
-  }
-  const existing = w.orders.get(outpoint);
-  // §7.3: an outpoint the book shows as `filling` has a spend in the
-  // mempool — a buyer must not be handed it again (and it is exempt from
-  // expiry, so there is nothing to renew).
-  if (existing && existing.status === "filling") throw bad("outpoint has a pending spend in the mempool (filling)", 409);
-  // §7.4: the book keeps the CHEAPEST live signed listing of an
-  // outpoint — the cheaper PSBT stays fillable on-chain whatever the book
-  // shows; the same or a lower price replaces it.
-  if (existing && existing.status === "open" && order.unit_price > existing.unit_price + 1e-9) {
-    throw bad(WITHDRAW_FIRST_TEXT, 409);
-  }
   // §7.4 per-seller cap, checked where the order book checks it (after the
   // two checks above, before the price band) and with its exact text naming
   // the real count. Counts OPEN listings only (not `filling`), not expired.
@@ -1755,13 +2191,28 @@ export async function mockPostJson(path, body) {
     if (perAddress >= MAX_OPEN_LISTINGS_PER_ADDRESS) throw bad(sellerCapError(perAddress, MAX_OPEN_LISTINGS_PER_ADDRESS), 400);
   }
   // §7.4 price band, the live indexer's exact rule: at most
-  // 100× the ticker's best OTHER open ask; no band on an otherwise empty book.
+  // 100× the ticker's best OTHER open ask, compared exactly in integers
+  // (price × best.amount ≤ 100 × best.price × amount); no band on an
+  // otherwise empty book. An ask already at the least price its carrier
+  // allows is told how many tokens such a carrier needs; a carrier holding
+  // more than 546 sats cannot ask less than its own value, so it is told
+  // how many tokens a fresh 546-sat carrier needs instead.
   const others = [...w.orders.values()].filter((o) => o.ticker === ticker && o.status === "open" && o.id !== outpoint);
   if (others.length) {
-    const best = Math.min(...others.map((o) => o.unit_price));
-    const ceiling = best * MAX_ASK_BAND_MULTIPLE;
-    if (order.unit_price > ceiling) {
-      throw bad(`unit price ${order.unit_price.toFixed(4)} sats/token is outside the price band: at most ${MAX_ASK_BAND_MULTIPLE}× the current best ${ticker} ask (${best.toFixed(4)} sats/token → ceiling ${ceiling.toFixed(4)})`);
+    const best = others.reduce((a, o) => (BigInt(o.price_sats) * BigInt(a.amount) < BigInt(a.price_sats) * BigInt(o.amount) ? o : a));
+    const over = BigInt(order.price_sats) * BigInt(best.amount) > BigInt(MAX_ASK_BAND_MULTIPLE) * BigInt(best.price_sats) * BigInt(order.amount);
+    if (over) {
+      const bestUnit = best.price_sats / best.amount;
+      const carrier = Number(u.sats) || 0;
+      const least = Math.max(DUST_SATS, carrier);
+      const needAt = (p) => Math.ceil((p * best.amount) / (MAX_ASK_BAND_MULTIPLE * best.price_sats));
+      let hint = "";
+      if (order.price_sats <= least) {
+        hint = carrier > DUST_SATS
+          ? `; this carrier holds ${carrier} sats, so its ask cannot go lower — send the tokens to a ${DUST_SATS}-sat carrier holding at least ${needAt(DUST_SATS)} tokens (a send to yourself) first`
+          : `; at this ask a carrier listed at ${least} sats needs at least ${needAt(least)} tokens — combine tokens onto one carrier (a send to yourself) first`;
+      }
+      throw bad(`unit price ${order.unit_price.toFixed(4)} sats/token is outside the price band: at most ${MAX_ASK_BAND_MULTIPLE}× the current best ${ticker} ask (${bestUnit.toFixed(4)} sats/token → ceiling ${(bestUnit * MAX_ASK_BAND_MULTIPLE).toFixed(4)})${hint}`);
     }
   }
   const row = {
@@ -1778,8 +2229,12 @@ export async function mockPostJson(path, body) {
     pending_fee_sats: null,
     pending_vsize: null,
     pending_feerate: null,
-    psbt: String(psbt).toLowerCase(),
+    psbt: canonicalListingPsbt(L.psbtHex),
   };
+  // At or below any floor of this outpoint (a pricier one was refused
+  // above): the book shows the cheapest signed listing again, and this one
+  // leaves its own floor if it goes.
+  w.floors.delete(outpoint);
   w.orders.set(outpoint, row);
   return { ...publicOrder(row), replaced: !!existing && existing.status === "open" };
 }

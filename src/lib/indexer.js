@@ -18,11 +18,11 @@
 //   GET  /                          health
 //   GET  /balances/:addr            balances
 //   GET  /utxos/:addr               tokenUtxos        (token-bearing only)
-//   GET  /btc-utxos/:addr           btcUtxos          (raw BTC UTXOs)
+//   GET  /btc-utxos/:addr           btcUtxos          (raw BTC UTXOs, every page)
 //   GET  /mines/:addr               minesByAddress
 //   GET  /mines?limit&offset&ticker minesFeed
 //   GET  /mines/by-txid/:txid       mineByTxid
-//   GET  /tokens?limit&offset       tokens            (rows carry market_24h)
+//   GET  /tokens?limit&offset       tokens / allTokens (rows carry market_24h)
 //   GET  /tokens/:ticker            token
 //   GET  /tokens/:ticker/holders    tokenHolders
 //   GET  /tokens/:ticker/market     market            (?window=24h|7d)
@@ -110,7 +110,7 @@ function _timedSignal(callerSignal) {
   };
 }
 
-async function _httpGet(path, signal) {
+async function _httpGet(path, signal, { fresh = false } = {}) {
   if (MOCK) return mockGet(path);
   const url = `${INDEXER_URL}${path}`;
   const t = _timedSignal(signal);
@@ -121,7 +121,9 @@ async function _httpGet(path, signal) {
   try {
     let res;
     try {
-      res = await fetch(url, { signal: t.signal });
+      // `fresh`: an answer that must not come from the browser's cache (the
+      // caller also varies the URL, so no shared cache answers it either).
+      res = await fetch(url, fresh ? { signal: t.signal, cache: "no-store" } : { signal: t.signal });
     } catch (e) {
       if (t.timedOut()) throw new Error(`Indexer timeout after ${HTTP_TIMEOUT_MS}ms: ${url}`);
       if (signal && signal.aborted) throw e;
@@ -417,8 +419,11 @@ function _sanitizeTradeRow(t) {
 // OrderView (§7.4). `psbt` is hex-only and only present on GET /orders/:id.
 // `filling`: the indexer sees a spend of the listed outpoint in
 // the mempool; the pending_* fields describe that spend and are null for
-// every other status.
-const _ORDER_STATUS = new Set(["open", "filling", "filled", "cancelled"]);
+// every other status. `expired` (only in a seller's own by-address list): a
+// listing that left the book (its time ran out, or a cap pushed it out)
+// whose outpoint is still unspent — its signature can still be filled at
+// its price; `carrier_sats` may be unknown (null) there.
+const _ORDER_STATUS = new Set(["open", "filling", "filled", "cancelled", "expired"]);
 function _sanitizeOrderRow(o) {
   if (!o || typeof o !== "object") return null;
   if (!_ORDER_ID_RE.test(String(o.id || ""))) return null;
@@ -427,9 +432,9 @@ function _sanitizeOrderRow(o) {
   const price = _safeInt(o.price_sats, _MAX_SATS);
   const carrier = _safeInt(o.carrier_sats, _MAX_SATS);
   const seller = _safeAddr(o.seller);
-  if (amount === null || amount < 1 || price === null || price < 546 || carrier === null || !seller) return null;
   const status = _ORDER_STATUS.has(o.status) ? o.status : null;
   if (!status) return null;
+  if (amount === null || amount < 1 || price === null || price < 546 || (carrier === null && status !== "expired") || !seller) return null;
   const psbt = o.psbt !== undefined && o.psbt !== null ? _safeHex(o.psbt) : null;
   const spentTxid = _TXID_RE.test(String(o.spent_txid || "")) ? String(o.spent_txid).toLowerCase() : null;
   const filling = status === "filling";
@@ -456,6 +461,7 @@ function _sanitizeOrderRow(o) {
     // false while the ticker's market is not open yet (the book then offers
     // no fill of it); anything but an explicit false is an open market
     market_open: o.market_open !== false,
+    ...(status === "expired" ? { dropped_at: _safeInt(o.dropped_at, 1e12) } : {}),
     ...(psbt ? { psbt } : {}),
     ...(o.replaced === true ? { replaced: true } : {}),
   };
@@ -785,7 +791,9 @@ export async function tokenUtxos(address, signal) {
 }
 
 /**
- * GET /btc-utxos/:addr → `[{ txid, vout, sats, confirmed, block_height }]`.
+ * GET /btc-utxos/:addr?limit&offset → `[{ txid, vout, sats, confirmed, block_height }]`,
+ * EVERY page (see BTC_UTXOS_PAGE), merged by outpoint; `firstPageOnly`
+ * reads just the first (enough to start the indexer's scan of a wallet).
  * The first query for an address returns 503 while the indexer's scan of
  * it is queued or running (with `queuePosition` / `etaSecs` when the
  * indexer names them), and 429 while the scan queue is full or this
@@ -793,9 +801,65 @@ export async function tokenUtxos(address, signal) {
  * thrown errors (with `retryAfter`) the caller retries or explains — see
  * src/lib/retry.js.
  */
-export async function btcUtxos(address, signal) {
-  const env = await _httpGet(`/btc-utxos/${encodeURIComponent(address)}`, signal);
-  return ((env && env.utxos) || []).map(_sanitizeBtcUtxo).filter(Boolean);
+export async function btcUtxos(address, signal, { firstPageOnly = false } = {}) {
+  const read = () => _readBtcUtxoPages(address, signal, firstPageOnly ? 1 : BTC_UTXOS_MAX_PAGES);
+  let r = await read();
+  // Pages read while a block (or a mempool tx) changed the list can repeat
+  // or skip a row: when consecutive pages do not meet (see below) or the
+  // rows do not add up to `total`, the list is read once more.
+  if (!firstPageOnly && r.total !== null && r.complete && (!r.consistent || r.rows.length !== r.total)) r = await read();
+  const rows = r.rows;
+  // `complete: false` = some rows were not read (the page cap); `total` = the
+  // indexer's count (null when it does not say).
+  Object.defineProperty(rows, "complete", { value: r.complete, enumerable: false });
+  Object.defineProperty(rows, "total", { value: r.total, enumerable: false });
+  return rows;
+}
+
+/**
+ * `/btc-utxos` pages: the indexer serves at most BTC_UTXOS_PAGE rows a
+ * page, largest `sats` first — a wallet's small outputs (its 546-sat token
+ * carriers among them) sit on the LAST pages, so a reader that stops at
+ * the first page loses exactly those. Each page after the first starts at
+ * the previous page's last row: when the list changed between two reads
+ * (a spend or a new output above the boundary shifts every row after it),
+ * that row is not where it was and the read is known to be inconsistent.
+ * BTC_UTXOS_MAX_PAGES pages cover the most outputs the indexer tracks for
+ * one address (20,000).
+ */
+export const BTC_UTXOS_PAGE = 500;
+export const BTC_UTXOS_MAX_PAGES = 41;
+
+const _utxoKey = (u) => `${String(u?.txid || "").toLowerCase()}:${Number(u?.vout)}`;
+
+async function _readBtcUtxoPages(address, signal, maxPages) {
+  const byKey = new Map();
+  let total = null;
+  let complete = true;
+  let consistent = true;
+  let prevLast = null;
+  let prevTotal = null;
+  for (let n = 0, offset = 0; ; n++) {
+    if (n >= maxPages) {
+      complete = false;
+      break;
+    }
+    const env = await _httpGet(`/btc-utxos/${encodeURIComponent(address)}?limit=${BTC_UTXOS_PAGE}&offset=${offset}`, signal);
+    const raw = env && Array.isArray(env.utxos) ? env.utxos : [];
+    for (const u of raw.map(_sanitizeBtcUtxo).filter(Boolean)) byKey.set(`${u.txid}:${u.vout}`, u);
+    total = _safeInt(env && env.total, 1e7);
+    // An answer without `total` is one list, not a page.
+    if (total === null) break;
+    if (prevLast !== null && (total !== prevTotal || raw.length === 0 || _utxoKey(raw[0]) !== prevLast)) consistent = false;
+    const end = offset + raw.length;
+    if (raw.length === 0 || end >= total) break;
+    // The next page starts on this page's last row (one row of overlap).
+    const overlap = raw.length > 1;
+    prevLast = overlap ? _utxoKey(raw[raw.length - 1]) : null;
+    prevTotal = total;
+    offset = overlap ? end - 1 : end;
+  }
+  return { rows: [...byKey.values()], total, complete, consistent };
 }
 
 /** GET /mines/:addr → MineView[] (sender == addr, newest first) */
@@ -830,6 +894,40 @@ export async function mineByTxid(txid, signal) {
     if (_is404(e)) return null;
     throw e;
   }
+}
+
+/**
+ * The whole registry: every `/tokens` page (TOKENS_PAGE rows each, oldest
+ * deploy first) until `total` is reached, at most TOKENS_MAX_PAGES. →
+ * `{ total, offset: 0, limit, items, complete }` — `complete: false` when
+ * the page cap was hit or a page came back short (a token the page does
+ * not list may still exist: ask `token(ticker)` before calling it free).
+ */
+export const TOKENS_PAGE = 500;
+export const TOKENS_MAX_PAGES = 20;
+export async function allTokens(signal, { pageSize = TOKENS_PAGE, maxPages = TOKENS_MAX_PAGES } = {}) {
+  const items = [];
+  const seen = new Set();
+  let total = 0;
+  let complete = false;
+  for (let n = 0, offset = 0; n < maxPages; n++) {
+    const pg = await tokens({ limit: pageSize, offset }, signal);
+    for (const t of pg.items) {
+      if (!seen.has(t.ticker)) {
+        seen.add(t.ticker);
+        items.push(t);
+      }
+    }
+    total = pg.total;
+    const served = pg.limit > 0 ? Math.min(pg.limit, pageSize) : pageSize;
+    offset += served;
+    if (offset >= total) {
+      complete = items.length >= total;
+      break;
+    }
+    if (pg.items.length === 0) break;
+  }
+  return { total: Math.max(total, items.length), offset: 0, limit: pageSize, items, complete };
 }
 
 /** GET /tokens?limit&offset → `{ total, offset, limit, items }` */
@@ -948,9 +1046,12 @@ export async function transfers(address, signal) {
  * `seen` is true only when confirmed or when the server reports the tx
  * (`seen` / `in_mempool`) — see _sanitizeTxStatus.
  */
-export async function txStatus(txid, signal) {
+export async function txStatus(txid, signal, { fresh = false } = {}) {
   try {
-    const s = await _httpGet(`/tx-status/${encodeURIComponent(txid)}`, signal);
+    // `fresh`: bypass every cache — a "not seen yet" answer cached a few
+    // seconds earlier must not decide whether a broadcast reached the node.
+    const bust = fresh ? `?fresh=${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` : "";
+    const s = await _httpGet(`/tx-status/${encodeURIComponent(txid)}${bust}`, signal, { fresh });
     return _sanitizeTxStatus(txid, s, true);
   } catch (e) {
     if (_is404(e)) return _sanitizeTxStatus(txid, null, false);
@@ -1127,13 +1228,32 @@ export async function order(id, signal) {
 
 /**
  * GET /orders/by-address/:addr?limit&offset → `{ total, offset, limit,
- * items: OrderView[] }` (every status, newest first by created_at, psbt
- * omitted). Paged like every per-address list: `limit` default 50, max
- * 200 — pass `{ limit, offset }`; `total` says how many rows exist.
+ * items: OrderView[], expired: OrderView[], expiredTotal }` (every status,
+ * newest first by created_at, psbt omitted). Paged like every per-address
+ * list: `limit` default 50, max 200 — pass `{ limit, offset }`; `total`
+ * says how many rows exist.
+ *
+ * `expired` = the address's listings that left the book (their time ran
+ * out, or a cap pushed them out) while their outpoint is still unspent:
+ * their signature still fills at `price_sats` until the seller withdraws.
+ * The indexer sends all of them with every page, outside the paging and
+ * outside `total` (`expiredTotal` counts them), so they are kept apart from
+ * `items` — an offset walk over `items` stays exact. Each row has status
+ * "expired"; its `carrier_sats` may be null (unknown).
  */
 export async function ordersByAddress(address, opts = {}, signal) {
   const env = await _httpGet(`/orders/by-address/${encodeURIComponent(address)}${_pageQuery({ limit: opts.limit, offset: opts.offset })}`, signal);
-  return _page({ ...(env || {}), items: env && env.orders }, 1e9, _sanitizeOrderRow);
+  const page = _page({ ...(env || {}), items: env && env.orders }, 1e9, _sanitizeOrderRow);
+  const expired = [];
+  const seen = new Set();
+  for (const raw of env && Array.isArray(env.expired) ? env.expired : []) {
+    const row = _sanitizeOrderRow(raw && typeof raw === "object" ? { ...raw, status: "expired" } : raw);
+    if (row && !seen.has(row.id)) {
+      seen.add(row.id);
+      expired.push(row);
+    }
+  }
+  return { ...page, expired, expiredTotal: _safeInt(env && env.expired_total, 1e9) ?? expired.length };
 }
 
 /**
@@ -1170,6 +1290,10 @@ export async function tradesByAddress(address, opts = {}, signal) {
   return _page({ ...(env || {}), items: env && env.trades }, 1e12, _sanitizeTradeRow);
 }
 
+/** Renew of a listing that already left the book: what its signature still means and what to do. */
+export const RENEW_OFF_BOOK_TEXT =
+  "This listing has left the order book, so it cannot be renewed — but its signature is still valid: anyone who saved it can still complete it at its price. Withdraw it (a send to yourself) to void that signature, or sign a new listing at the same or a lower price.";
+
 /**
  * Renew a listing (§7.4 TTL): GET /orders/:id for the stored PSBT, then
  * POST /orders with exactly the same body. The seller signs nothing — the
@@ -1178,7 +1302,7 @@ export async function tradesByAddress(address, opts = {}, signal) {
  */
 export async function renewOrder(id, signal) {
   const o = await order(id, signal);
-  if (!o) throw new Error("listing not found on the indexer — it expired or was evicted; sign a new listing");
+  if (!o || o.status === "expired") throw new Error(RENEW_OFF_BOOK_TEXT);
   if (o.status === "filling") throw new Error("a fill of this listing is pending in the mempool — it is exempt from expiry and cannot be re-published until that spend confirms or drops (§7.3)");
   // (never "cancelled" in the text: friendlyError reads "cancel" as a declined signature)
   if (o.status === "cancelled") throw new Error("listing was withdrawn on-chain — nothing to renew");

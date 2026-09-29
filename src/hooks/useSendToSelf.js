@@ -5,15 +5,15 @@ import * as wallet from "../lib/wallet.js";
 import { droppedMessage, useTxStatus } from "./useTxStatus.js";
 import { friendlyError } from "./useWallet.js";
 import { useSeedWait } from "./useSeedWait.js";
-import { buildSendPsbt, estimateSendFeeSats, expectPsbtPayload, minFeeInputSats, MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
+import { buildSendPsbt, buildSpeedUpPsbt, estimateSendFeeSats, expectPsbtPayload, minFeeInputSats, MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
 import { cancelFeeRate } from "../lib/market.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { isConflictError } from "../lib/walletShapes.js";
 import { seedWaitNote } from "../lib/retry.js";
 import { fundingMessage } from "../lib/funding.js";
-import { forgetTx, markTxConfirmed, markTxUnconfirmed } from "../lib/txrecords.js";
-import { sendPendingOutpoints } from "../lib/send.js";
+import { forgetTx, markTxConfirmed, markTxUnconfirmed, recordBroadcastTx, txRecords } from "../lib/txrecords.js";
+import { sendPendingOutpoints, sendVersions, switchSendVersion } from "../lib/send.js";
 
 const IDLE = { phase: "idle" };
 const BUSY = new Set(["building", "signing", "broadcasting", "pending"]);
@@ -22,6 +22,8 @@ const TRACKED = new Set(["pending", "unseen", "confirmed"]);
 const outKey = (u) => `${u.txid}:${u.vout}`;
 
 const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
+/** How often the versions a Speed up replaced are asked about while the send waits. */
+const VERSION_POLL_MS = 15_000;
 
 /**
  * The on-chain SEND shared by the Sell fold, the portfolio and the Send
@@ -40,12 +42,21 @@ const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
  *   send    — `amount` of `ticker` from the carriers in `utxos` to
  *             `toAddress` (anyone, or yourself — then it is a split)
  *
- *   const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({ onSettled })
+ *   const { chain, status, run, reset, stopWaiting, busy, speedUpQuote, speedUp } = useSendToSelf({ onSettled })
  *   run({ kind: "split" | "cancel" | "send", ticker, amount, utxo: { txid, vout, sats? } | utxos: [...], toAddress?, order? })
  *
  * `chain` = { phase, kind, ticker, amount, toAddress, txid, feeSats,
- * feeRateSatVb, vsize, inputs, assetSafe, rule, error, note }, phase ∈ idle |
+ * feeRateSatVb, vsize, inputs, assetSafe, rule, error, note, psbt,
+ * changeVout, speeding, speedError }, phase ∈ idle |
  * building | signing | broadcasting | pending | unseen | confirmed | error.
+ *
+ * Speed up: while the tx is pending (or unseen) `speedUp(rate)` replaces it
+ * with a copy that pays more (BIP125 — the same inputs, which all signal
+ * replace-by-fee, and the same outputs, the extra fee taken from the BTC
+ * change; psbt.buildSpeedUpPsbt), signed again and broadcast; the flow
+ * then follows the new txid — and keeps asking about the versions it
+ * replaced: when a block confirms one of those instead, the flow follows
+ * that one. `speedUpQuote(rate)` previews it.
  * A confirmed tx is tracked until its block is final (`status.final`): a
  * chain reorganization can still put it back in the mempool — the chain
  * then returns to "pending" and its record guards its inputs again. A
@@ -55,6 +66,8 @@ const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
 export function useSendToSelf({ onSettled } = {}) {
   const { wallet: w, address, pubkeyHex, fees, fee, refreshAll } = useApp();
   const [chain, setChain] = useState(IDLE);
+  const chainRef = useRef(chain);
+  chainRef.current = chain;
   const settledRef = useRef(onSettled);
   settledRef.current = onSettled;
   const seedWait = useSeedWait();
@@ -92,6 +105,42 @@ export function useSendToSelf({ onSettled } = {}) {
     if (status.dropped) setChain((c) => (c.phase === "pending" ? { ...c, phase: "unseen", note: droppedMessage(c.txid, WHAT[c.kind] || "send") } : c));
     else setChain((c) => (c.phase === "unseen" ? { ...c, phase: "pending", note: null } : c));
   }, [status.dropped]);
+
+  // A send that was sped up: while it waits, every earlier version is
+  // asked about too — the one a block confirms is the send (its record
+  // takes over the guard of the inputs they all spend).
+  const versionsKey = (chain.phase === "pending" || chain.phase === "unseen") && chain.replaces?.length ? sendVersions(chain).join(",") : null;
+  useEffect(() => {
+    if (!versionsKey || !address) return undefined;
+    const [cur, ...older] = versionsKey.split(",");
+    let alive = true;
+    const check = async () => {
+      for (const v of older) {
+        let st = null;
+        try {
+          st = await indexer.txStatus(v);
+        } catch {
+          st = null; // unknown — ask again next time
+        }
+        if (!alive) return;
+        if (!st || !st.confirmed) continue;
+        const c = chainRef.current;
+        if (c.txid !== cur) return;
+        const inputs = txRecords(address).find((r) => r.txid === cur)?.inputs ?? c.inputs ?? [];
+        recordBroadcastTx(address, { txid: v, kind: "send", ticker: c.ticker, inputs });
+        for (const t of sendVersions(c)) if (t !== v) forgetTx(address, t);
+        addPendingTokenOutpoints(sendPendingOutpoints(v, { toSelf: c.toAddress === address }), address);
+        setChain((x) => (x.txid === cur ? switchSendVersion(x, v) : x));
+        return;
+      }
+    };
+    check();
+    const id = setInterval(check, VERSION_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [versionsKey, address]);
 
   const run = useCallback(
     async ({ kind, ticker, amount, utxo, utxos, toAddress, order = null }) => {
@@ -154,7 +203,7 @@ export function useSendToSelf({ onSettled } = {}) {
         setChain((c) => ({ ...c, phase: "broadcasting" }));
         let txid;
         try {
-          txid = await wallet.broadcastSignedPsbt(signed, { kind: "send", ticker });
+          txid = await wallet.broadcastSignedPsbt(signed, { kind: "send", ticker, address });
         } catch (e) {
           if (kind === "cancel" && isConflictError(e) && /insufficient fee|replacement/i.test(String(e?.message || e))) {
             throw new Error(
@@ -167,7 +216,8 @@ export function useSendToSelf({ onSettled } = {}) {
         // Your token outputs of this tx: vout3 (the residual carrier) always,
         // vout0 too when it pays yourself; vout4, when present, is plain BTC.
         addPendingTokenOutpoints(sendPendingOutpoints(txid, { toSelf: to === address }), address);
-        setChain((c) => ({ ...c, phase: "pending", txid }));
+        // The unsigned PSBT and its change output stay with the flow: a Speed up rebuilds from them.
+        setChain((c) => ({ ...c, phase: "pending", txid, psbt: built.psbtHex, changeVout: built.changeVout ?? null }));
       } catch (e) {
         // Stop waiting (or the page left): back to idle, nothing to report.
         if (signal.aborted) {
@@ -183,6 +233,65 @@ export function useSendToSelf({ onSettled } = {}) {
     [w.status, address, pubkeyHex, fee.satVb, fee.choice, fee.highFee, fees.data, seedWait],
   );
 
+  const incrementalRelayFee = fees.data?.incrementalrelayfee ?? undefined;
+
+  /** The replacement a Speed up at `rate` would sign, `{ error, code }` when it cannot, or null when nothing is pending. Pure preview. */
+  const speedUpQuote = useCallback(
+    (rate) => {
+      const c = chain;
+      if ((c.phase !== "pending" && c.phase !== "unseen") || !c.psbt || !c.txid) return null;
+      try {
+        return buildSpeedUpPsbt({ psbtHex: c.psbt, changeVout: c.changeVout, feeRateSatVb: rate, incrementalRelayFee });
+      } catch (e) {
+        return { error: String(e?.message || e), code: e?.code || null };
+      }
+    },
+    [chain, incrementalRelayFee],
+  );
+
+  /** Replace the pending tx with a higher-fee copy at `rate` (same inputs and outputs) and follow the new txid. */
+  const speedUp = useCallback(
+    async (rate) => {
+      const c = chainRef.current;
+      if ((c.phase !== "pending" && c.phase !== "unseen") || !c.psbt || !c.txid || c.speeding || !address) return;
+      setChain((x) => ({ ...x, speeding: "building", speedError: null }));
+      try {
+        const st = await indexer.txStatus(c.txid);
+        if (st && st.confirmed) throw new Error("It has just confirmed — no need to speed it up.");
+        const q = buildSpeedUpPsbt({ psbtHex: c.psbt, changeVout: c.changeVout, feeRateSatVb: rate, incrementalRelayFee });
+        // The same guard as the first signature: one OP_RETURN, a SEND of this ticker / amount.
+        expectPsbtPayload(q.psbtHex, { op: "SEND", ticker: c.ticker, amount: c.amount });
+        setChain((x) => ({ ...x, speeding: "signing" }));
+        // A replacement: the inputs of every version it replaces may be spent
+        // again — an earlier one whose faster copy was never confirmed as
+        // sent still keeps its record.
+        const signed = await wallet.signPsbt(q.psbtHex, { inputIndexes: q.inputIndexes, address, replaces: sendVersions(c) });
+        setChain((x) => ({ ...x, speeding: "broadcasting" }));
+        let txid;
+        let unsure = null;
+        try {
+          txid = await wallet.broadcastSignedPsbt(signed, { kind: "send", ticker: c.ticker, address });
+        } catch (e) {
+          // Neither relay confirmed the faster copy, but it may still reach
+          // the network (it is recorded): the flow follows it and keeps
+          // asking about the earlier versions — one of them may confirm instead.
+          if (!(e?.recorded && e.txid)) throw e;
+          txid = e.txid;
+          unsure = e;
+        }
+        // The replacement spends the same inputs: the old record's guard is
+        // redundant now (it stays while the faster copy is not known to be sent).
+        if (!unsure) forgetTx(address, c.txid);
+        addPendingTokenOutpoints(sendPendingOutpoints(txid, { toSelf: c.toAddress === address }), address);
+        const speedError = unsure ? friendlyError(unsure) : null;
+        setChain((x) => (x.txid === c.txid ? { ...x, phase: "pending", note: null, txid, psbt: q.psbtHex, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, speeding: null, speedError, replaces: [...(x.replaces || []), c.txid] } : { ...x, speeding: null, speedError }));
+      } catch (e) {
+        setChain((x) => ({ ...x, speeding: null, speedError: friendlyError(e) }));
+      }
+    },
+    [address, incrementalRelayFee],
+  );
+
   const reset = useCallback(() => setChain(IDLE), []);
-  return { chain, status, run, reset, stopWaiting: seedWait.stop, busy: BUSY.has(chain.phase) };
+  return { chain, status, run, reset, stopWaiting: seedWait.stop, busy: BUSY.has(chain.phase) || !!chain.speeding, speedUpQuote, speedUp };
 }

@@ -97,6 +97,7 @@ const ROUTES = [
   ["/activity/daily?days=7", "/activity/daily?days=N"],
   [`/balances/${ADDR}`, "/balances/:addr"],
   [`/utxos/${ADDR}`, "/utxos/:addr"],
+  [`/btc-utxos/${ADDR}`, "/btc-utxos/:addr?limit&offset"],
   ["/orders", "/orders?ticker&status&limit&offset"],
   [`/orders/by-address/${ADDR}`, "/orders/by-address/:addr?limit&offset"],
   ["/trades", "/trades?ticker&limit&offset"],

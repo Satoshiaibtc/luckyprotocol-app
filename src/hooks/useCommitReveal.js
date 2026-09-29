@@ -20,7 +20,7 @@ import {
 import { DUST_SATS, PROTOCOL_LOCKTIME, newSalt } from "../lib/payloads.js";
 import { withPending } from "../lib/pending.js";
 import { DROP_GRACE_MS, forgetTx, markTxConfirmed } from "../lib/txrecords.js";
-import { syncRetryText, syncStateOf } from "../lib/sync.js";
+import { chainTipOf, syncRetryText, syncStateOf } from "../lib/sync.js";
 import { isUsableFeeRate } from "../lib/feechoice.js";
 import { activationNotice, activationState } from "../lib/activation.js";
 import { fundingMessage } from "../lib/funding.js";
@@ -28,6 +28,7 @@ import {
   PUBLISH_CUTOFF_BLOCKS,
   PUBLISH_MIN_CONFIRMATIONS,
   addSettlingNote,
+  canResendStep,
   claimDeployRecord,
   clearDeployRecord,
   commitAfterRecheck,
@@ -49,6 +50,7 @@ import {
   settlingNotes,
   settlingVerdict,
   startDeployRecord,
+  spedUpStep,
   stepVersions,
   switchStepTo,
   updateDeployRecord,
@@ -80,6 +82,8 @@ import {
 } from "../lib/deploylog.js";
 
 const POLL_MS = 15_000;
+/** The txid of a signed raw transaction (hex). */
+export const txidOfRaw = (raw) => rawTxSummary(raw).txid;
 // How often the record is re-read from storage: another tab (or an earlier
 // mount of this page whose wallet window was still open) may have changed it.
 const RECORD_SYNC_MS = 3_000;
@@ -610,15 +614,16 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       setFinished(null);
       setOp({ kind: "reserve", phase: "building", ticker: t, startedAt });
       let utxoRes = null;
-      let signedTxid = null;
       let salt = null;
+      let builtPsbt = null;
+      let relayed = false;
       const signal = seedWait.begin();
       try {
         if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
         // Re-check at the moment of the click, not from the last poll.
         const [h, existing] = await Promise.all([indexer.health(), indexer.token(t)]);
         const fresh = syncStateOf(h);
-        if (activationState(h?.tip_height ?? null).locked) throw new Error(activationNotice(h?.tip_height ?? null, "Reserving a ticker"));
+        if (activationState(chainTipOf(h)).locked) throw new Error(activationNotice(chainTipOf(h), "Reserving a ticker"));
         if (!fresh.synced) throw new Error(syncRetryText(fresh, `${t}'s availability`, "Reserve"));
         if (existing) throw new Error(`${t} is already created (tx ${existing.deploy_txid.slice(0, 12)}…) — pick another name.`);
         const onWait = (info) => setOp((o) => (o && o.phase === "building" ? { ...o, waitNote: seedWaitNote(info) } : o));
@@ -639,6 +644,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
           minInputSats: minFeeInputSats(utxoRes.assetSafe),
         });
         const { hash, carrierScript } = built;
+        builtPsbt = built.psbtHex;
         // Sign-time guard: one OP_RETURN, COMMIT|<this hash>, vout0 = the
         // carrier that hash was made for, the protocol lock time.
         expectPsbtPayload(built.psbtHex, { op: "COMMIT", hash, vout0Script: carrierScript, lockTime: PROTOCOL_LOCKTIME });
@@ -655,8 +661,9 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         emit(reserveBuildLine({ startedAt, ...info }));
         emit(signLine(providerName, startedAt));
         const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
-        signedTxid = rawTxSummary(extractRawTxHex(signed)).txid;
-        const step = { txid: signedTxid, psbt: built.psbtHex, signedAt: Date.now(), sentAt: null, height: null, feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, changeVout: built.changeVout, inputs: built.inputs };
+        const raw = extractRawTxHex(signed);
+        const signedTxid = rawTxSummary(raw).txid;
+        const step = { txid: signedTxid, psbt: built.psbtHex, raw, signedAt: Date.now(), sentAt: null, height: null, feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, changeVout: built.changeVout, inputs: built.inputs };
         // Only broadcast when the stored draft is still THIS one: if it was
         // discarded or replaced while the wallet
         // window was open, the salt of this COMMIT would exist nowhere.
@@ -669,21 +676,27 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         setRec(claimed);
         setOp({ ...signing, phase: "broadcasting" });
         emit(broadcastingLine(startedAt));
-        await wallet.broadcastSignedPsbt(signed, { kind: "other" });
+        relayed = true;
+        await wallet.broadcastSignedPsbt(signed, { kind: "other", address });
         setRec(claimDeployRecord(address, (r) => r.commit?.txid === signedTxid, (r) => ({ ...r, commit: { ...r.commit, sentAt: Date.now() } })) ?? loadDeployRecord(address));
         emit(acceptedLine(signedTxid));
         const tipNow = tipRef.current;
         emit(reserveMempoolLine(Number.isInteger(tipNow) ? tipNow + 1 : null, signedTxid));
         setOp(null);
       } catch (e) {
-        // Nothing reached the network (declined, build error, refused by
-        // both relays) → forget the reservation; a broadcast whose fate is
-        // unknown (e.landed === null) stays for the resume check.
+        // Before any relay was asked nothing can have reached the network
+        // (declined, build error, changed in another tab): the draft goes.
+        // Once a relay was asked the record — its salt above all — stays,
+        // whatever the relays answered: a relay can fail after passing the
+        // COMMIT on, and a COMMIT that confirms without its salt can never
+        // be published. The page keeps checking (unsent, then unseen); the
+        // user sends the same signed COMMIT again or abandons it.
         // Only OUR record is ever cleared (matched by its salt — another
         // tab's reservation of the same ticker is left alone).
-        if (!(signedTxid && e?.landed === null)) {
+        if (!relayed) {
           const cur = loadDeployRecord(address);
           if (salt && cur && cur.salt === salt && !cur.commit?.sentAt) clearDeployRecord(address);
+          if (builtPsbt) wallet.releaseInputs(builtPsbt);
         }
         // Stop waiting, an account switch or the page left: nothing was
         // built, and the page may show another address's record by now —
@@ -714,7 +727,8 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       setError(null);
       setOp({ kind: "publish", phase: "building", ticker: t, startedAt });
       let utxoRes = null;
-      let signedTxid = null;
+      let builtPsbt = null;
+      let relayed = false;
       const signal = seedWait.begin();
       try {
         if (!isUsableFeeRate(feeRate)) throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
@@ -765,6 +779,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
           carrier,
           minInputSats: minFeeInputSats(utxoRes.assetSafe),
         });
+        builtPsbt = built.psbtHex;
         // Sign-time guard: DEPLOY|<ticker>|<this salt>, input 0 = the carrier (with its one-block relative lock), the lock time.
         expectPsbtPayload(built.psbtHex, { op: "DEPLOY", ticker: t, salt: r.salt, input0: carrier, input0Sequence: REVEAL_CARRIER_SEQUENCE, lockTime: PROTOCOL_LOCKTIME });
         const info = { feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, inputCount: built.inputIndexes.length, inputs: built.inputs, assetSafe: utxoRes.assetSafe, utxoSource: utxoRes.source };
@@ -773,8 +788,9 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         emit(publishBuildLine({ startedAt, ...info }, t));
         emit(signLine(providerName, startedAt));
         const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
-        signedTxid = rawTxSummary(extractRawTxHex(signed)).txid;
-        const step = { txid: signedTxid, psbt: built.psbtHex, signedAt: Date.now(), sentAt: null, height: null, feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, changeVout: built.changeVout, inputs: built.inputs };
+        const raw = extractRawTxHex(signed);
+        const signedTxid = rawTxSummary(raw).txid;
+        const step = { txid: signedTxid, psbt: built.psbtHex, raw, signedAt: Date.now(), sentAt: null, height: null, feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, changeVout: built.changeVout, inputs: built.inputs };
         const claimed = claimDeployRecord(
           address,
           (x) => x.salt === r.salt && x.commit?.txid === r.commit.txid && !x.reveal,
@@ -784,16 +800,21 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         setRec(claimed);
         setOp({ ...signing, phase: "broadcasting" });
         emit(broadcastingLine(startedAt));
-        await wallet.broadcastSignedPsbt(signed, { kind: "deploy", ticker: t });
+        relayed = true;
+        await wallet.broadcastSignedPsbt(signed, { kind: "deploy", ticker: t, address });
         setRec(updateDeployRecord(address, (x) => ({ ...x, reveal: { ...x.reveal, sentAt: Date.now(), sentTip: Number.isInteger(tipRef.current) ? tipRef.current : null } })));
         emit(acceptedLine(signedTxid));
         const tipNow = tipRef.current;
         emit(deployMempoolLine(t, Number.isInteger(tipNow) ? tipNow + 1 : null, signedTxid));
         setOp(null);
       } catch (e) {
-        if (!(signedTxid && e?.landed === null)) {
+        // As for step 1: once a relay was asked, the publish stays recorded
+        // (unsent → unseen → released if the reservation is still open, its
+        // txid kept as ours in case it confirms after all).
+        if (!relayed) {
           const cur = loadDeployRecord(address);
           if (cur?.reveal && !cur.reveal.sentAt) updateDeployRecord(address, (x) => ({ ...x, reveal: null }));
+          if (builtPsbt) wallet.releaseInputs(builtPsbt);
         }
         // Stop waiting, an account switch or the page left: nothing was
         // built, and the page may show another address's record by now —
@@ -849,27 +870,72 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         expectPsbtPayload(q.psbtHex, step === "commit" ? { op: "COMMIT", hash: r.hash, vout0Script: r.carrierScript, lockTime: PROTOCOL_LOCKTIME } : { op: "DEPLOY", ticker: r.ticker, salt: r.salt, input0: carrier, input0Sequence: REVEAL_CARRIER_SEQUENCE, lockTime: PROTOCOL_LOCKTIME });
         setOp({ kind: "speedup", step, phase: "signing", ticker: r.ticker, startedAt, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, oldFeeSats: q.oldFeeSats });
         emit(signLine(providerName, startedAt));
-        const signed = await wallet.signPsbt(q.psbtHex, { inputIndexes: q.inputIndexes, address });
-        const newTxid = rawTxSummary(extractRawTxHex(signed)).txid;
+        // A replacement: the inputs of every version it replaces may be spent
+        // again — an earlier one whose faster copy was never confirmed as
+        // sent still keeps its record.
+        const signed = await wallet.signPsbt(q.psbtHex, { inputIndexes: q.inputIndexes, address, replaces: stepVersions(s) });
+        const raw = extractRawTxHex(signed);
+        const newTxid = rawTxSummary(raw).txid;
         setOp({ kind: "speedup", step, phase: "broadcasting", ticker: r.ticker, startedAt, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, oldFeeSats: q.oldFeeSats });
         emit(broadcastingLine(startedAt));
-        await wallet.broadcastSignedPsbt(signed, step === "commit" ? { kind: "other" } : { kind: "deploy", ticker: r.ticker });
+        const follow = (sent) => (x) =>
+          x[step]?.txid === s.txid ? { ...x, [step]: spedUpStep(x[step], { txid: newTxid, psbt: q.psbtHex, raw, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, vsize: q.vsize, sent, tip: tipRef.current }) } : x;
+        try {
+          await wallet.broadcastSignedPsbt(signed, step === "commit" ? { kind: "other", address } : { kind: "deploy", ticker: r.ticker, address });
+        } catch (e) {
+          // Neither relay confirmed the faster copy, but it may still reach
+          // the network (it is recorded): the step follows it, unsent, and
+          // keeps asking about the earlier versions — one of them may confirm
+          // instead. The earlier record keeps guarding the inputs meanwhile.
+          if (e?.recorded && e.txid) persist(follow(false));
+          throw e;
+        }
         // The replacement spends the same inputs: the old record's guard is redundant now.
         forgetTx(address, s.txid);
-        persist((x) => ({
-          ...x,
-          [step]: { ...x[step], txid: newTxid, psbt: q.psbtHex, sentAt: Date.now(), sentTip: Number.isInteger(tipRef.current) ? tipRef.current : null, height: null, unseenAt: null, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, vsize: q.vsize, replaces: [...(x[step].replaces || []), s.txid] },
-        }));
+        persist(follow(true));
         emit(speedUpLine(what, { oldFeeSats: q.oldFeeSats, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, txid: newTxid }));
         setOp(null);
       } catch (e) {
         const message = friendlyError(e);
         emit(errorLine(`speed up: ${message}`, startedAt));
-        setError({ kind: "speedup", step, message });
+        // Followed unsent (the Speed up control is gone until it is seen): said where the step's own errors are.
+        const kind = e?.recorded && e.txid ? (step === "commit" ? "reserve" : "publish") : "speedup";
+        setError({ kind, step, message });
         setOp(null);
       }
     },
     [address, busy, incrementalRelayFee, persist, providerName, emit],
+  );
+
+  /**
+   * Relay the SIGNED `step` ("commit" | "reveal") again — the same
+   * transaction, same txid — when no relay confirmed its broadcast (unsent)
+   * or the indexer's node lost sight of it (unseen). Nothing new is signed.
+   */
+  const resend = useCallback(
+    async (step) => {
+      const r = address ? loadDeployRecord(address) : null;
+      const s = r?.[step];
+      if (!r || !canResendStep(s, txidOfRaw) || busy) return;
+      const startedAt = Date.now();
+      setError(null);
+      setOp({ kind: step === "commit" ? "reserve" : "publish", phase: "broadcasting", resend: true, ticker: r.ticker, startedAt });
+      emit(broadcastingLine(startedAt));
+      try {
+        await wallet.broadcastRawTx(s.raw, step === "commit" ? { kind: "other", address } : { kind: "deploy", ticker: r.ticker, address });
+        persist((x) =>
+          x[step]?.txid === s.txid ? { ...x, [step]: { ...x[step], sentAt: Date.now(), sentTip: Number.isInteger(tipRef.current) ? tipRef.current : null, unseenAt: null } } : x,
+        );
+        emit(acceptedLine(s.txid));
+        setOp(null);
+      } catch (e) {
+        const message = friendlyError(e);
+        emit(errorLine(message, startedAt));
+        setError({ kind: step === "commit" ? "reserve" : "publish", message });
+        setOp(null);
+      }
+    },
+    [address, busy, persist, emit],
   );
 
   /** Forget the reservation (the COMMIT's 546-sat output stays in the wallet; a pending COMMIT may still confirm). */
@@ -957,6 +1023,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       stopWaiting: seedWait.stop,
       speedUp,
       speedUpQuote,
+      resend,
       abandon,
       finish,
       dismiss,
@@ -964,6 +1031,6 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
       restoreSettling,
       refreshCommit,
     }),
-    [rec, phase, op, busy, error, finished, timing, commitData, commitInfo, commitTxid, row, tokenInfo, ticker, commitStatus, revealStatus, settling, reserve, publish, seedWait, speedUp, speedUpQuote, abandon, finish, dismiss, dismissSettling, restoreSettling, refreshCommit],
+    [rec, phase, op, busy, error, finished, timing, commitData, commitInfo, commitTxid, row, tokenInfo, ticker, commitStatus, revealStatus, settling, reserve, publish, seedWait, speedUp, speedUpQuote, resend, abandon, finish, dismiss, dismissSettling, restoreSettling, refreshCommit],
   );
 }

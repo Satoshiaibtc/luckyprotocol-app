@@ -28,6 +28,8 @@ export const DEPLOY_RECORD_VERSION = 2;
 
 const TXID_RE = /^[0-9a-f]{64}$/;
 const HEX_RE = /^[0-9a-f]+$/;
+/** A signed step is kept only up to this many hex characters (a COMMIT or REVEAL is far smaller). */
+const RAW_TX_HEX_MAX = 200_000;
 
 /**
  * A draft (ticker + salt chosen, no COMMIT signed yet) older than this is
@@ -67,6 +69,8 @@ function normalizeInputs(list) {
  * One step's tx sub-record (COMMIT or REVEAL), or null when malformed:
  *   txid        the tx this browser signed (known before it is broadcast)
  *   psbt        its UNSIGNED PSBT hex — what "Speed up" rebuilds from
+ *   raw         the SIGNED transaction (hex) of `txid` — what "Send again"
+ *               relays when no relay confirmed the broadcast; null when unknown
  *   signedAt    ms when the wallet signed it
  *   sentAt      ms when a relay accepted it; null = signed, broadcast not confirmed
  *   height      confirmation height once seen; null until then
@@ -82,9 +86,11 @@ export function normalizeStep(s) {
   const txid = String(s.txid || "").toLowerCase();
   if (!TXID_RE.test(txid)) return null;
   const psbt = typeof s.psbt === "string" && s.psbt.length % 2 === 0 && HEX_RE.test(s.psbt.toLowerCase()) ? s.psbt.toLowerCase() : null;
+  const raw = typeof s.raw === "string" && s.raw.length > 0 && s.raw.length <= RAW_TX_HEX_MAX && s.raw.length % 2 === 0 && HEX_RE.test(s.raw.toLowerCase()) ? s.raw.toLowerCase() : null;
   return {
     txid,
     psbt,
+    raw,
     signedAt: num(s.signedAt),
     sentAt: num(s.sentAt),
     // the chain tip when it was (last) sent: a block above it without the step means it missed one
@@ -166,6 +172,25 @@ export function deployStage(rec) {
   return "revealed";
 }
 
+/**
+ * May the signed `step` be relayed again ("Send again")? Only a step this
+ * browser holds the signed copy of (`raw`, checked against its txid with
+ * `txidOfRaw`), not confirmed, and whose broadcast no relay confirmed
+ * (unsent) or that the indexer's node lost sight of (unseen).
+ */
+export function canResendStep(step, txidOfRaw = null) {
+  if (!step || !step.raw || Number.isInteger(step.height)) return false;
+  if (step.sentAt && !step.unseenAt) return false;
+  if (typeof txidOfRaw === "function") {
+    try {
+      return txidOfRaw(step.raw) === step.txid;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Is `rec` a draft old enough to clear (no COMMIT was signed within DRAFT_STALE_MS)? */
 export function isStaleDraft(rec, now = Date.now()) {
   return deployStage(rec) === "draft" && now - (rec.createdAt || 0) > DRAFT_STALE_MS;
@@ -211,10 +236,40 @@ export function switchStepTo(step, txid, { height = null, now = Date.now() } = {
     sentAt: step.sentAt ?? now,
     height: Number.isInteger(height) ? height : step.height,
     unseenAt: null,
+    // The signed copy is of the version this browser signed last.
+    raw: same ? step.raw ?? null : null,
     // The fee figures describe the version this browser built last.
     feeSats: same ? step.feeSats : null,
     feeRateSatVb: same ? step.feeRateSatVb : null,
     vsize: same ? step.vsize : null,
+  };
+}
+
+/**
+ * `step` after a Speed up signed its faster copy `txid` (`psbt` unsigned,
+ * `raw` signed): the step follows the new version, and the one it replaced
+ * joins `replaces`. `sent` false — neither relay confirmed the broadcast,
+ * yet the copy may still reach the network — leaves it signed but unsent:
+ * the page checks it like any such step (seen → sent; Send again relays the
+ * same copy), and keeps asking about every earlier version, one of which
+ * may confirm instead.
+ */
+export function spedUpStep(step, { txid, psbt, raw, feeSats = null, feeRateSatVb = null, vsize = null, sent = true, now = Date.now(), tip = null }) {
+  const t = String(txid).toLowerCase();
+  return {
+    ...step,
+    txid: t,
+    psbt,
+    raw,
+    signedAt: sent ? step.signedAt ?? now : now,
+    sentAt: sent ? now : null,
+    sentTip: sent && Number.isInteger(tip) ? tip : null,
+    height: null,
+    unseenAt: null,
+    feeSats,
+    feeRateSatVb,
+    vsize,
+    replaces: [...(step.replaces || []), step.txid].filter((x, i, a) => x !== t && a.indexOf(x) === i),
   };
 }
 

@@ -184,14 +184,19 @@ export function fmtUsd(sats, usdPerBtc) {
   return `$${usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 }
 
-/** "expires in 3d" / "expires in 5h" / "expired" for an `expires_at` stamp; "" when unknown. */
+/**
+ * "leaves the book in 3d" / "… in 5h" / "leaving the book" for a listing's
+ * `expires_at` stamp; "" when unknown. A listing that leaves the book is
+ * not void — its signature stays fillable until the seller withdraws it —
+ * so the words never say "expires".
+ */
 export function fmtExpires(expiresAt, nowSec = Math.floor(Date.now() / 1000)) {
   if (!Number.isFinite(expiresAt)) return "";
   const left = expiresAt - nowSec;
-  if (left <= 0) return "expired";
-  if (left < 3600) return `expires in ${Math.max(1, Math.floor(left / 60))}m`;
-  if (left < 86400) return `expires in ${Math.floor(left / 3600)}h`;
-  return `expires in ${Math.floor(left / 86400)}d`;
+  if (left <= 0) return "leaving the book";
+  if (left < 3600) return `leaves the book in ${Math.max(1, Math.floor(left / 60))}m`;
+  if (left < 86400) return `leaves the book in ${Math.floor(left / 3600)}h`;
+  return `leaves the book in ${Math.floor(left / 86400)}d`;
 }
 
 export function fmtAgo(unixSeconds) {

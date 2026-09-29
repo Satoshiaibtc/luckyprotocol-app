@@ -15,7 +15,8 @@ import { missingFeeHint } from "../lib/feechoice.js";
 import { pendingSpentOutpoints, refreshTxRecords, txRecords } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
-import { autoPickCarriers, carrierNote, parseSendAmount, pendingSendsOf, pickedAmount, recipientState, sendAmountError, sendCarrierRows, sendFormHint, sendReviewModel } from "../lib/send.js";
+import { ORDERS_INCOMPLETE_TEXT, carrierNote, carriersToSpend, parseSendAmount, pendingSendsOf, pickedAmount, recipientState, sendAmountError, sendCarrierRows, sendFormHint, sendReviewModel } from "../lib/send.js";
+import { readSellerOrders } from "../lib/listingRules.js";
 import { fmtInt, fmtSats, shortAddr, shortTxid, txUrl } from "../lib/format.js";
 
 const POLL_MS = 15_000;
@@ -40,7 +41,15 @@ export default function SendPage({ ticker, params = {} }) {
 
   const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
   const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
-  const orders = usePoll(address ? (s) => indexer.ordersByAddress(address, { limit: indexer.ADDR_LIST_MAX_LIMIT }, s) : null, POLL_MS, [address]);
+  // Every page of this address's listings (newest first, 200 a page): an
+  // old open listing behind many closed ones must still mark its carrier.
+  const orders = usePoll(
+    address ? (s) => readSellerOrders((offset, limit) => indexer.ordersByAddress(address, { limit, offset }, s), { pageSize: indexer.ADDR_LIST_MAX_LIMIT }) : null,
+    POLL_MS,
+    [address],
+  );
+  // Not every listing was read: no carrier is chosen automatically.
+  const ordersIncomplete = !!orders.data && orders.data.complete === false;
   const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({
     onSettled: () => {
       tokenUtxos.refresh();
@@ -76,7 +85,7 @@ export default function SendPage({ ticker, params = {} }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read the store on each poll / flow step
   const records = useMemo(() => (address ? txRecords(address) : []), [address, tokenUtxos.data, chain.phase, recTick]);
   const rows = useMemo(
-    () => sendCarrierRows({ tokenUtxos: tokenUtxos.data, btcUtxos: btcUtxos.data, orders: orders.data?.items, pendingSpent: pendingSpentOutpoints(records), ticker }),
+    () => sendCarrierRows({ tokenUtxos: tokenUtxos.data, btcUtxos: btcUtxos.data, orders: orders.data?.items, expired: orders.data?.expired, pendingSpent: pendingSpentOutpoints(records), ticker }),
     [tokenUtxos.data, btcUtxos.data, orders.data, records, ticker],
   );
   const total = rows.reduce((s, r) => s + r.amount, 0);
@@ -111,13 +120,14 @@ export default function SendPage({ ticker, params = {} }) {
 
   const rcpt = recipientState(toText, address);
   const amount = parseSendAmount(amountText);
-  const freeTotal = rows.filter((r) => !r.blocked).reduce((s, r) => s + r.amount, 0);
-  const autoKeys = mode === "auto" && amount ? autoPickCarriers(rows, amount) : null;
-  const liveManual = manual.filter((k) => rows.some((r) => r.key === k && r.blocked !== "pending" && r.blocked !== "filling"));
-  const keys = mode === "auto" ? autoKeys || [] : liveManual;
+  const freeTotal = rows.filter((r) => !r.blocked && Number.isInteger(r.sats)).reduce((s, r) => s + r.amount, 0);
+  const liveManual = carriersToSpend({ mode: "manual", rows, manual });
+  const keys = carriersToSpend({ mode, rows, amount, manual, ordersComplete: !ordersIncomplete });
   const max = mode === "auto" ? freeTotal : pickedAmount(rows, liveManual);
   const amountErr = sendAmountError(amountText, max, ticker);
   const picked = rows.filter((r) => keys.includes(r.key));
+  // A SEND signs each input's exact BTC value: a carrier without one cannot be sent yet.
+  const unknownPicked = picked.some((r) => !Number.isInteger(r.sats));
   const lagText = indexerOk ? syncPauseText(sync, "sending") : null;
 
   const est = useMemo(() => {
@@ -136,7 +146,7 @@ export default function SendPage({ ticker, params = {} }) {
     payloadText = "";
   }
 
-  const formOk = connected && indexerOk && !lagText && rcpt.state === "ok" && !!amount && !amountErr && keys.length > 0 && pickedAmount(rows, keys) >= amount && !!fee.satVb;
+  const formOk = connected && indexerOk && !lagText && rcpt.state === "ok" && !!amount && !amountErr && keys.length > 0 && pickedAmount(rows, keys) >= amount && !unknownPicked && !!fee.satVb;
   const whyNot = sendFormHint({
     connected,
     indexerOk,
@@ -150,6 +160,8 @@ export default function SendPage({ ticker, params = {} }) {
     freeTotal,
     ticker,
     feeHint: !fee.satVb ? missingFeeHint(fee.choice, fee.satVb, "send", { awaitingAck: !!fee.highFee?.pending }) : null,
+    unknownValue: unknownPicked,
+    ordersIncomplete,
   });
 
   const toggle = (k) => {
@@ -326,6 +338,10 @@ export default function SendPage({ ticker, params = {} }) {
                               <span className="status-tag s-filling">fill pending</span>
                             ) : r.blocked === "pending" ? (
                               <span className="status-tag s-filling">spent · pending</span>
+                            ) : !Number.isInteger(r.sats) ? (
+                              <span className="status-tag s-cancelled">value unknown</span>
+                            ) : r.offBook ? (
+                              <span className="status-tag s-filling">still buyable</span>
                             ) : (
                               <span className="status-tag">free</span>
                             )}
@@ -339,6 +355,7 @@ export default function SendPage({ ticker, params = {} }) {
               {mode === "auto" && rows.some((r) => r.blocked === "listed") && (
                 <p className="fineprint">Listed carriers are never picked automatically — tick one to send it anyway (that withdraws its listing).</p>
               )}
+              {ordersIncomplete && <p className="notice">{ORDERS_INCOMPLETE_TEXT}</p>}
             </div>
 
             <FeeSelector fee={fee} disabled={busy} />
@@ -416,6 +433,11 @@ export default function SendPage({ ticker, params = {} }) {
               {review.listed.length > 0 && (
                 <div className="notice">
                   {review.listed.length === 1 ? "One carrier is" : `${review.listed.length} carriers are`} listed for sale. Sending spends {review.listed.length === 1 ? "it" : "them"} on-chain, which withdraws the listing{review.listed.length === 1 ? "" : "s"} — the signed listing can no longer be filled.
+                </div>
+              )}
+              {review.offBook?.length > 0 && (
+                <div className="notice">
+                  {review.offBook.length === 1 ? "An earlier listing of a carrier you spend" : "Earlier listings of carriers you spend"} can still be bought, although {review.offBook.length === 1 ? "it has" : "they have"} left the book. Sending cancels {review.offBook.length === 1 ? "it" : "them"} for good.
                 </div>
               )}
               {!reviewSelf && !inFlight && rcpt.state === "ok" && (

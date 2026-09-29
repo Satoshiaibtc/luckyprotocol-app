@@ -5,7 +5,6 @@
 // the mock order book enforcing the same cap with the indexer's exact text.
 // Plain Node.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 // The mock's dev knob, read when its world is first built: the simulated
 // wallet gets 9 open BLOK listings plus two unlisted BLOK carriers. Set
@@ -127,7 +126,7 @@ const row = (id, status = "open", extra = {}) => ({ id, seller: ME, ticker: "BLO
   assert.equal(listingRefusalText(e), listingCapText(10));
   assert.equal(
     listingCapText(10),
-    "This address already has 10 open listings, the most the order book allows for one address (all tokens together). To list another UTXO, withdraw one of your listings (the Portfolio page shows all of them), or wait until one sells or expires. A UTXO that is already listed can still be listed again at the same or a lower price.",
+    "This address already has 10 open listings, the most the order book allows for one address (all tokens together). To list another UTXO, withdraw one of your listings (the Portfolio page shows all of them) or wait until one sells. A UTXO that is already listed can still be listed again at the same or a lower price.",
   );
   const generic = listingRefusalText(orderHttpError("/orders", 400, JSON.stringify({ error: "seller has 7 open orders (cap 7)" })));
   assert.equal(generic, listingCapText(7));

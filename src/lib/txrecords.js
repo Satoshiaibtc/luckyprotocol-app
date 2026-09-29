@@ -59,6 +59,9 @@ export const CONFIRMED_RECHECK_MS = 60 * 1000;
 
 const TXID_RE = /^[0-9a-f]{64}$/;
 const OUTPOINT_RE = /^[0-9a-f]{64}:(0|[1-9][0-9]{0,6})$/;
+const HEX_RE = /^[0-9a-f]+$/;
+/** An unsigned PSBT longer than this (hex characters) is not kept with its record (no Speed up after a reload). */
+export const TXREC_PSBT_MAX = 60_000;
 const KINDS = new Set(["deploy", "mine", "send", "fill", "other"]);
 const TICKER_RE = /^[A-Z0-9]{1,8}$/;
 
@@ -96,6 +99,11 @@ export function normalizeTxRecord(r, now = Date.now()) {
     confirmedAt: confirmed ? stamp(r.confirmedAt) : null,
     // the page that shows its result has shown it; kept only to guard its inputs until final
     done: r.done === true,
+    // A MINE's unsigned PSBT and BTC change output (what a Speed up rebuilds
+    // from after a reload), and the txids of the versions it replaced.
+    psbt: typeof r.psbt === "string" && r.psbt.length > 0 && r.psbt.length <= TXREC_PSBT_MAX && r.psbt.length % 2 === 0 && HEX_RE.test(r.psbt.toLowerCase()) ? r.psbt.toLowerCase() : null,
+    changeVout: Number.isInteger(r.changeVout) && r.changeVout >= 0 && r.changeVout < 1_000 ? r.changeVout : null,
+    replaces: Array.isArray(r.replaces) ? [...new Set(r.replaces.map((t) => String(t).toLowerCase()).filter((t) => TXID_RE.test(t) && t !== txid))].slice(-20) : [],
   };
 }
 
@@ -308,10 +316,10 @@ export function createTxRecordStore({ storage, now = () => Date.now(), ttl = TXR
   };
 
   return {
-    /** Record a broadcast tx `{ txid, kind, ticker, inputs: [{ txid, vout }] | ["txid:vout"] }`. */
-    add(address, { txid, kind = "other", ticker = null, inputs = [] }) {
+    /** Record a broadcast tx `{ txid, kind, ticker, inputs: [{ txid, vout }] | ["txid:vout"], psbt?, changeVout?, replaces? }`. */
+    add(address, { txid, kind = "other", ticker = null, inputs = [], psbt = null, changeVout = null, replaces = [] }) {
       const keys = (inputs || []).map((i) => (typeof i === "string" ? i : `${i.txid}:${i.vout}`));
-      const rec = normalizeTxRecord({ txid, kind, ticker, inputs: keys, at: now() }, now());
+      const rec = normalizeTxRecord({ txid, kind, ticker, inputs: keys, at: now(), psbt, changeVout, replaces }, now());
       if (!rec) return read(address);
       const list = read(address).filter((r) => r.txid !== rec.txid);
       list.push(rec);

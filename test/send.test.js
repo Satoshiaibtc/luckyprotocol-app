@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
-import { autoPickCarriers, carrierNote, parseSendAmount, pendingSendsOf, pickedAmount, recipientState, sendAmountError, sendCarrierRows, sendFormHint, sendLayout, sendPendingOutpoints, sendReviewModel, spendableAmount } from "../src/lib/send.js";
+import { autoPickCarriers, carrierNote, parseSendAmount, pendingSendsOf, pickedAmount, recipientState, sendAmountError, sendCarrierRows, sendFormHint, sendLayout, sendPendingOutpoints, sendReviewModel, sendVersions, spendableAmount, switchSendVersion } from "../src/lib/send.js";
 import { createTxRecordStore, refreshTxRecords } from "../src/lib/txrecords.js";
 import { buildSendPsbt, SEND_CHANGE_OUT, SEND_TO_OUT } from "../src/lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, parsePayload, payloadToString } from "../src/lib/payloads.js";
@@ -212,6 +212,24 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   assert.deepEqual([p.op, p.ticker, p.amount, p.toOutIdx, p.changeOutIdx], ["SEND", "LUCKY", 1400, SEND_TO_OUT, SEND_CHANGE_OUT]);
   assert.equal(addr(SEND_CHANGE_OUT), SELF, "vout3 (residual: 100 LUCKY + 8 ORE) → you");
   console.log("send build: 2 carriers → legacy recipient in the §2.3 layout");
+}
+
+// ---- a sped-up send: every version is followed -------------------------------------------------------
+{
+  assert.deepEqual(sendVersions({ txid: TX("3") }), [TX("3")], "never sped up: one version");
+  const chain = { phase: "unseen", note: "not seen", txid: TX("3"), replaces: [TX("1"), TX("2")], psbt: "70736274ff", ticker: "LUCKY" };
+  assert.deepEqual(sendVersions(chain), [TX("3"), TX("2"), TX("1")], "the current version first, then the replaced ones, newest first");
+  assert.deepEqual(sendVersions(null), []);
+  // A block confirmed the first version instead of the faster copies: the flow follows it.
+  const next = switchSendVersion(chain, TX("1"));
+  assert.equal(next.txid, TX("1"));
+  assert.deepEqual(next.replaces, [TX("2"), TX("3")], "the others stay known as replaced versions");
+  assert.deepEqual(sendVersions(next).slice().sort(), sendVersions(chain).slice().sort(), "no version is lost");
+  assert.equal(next.psbt, null, "nothing left to speed up");
+  assert.deepEqual([next.phase, next.note], ["pending", null], "pending until its own check says confirmed — never \"not seen\"");
+  assert.equal(next.ticker, "LUCKY");
+  assert.equal(switchSendVersion(chain, TX("3")), chain, "the version it already follows: unchanged");
+  console.log("send speed up: every version is known, a confirmed earlier one becomes the send");
 }
 
 console.log("send: all checks passed");

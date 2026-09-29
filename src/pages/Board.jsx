@@ -40,7 +40,7 @@ export function sortTokens(items, sort) {
 }
 
 export default function Board({ notice }) {
-  const { tokens, health, navigate } = useApp();
+  const { tokens, health, navigate, chainTip } = useApp();
   const mobile = useIsMobile();
   const [sort, setSort] = useState("active");
   const [q, setQ] = useState("");
@@ -50,7 +50,9 @@ export default function Board({ notice }) {
   const matches = useMemo(() => (needle ? items.filter((t) => t.ticker.includes(needle)) : items), [items, needle]);
   const shown = useMemo(() => sortTokens(matches, sort), [matches, sort]);
   const empty = emptyBoardState({ items, shown, sort, q });
-  const act = activationState(health.data?.tip_height ?? null);
+  const act = activationState(chainTip);
+  // Some registry pages could not be read: a ticker missing from `items` may exist.
+  const partial = tokens.data?.complete === false;
   // Before activation (tip known and below it) no ticker can be created yet.
   const preActivation = !act.unknown && act.locked;
 
@@ -98,7 +100,7 @@ export default function Board({ notice }) {
           </Panel>
           <Panel as="div" title="Tip block" led={led}>
             {/* Phones drop the '#': "#969,800" ellipsizes in a 360px-wide three-up. */}
-            <div className="hero-num hero-num-tip">{health.data?.tip_height ? `${mobile ? "" : "#"}${fmtInt(health.data.tip_height)}` : "—"}</div>
+            <div className="hero-num hero-num-tip">{chainTip ? `${mobile ? "" : "#"}${fmtInt(chainTip)}` : "—"}</div>
           </Panel>
         </div>
       </section>
@@ -186,7 +188,16 @@ export default function Board({ notice }) {
       ) : empty === "no-match" ? (
         <div className="empty-state">
           <h2>No ticker matches “{needle}”</h2>
-          {TICKER_RE.test(needle) ? (
+          {TICKER_RE.test(needle) && partial ? (
+            <>
+              <p className="muted">
+                Only {fmtInt(items.length)} of {fmtInt(tokens.data.total)} tokens could be loaded, so {needle} may exist. Its page says for sure.
+              </p>
+              <a className="btn" href={tokenHref(needle)}>
+                Open {needle}
+              </a>
+            </>
+          ) : TICKER_RE.test(needle) ? (
             preActivation ? (
               <p className="muted">{needle} is not deployed. Reserving a ticker opens at block #{fmtInt(UNLOCK_HEIGHT)}, {countdownText(act.blocksLeft)}.</p>
             ) : (

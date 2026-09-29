@@ -24,7 +24,10 @@
 //            reconcile: "pending" | "done" | "timeout" | undefined, indexed,
 //            serverConfirmations, confirmations, final,
 //            reorgs, reorg: { kind: "block" | "mempool", fromHeight, fromHash, fromYield } | null,
-//            inputs (set when it is given up: its record goes, and comes back if it confirms after all) }
+//            inputs (set when it is given up: its record goes, and comes back if it confirms after all),
+//            psbt, changeVout (the unsigned PSBT of the current version and its BTC change output — what
+//            a Speed up rebuilds from; null when unknown), replaces (txids of the versions a Speed up
+//            replaced, oldest first: a miner may still confirm one of them), speeding, speedError }
 
 import { mineYield } from "./yield.js";
 import { fmtInt, shortTxid } from "./format.js";
@@ -39,8 +42,69 @@ export const DROPPED_WATCH_MS = 60 * 60 * 1000;
 export const MINE_FLOW_BUSY = new Set(["building", "signing", "broadcasting"]);
 
 /** A fresh item for a MINE this page just broadcast. */
-export function newPendingMine({ txid, ticker, broadcastAt = Date.now() }) {
-  return { txid, ticker, broadcastAt, phase: "pending", resumed: false, unseenSince: broadcastAt, lastChecked: null, pollError: null, reorgs: 0, reorg: null, final: false };
+export function newPendingMine({ txid, ticker, broadcastAt = Date.now(), psbt = null, changeVout = null, replaces = [] }) {
+  return {
+    txid,
+    ticker,
+    broadcastAt,
+    phase: "pending",
+    resumed: false,
+    unseenSince: broadcastAt,
+    lastChecked: null,
+    pollError: null,
+    reorgs: 0,
+    reorg: null,
+    final: false,
+    psbt: typeof psbt === "string" && psbt ? psbt : null,
+    changeVout: Number.isInteger(changeVout) ? changeVout : null,
+    replaces: Array.isArray(replaces) ? replaces.filter((t) => t && t !== txid) : [],
+  };
+}
+
+/** Every txid an item has had: the current version first, then the ones it replaced, newest first. */
+export function mineVersions(item) {
+  if (!item) return [];
+  return [item.txid, ...[...(item.replaces || [])].reverse()].filter((t, i, a) => t && a.indexOf(t) === i);
+}
+
+/**
+ * Which /tx-status answer to fold into an item that was sped up
+ * (`answers` = `[{ txid, status }]`, status null when it could not be
+ * asked): a confirmed version wins — the chain chose it; otherwise the
+ * current version's answer, counted as "seen" while ANY version is still
+ * in the node's mempool (the item is not given up while one may confirm).
+ * → `{ txid, status }` (status null: unknown).
+ */
+export function pickMineVersion(item, answers) {
+  const list = answers || [];
+  const conf = list.find((a) => a.status?.confirmed && a.status.block_hash);
+  if (conf) return conf;
+  const cur = list.find((a) => a.txid === item.txid) || { txid: item.txid, status: null };
+  if (list.some((a) => a.status?.seen || a.status?.in_mempool)) return { txid: item.txid, status: { ...(cur.status || {}), confirmed: false, seen: true } };
+  return cur;
+}
+
+/**
+ * `item` following its version `txid` (an older version confirmed instead
+ * of the faster one): the other versions become `replaces`; the stored
+ * PSBT (of the version it no longer follows) is dropped — a confirmed MINE
+ * has nothing left to speed up.
+ */
+export function switchMineVersion(item, txid) {
+  if (!item || !txid || txid === item.txid) return item;
+  const all = mineVersions(item);
+  return { ...item, txid, replaces: all.filter((t) => t !== txid).reverse(), psbt: null, changeVout: null };
+}
+
+/**
+ * Can this item be sped up here? Only a MINE still waiting for a block
+ * whose unsigned PSBT this browser kept, with a BTC change output to take
+ * the extra fee from. → "yes" | "no-change" | "no" (nothing to rebuild from,
+ * or not waiting).
+ */
+export function mineSpeedUpState(item) {
+  if (!item || item.phase !== "pending" || !item.psbt) return "no";
+  return Number.isInteger(item.changeVout) ? "yes" : "no-change";
 }
 
 /**
@@ -51,12 +115,20 @@ export function newPendingMine({ txid, ticker, broadcastAt = Date.now() }) {
  */
 export function resumeMinePendings(records, ticker) {
   // every one of them (the record store's own cap bounds the count): a
-  // provisional MINE left out would never have its reorganizations said
-  return (records || [])
-    .filter((r) => r && r.kind === "mine" && r.ticker === ticker && !r.done)
+  // provisional MINE left out would never have its reorganizations said —
+  // except a version a later Speed up replaced: that one is followed by
+  // the item of the version that replaced it.
+  const mine = (records || []).filter((r) => r && r.kind === "mine" && r.ticker === ticker && !r.done);
+  const replaced = new Set(mine.flatMap((r) => r.replaces || []));
+  return mine
+    .filter((r) => !replaced.has(r.txid))
     .sort((a, b) => a.at - b.at)
     // the drop clock restarts from the last time the node reported it, not the broadcast
-    .map((r) => ({ ...newPendingMine({ txid: r.txid, ticker, broadcastAt: r.at }), unseenSince: Math.max(r.at, Number.isFinite(r.seenAt) ? r.seenAt : 0), resumed: true }));
+    .map((r) => ({
+      ...newPendingMine({ txid: r.txid, ticker, broadcastAt: r.at, psbt: r.psbt ?? null, changeVout: r.changeVout ?? null, replaces: r.replaces ?? [] }),
+      unseenSince: Math.max(r.at, Number.isFinite(r.seenAt) ? r.seenAt : 0),
+      resumed: true,
+    }));
 }
 
 /**
@@ -292,7 +364,8 @@ export function pendingMineRow(item, ticker, now = Date.now()) {
   if (item.phase === "pending") {
     const last = item.pollError ? ` · last check failed: ${item.pollError}` : "";
     const back = item.reorg?.kind === "mempool" ? "back in the mempool after a chain reorganization · " : "";
-    return row("busy", `${item.resumed ? "resumed · " : ""}${back}waiting for a block · checking every 15 s${last}`);
+    const faster = item.replaces?.length ? "sped up (an earlier version may still confirm instead) · " : "";
+    return row("busy", `${item.resumed ? "resumed · " : ""}${back}${faster}waiting for a block · checking every 15 s${last}`);
   }
   const block = `block #${fmtInt(item.blockHeight)}`;
   const digit = item.blockHash ? ` · digit ${String(item.blockHash).slice(-1)} (tier ${fmtInt(item.yieldLocal)})` : "";

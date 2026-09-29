@@ -22,11 +22,13 @@
 // positive multiple of 100 below the tier, which the second source cannot
 // confirm ("unverified"); a full tier in a block after
 // the cap block is a disagreement (§3 credits 0 there). A SEND carrier is
-// either TO_OUT (AMT must equal `amount`) or the residual slot (§2.3 /
-// §4.1: CHANGE_OUT, or the default output when CHANGE_OUT is unusable),
-// whose balance depends on the inputs — only the slot is checked
-// ("unverified"). Any other vout, opcode, or no LUCKY-20 payload at all is
-// a disagreement, and so is a listing of 0 tokens.
+// either TO_OUT (AMT of the SEND's own ticker must equal `amount`) or the
+// residual slot (§2.3 / §4.1: CHANGE_OUT, or the default output when
+// CHANGE_OUT is unusable), which receives the residual of EVERY ticker the
+// inputs carried — so a residual of another ticker than the SEND's is a
+// normal carrier too — whose balance depends on the inputs: only the slot
+// is checked ("unverified"). Any other vout, opcode, or no LUCKY-20 payload
+// at all is a disagreement, and so is a listing of 0 tokens.
 //
 // Verdicts: "agree" (proceed), "unverified" (the outpoint agrees, but the
 // second source cannot confirm the TOKEN AMOUNT on it — mempool.space sees
@@ -174,7 +176,24 @@ export function carrierAmountCheck({ vout, ticker, amount, capHeight = null }, t
     reasons.push(`${SECOND_SOURCE_NAME} shows no LUCKY-20 OP_RETURN on the creating tx — vout ${vout} is not a MINE or SEND token output`);
     return done();
   }
-  if (p.ticker !== ticker) {
+  if (p.op !== "MINE" && p.op !== "SEND") {
+    reasons.push(`the creating tx is a ${p.op}, which credits no token output`);
+    return done();
+  }
+  if (p.op === "SEND") {
+    // §4.1: the residual of every ticker in the inputs lands on the residual
+    // slot, whatever ticker the SEND names — checked before the ticker.
+    const changeUsable = !!vouts[p.changeOutIdx] && !isOpReturnVout(vouts[p.changeOutIdx]);
+    const residualSlot = changeUsable ? p.changeOutIdx : vouts.findIndex((v) => !isOpReturnVout(v));
+    if (p.ticker !== ticker) {
+      if (vout === residualSlot) {
+        notes.push(`vout ${vout} is the residual output of a SEND of ${p.ticker}: it holds whatever ${ticker} the transaction's inputs carried, and ${SECOND_SOURCE_NAME} cannot see token balances`);
+        return done();
+      }
+      reasons.push(`${SECOND_SOURCE_NAME} shows a SEND of ${p.ticker} whose ${ticker} residual goes to vout ${residualSlot}, the listing is vout ${vout}`);
+      return done();
+    }
+  } else if (p.ticker !== ticker) {
     reasons.push(`${SECOND_SOURCE_NAME} shows an OP_RETURN for ${p.ticker}, the listing says ${ticker}`);
     return done();
   }
@@ -237,9 +256,41 @@ export function carrierAmountCheck({ vout, ticker, amount, capHeight = null }, t
     reasons.push(`the SEND's OP_RETURN routes ${ticker} to vout ${p.toOutIdx} and the residual to vout ${p.changeOutIdx} — vout ${vout} carries no tokens`);
     return done();
   }
-
-  reasons.push(`the creating tx is a ${p.op}, which credits no token output`);
   return done();
+}
+
+/**
+ * Would a buyer's second-source check refuse this carrier because of where
+ * it came from — a plain transfer with no LUCKY-20 payload, a COMMIT or
+ * DEPLOY output, a MINE output holding more than its yield, a SEND output
+ * that is neither TO_OUT nor the residual slot? `result` is what
+ * checkSecondSource answered for the seller's own carrier. True only for a
+ * "disagree" on the creating transaction; an unreachable source or a
+ * mismatch of value / script / spent state says nothing about the origin.
+ */
+const ORIGIN_REASON_RE = /no LUCKY-20 OP_RETURN|the creating tx is a|shows a SEND of|OP_RETURN for|a MINE credits vout|credits 0 there|yields \d|less than its tier|OP_RETURN moves|OP_RETURN routes/;
+export function originRefused(result) {
+  if (!result || result.verdict !== "disagree") return false;
+  return (result.reasons || []).some((r) => ORIGIN_REASON_RE.test(String(r)));
+}
+
+/** The sell form's words for a carrier a buyer's check would refuse (originRefused). */
+export const ORIGIN_REFUSED_TEXT =
+  "Buyers cannot confirm where this UTXO's tokens came from: it was not created as a MINE's or a SEND's token output (a plain transfer, a reservation or publish output, or a mine that also received other tokens). A buyer's check refuses such a listing, so it would never sell. Move the tokens to a fresh carrier with a send to yourself first, then list that carrier once it confirms.";
+
+/**
+ * The sell form's view of the origin check for the selected carrier
+ * (`check` = `{ key, refused, checking }` as the form keeps it, `sel` = the
+ * selected row): `blocked` once the check answered that a buyer would
+ * refuse this carrier, `pending` while it has not answered for THIS
+ * carrier yet — signing waits for the answer. An unreachable source is an
+ * answer too (it fails open), and a carrier that holds more than one
+ * ticker is not checked.
+ */
+export function originCheckState(check, sel) {
+  if (!sel || sel.multi) return { blocked: false, pending: false };
+  const answered = !!check && check.key === sel.key && !check.checking;
+  return { blocked: answered && !!check.refused, pending: !answered };
 }
 
 /**

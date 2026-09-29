@@ -10,6 +10,7 @@ import Panel from "../components/hud/Panel.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
 import DailyChart from "../components/DailyChart.jsx";
 import { ActivityTable } from "../components/Tables.jsx";
+import { isIndexerBusy } from "../lib/errors.js";
 
 const POLL_MS = 60_000;
 
@@ -19,7 +20,7 @@ const POLL_MS = 60_000;
  * paginated ledger filtered by kind and, optionally, by one bc1 address.
  */
 export default function ActivityPage() {
-  const { health, address, price } = useApp();
+  const { health, address, price, chainTip } = useApp();
   const mobile = useIsMobile();
   const usd = price.data?.usd_per_btc ?? null;
   const [metric, setMetric] = useState("events");
@@ -49,7 +50,7 @@ export default function ActivityPage() {
     if (t === "") setAddrFilter("");
     else if (isSearchableAddress(t)) setAddrFilter(normalizeSearchAddress(t));
   };
-  const tip = health.data?.tip_height ?? null;
+  const tip = chainTip;
 
   return (
     <main className="page activity-page">
@@ -64,7 +65,7 @@ export default function ActivityPage() {
                   {health.data?.last_progress_at ? <span className="muted"> · indexed {fmtAgo(health.data.last_progress_at)}</span> : null}
                 </>
               ) : health.error ? (
-                <span className="err">indexer offline</span>
+                <span className="err">{isIndexerBusy(health.error) ? "indexer busy" : "indexer offline"}</span>
               ) : (
                 "connecting…"
               )}

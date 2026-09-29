@@ -35,6 +35,14 @@ export const INTERVALS = [
 export const WITHDRAW_PENDING_TEXT =
   "Withdrawal broadcast. Until it confirms, anyone who saved the old signed listing can still fill it — a fill that pays a higher fee can replace this withdrawal. Checking every 15 s.";
 
+/**
+ * Said while the wallet signs a withdrawal: its fee decides how long the
+ * old signature stays fillable. A pending withdrawal can be sped up from
+ * this page (the same transaction with a higher fee).
+ */
+export const WITHDRAW_FEE_NOTE =
+  "sign the withdrawal in your wallet. Until it confirms, anyone who saved the old listing can still fill it with a transaction that pays a higher fee — a fee that confirms soon shortens that window, and Speed up raises it while it is pending.";
+
 /** The withdrawal confirmed but is not final: a chain reorganization could still bring the old listing back. */
 export const WITHDRAW_CONFIRMED_TEXT =
   `Withdrawal confirmed — final after ${FINAL_DEPTH} confirmations. Until then a chain reorganization could put it back in the mempool, and the old listing with it; this page keeps checking.`;
@@ -209,8 +217,9 @@ export function sortAsks(rows) {
 /**
  * May the connected `address` pick this order? `{ ok, reason }` with reason
  * ∈ null | "own" | "filling" | "closed". A `filling` row already has a
- * spend in the mempool: a second fill would only be rejected as a
- * double-spend, so it is shown greyed and cannot be selected.
+ * spend in the mempool: this app never builds a second fill that competes
+ * with it (only a spend paying a higher fee could replace it, and whichever
+ * confirms first counts), so it is shown greyed and cannot be selected.
  */
 export function orderSelectable(order, address) {
   if (!order || typeof order !== "object") return { ok: false, reason: "closed" };
@@ -224,6 +233,12 @@ export function orderSelectable(order, address) {
  * What a fill of `order` costs at `feeRateSatVb` from `address` (display
  * estimate — the builder recomputes with the real inputs). Null without a
  * usable rate. Every carrier the buyer receives is a 546-sat output.
+ *
+ * `totalSats` is the gross figure (price + the three 546-sat outputs + the
+ * network fee) and the ceiling the sheet never signs above. The listed
+ * UTXO's own BTC (`carrierInSats`) enters the fill as input 0 and comes
+ * back in the buyer's change, so the wallet pays `netSats` = total − carrier;
+ * two of the 546-sat outputs are the buyer's own token carriers.
  */
 export function fillQuote({ order, address, feeRateSatVb }) {
   if (!order || !Number.isFinite(feeRateSatVb) || feeRateSatVb <= 0) return null;
@@ -242,7 +257,106 @@ export function fillQuote({ order, address, feeRateSatVb }) {
     vsize: est.vsize,
     feeRateSatVb,
     totalSats: est.totalSats,
+    carrierInSats: est.carrierInSats,
+    netSats: est.netSats,
   };
+}
+
+/**
+ * The buy bar's line once the fill confirmed (`status` = the /tx-status
+ * answer): its block when the answer names one, never "block #0".
+ */
+export function filledLineText(status) {
+  if (status?.final) return "Filled.";
+  const h = status?.block_height;
+  const where = Number.isInteger(h) && h > 0 ? ` in block #${h.toLocaleString("en-US")}` : "";
+  return `Filled${where} — final after ${FINAL_DEPTH} confirmations.`;
+}
+
+/** Text for the pending-fill title of an order-book row the buyer cannot pick. */
+export function fillingRowTitle(order) {
+  const rate = order && Number.isFinite(order.pending_feerate) ? ` at ${order.pending_feerate} sat/vB` : "";
+  return `A fill of this listing is already in the mempool${rate}. This app does not build a second fill that competes with it; whichever spend confirms first counts.`;
+}
+
+// ---- a fill that did not confirm ----------------------------------------------------------
+
+/**
+ * What became of a fill this browser broadcast as `txid` from `address`,
+ * judged from the order book's current view of the listing (`now`, the
+ * OrderView of GET /orders/:id, or null when it is gone). →
+ *   { kind: "mine", txid }       the book names this address as the buyer
+ *                                in another transaction (the same fill,
+ *                                replaced by a faster copy): follow that txid
+ *   { kind: "other", txid }      another buyer's fill confirmed first
+ *   { kind: "seller", txid }     the seller spent the listed UTXO first (a
+ *                                withdrawal, or a fill of their own)
+ *   { kind: "replacing", txid }  another spend of it sits in the mempool
+ *   null                         nothing can be concluded yet
+ * "other" and "seller" need a confirmed spend (`spent_txid` and
+ * `spent_block`): only then can the buyer's transaction never confirm.
+ */
+export function fillOutcome(now, { txid, address } = {}) {
+  if (!now || typeof now !== "object") return null;
+  const mine = String(txid || "").toLowerCase();
+  const spent = now.spent_txid ? String(now.spent_txid).toLowerCase() : null;
+  const confirmedElsewhere = !!spent && spent !== mine && Number.isInteger(now.spent_block);
+  if (now.status === "filled") {
+    if (!spent || spent === mine) return null;
+    if (address && now.buyer === address) return { kind: "mine", txid: spent };
+    if (!confirmedElsewhere) return null;
+    return { kind: now.buyer && now.buyer === now.seller ? "seller" : "other", txid: spent };
+  }
+  if (now.status === "cancelled") return confirmedElsewhere ? { kind: "seller", txid: spent } : null;
+  if (now.status === "filling") {
+    const pending = now.pending_spend_txid ? String(now.pending_spend_txid).toLowerCase() : null;
+    if (pending && pending !== mine) return { kind: "replacing", txid: pending };
+  }
+  return null;
+}
+
+/**
+ * Right before the wallet signs a fill: the book's fresh view of the
+ * listing (`now`, GET /orders/:id) against the one the sheet verified and
+ * shows (`shown`). Null when it may be signed, else why not — a spend of it
+ * already in the mempool, a listing closed or gone, a market not open, or
+ * a listing re-published since (another price, another PSBT).
+ */
+export function signTimeOrderProblem(now, shown) {
+  if (!now) return "Not signed: this listing is no longer on the order book.";
+  if (now.status === "filling") return "Not signed: a fill or a withdrawal of this listing is already in the mempool.";
+  if (now.status === "filled") return "Not signed: this listing has just been filled.";
+  if (now.status === "cancelled") return "Not signed: this listing has just been withdrawn.";
+  if (now.status !== "open") return "Not signed: this listing is no longer on the order book.";
+  if (now.market_open === false) return "Not signed: this ticker's market is not open.";
+  if (!shown) return null;
+  if (now.psbt !== shown.psbt || now.price_sats !== shown.price_sats || now.amount !== shown.amount || now.seller !== shown.seller || now.carrier_sats !== shown.carrier_sats) {
+    return "Not signed: this listing changed since the sheet opened — close it and select it again.";
+  }
+  return null;
+}
+
+/**
+ * A fill's fee rate below the Normal (half-hour) estimate: it may wait
+ * hours or days, the seller can withdraw it meanwhile, and a fill cannot be
+ * sped up here — said before signing. Null when the rate is at least
+ * Normal, or either figure is unknown.
+ */
+export function slowFillWarning(rateSatVb, feesData) {
+  const r = Number(rateSatVb);
+  const normal = Number(feesData?.halfHourFee);
+  if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(normal) || normal <= 0 || r >= normal) return null;
+  return `${r} sat/vB is below the Normal estimate (${normal} sat/vB), so this fill may wait hours or days. Until it confirms the seller can still withdraw the listing (your BTC then does not move), and a fill cannot be sped up from this page — Normal or Fast is safer.`;
+}
+
+/** One plain sentence for a fillOutcome of kind "other" | "seller" | "replacing". */
+export function fillOutcomeText(outcome) {
+  if (!outcome) return "";
+  const tx = outcome.txid ? ` (tx ${String(outcome.txid).slice(0, 12)}…)` : "";
+  if (outcome.kind === "other") return `Another buyer's fill of this listing confirmed first${tx}. Your transaction can no longer confirm — your BTC did not move.`;
+  if (outcome.kind === "seller") return `The seller spent the listed UTXO first${tx}, which withdrew the listing. Your transaction can no longer confirm — your BTC did not move.`;
+  if (outcome.kind === "replacing") return `Another transaction spending this listing${tx} — the seller's withdrawal or another buyer's fill — has replaced yours in the mempool. If it confirms, your BTC does not move; this page keeps checking.`;
+  return "";
 }
 
 // ---- cancel fee rule ------------------------------------------------------------------
@@ -332,15 +446,67 @@ export function fmtCandleTime(t, interval) {
 // ---- sell form ------------------------------------------------------------------------------
 
 /**
+ * A number written with thousands separators: "1,000", "12,345",
+ * "1,000,000", "1,000.5". Read as a decimal comma it would be a thousand
+ * times too small, and read as thousands it would misread "1,250" typed as
+ * 1.25 — so the unit box refuses it and says why.
+ */
+const THOUSANDS_RE = /^[1-9]\d{0,2}(,\d{3})+(\.\d*)?$/;
+
+/** Why the text in the unit-price box cannot be read, in plain words — or null. */
+export function unitInputProblem(v) {
+  const t = String(v ?? "").trim();
+  if (t === "") return null;
+  if (THOUSANDS_RE.test(t)) return "Write the price without thousands separators, with a dot for decimals — 1000, not 1,000.";
+  if (parseUnitInput(t) === null) return "Enter the price as a number of sats per token, e.g. 15.5.";
+  return null;
+}
+
+/**
  * A unit price typed in the sell form → a positive finite number, or null
- * when it does not parse ("", "15x", "0"). A decimal comma counts as a
- * decimal point ("15,5" → 15.5); a thousands separator does not exist here.
+ * when it does not parse ("", "15x", "0"). A single decimal comma counts as
+ * a decimal point ("15,5" → 15.5, "0,125" → 0.125); a number written with
+ * thousands separators ("1,000", "12,345") is refused, never read as 1 or 12.345.
  */
 export function parseUnitInput(v) {
-  const t = String(v ?? "").trim().replace(",", ".");
+  const s = String(v ?? "").trim();
+  if (THOUSANDS_RE.test(s)) return null;
+  const t = s.replace(",", ".");
   if (!/^(\d+\.?\d*|\.\d+)$/.test(t)) return null;
   const n = Number(t);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * The total-sats box → a whole number of sats, or NaN. Thousands separators
+ * are dropped when they are laid out as such ("5,000,000"): a total is whole
+ * sats, so no comma in it can be a decimal comma.
+ */
+export function parseTotalInput(v) {
+  const s = String(v ?? "").trim();
+  const t = /^[1-9]\d{0,2}(,\d{3})+$/.test(s) ? s.replace(/,/g, "") : s;
+  if (!/^\d+$/.test(t)) return NaN;
+  return Number(t);
+}
+
+/** Below this share of the market's reference price a listing needs an explicit confirmation. */
+export const LOW_PRICE_RATIO = 0.1;
+
+/**
+ * Is `unitPrice` (sats per token) below a tenth of the ticker's current
+ * floor — or, with no open listing, its last trade? → `{ ref, refKind:
+ * "floor" | "last trade", ratio }` or null (not low, or nothing to compare
+ * with). A listing is a bearer instrument: once published anyone can fill
+ * it, so a price typed a thousand times too small is caught before signing.
+ */
+export function lowPriceCheck(unitPrice, token) {
+  const u = Number(unitPrice);
+  if (!Number.isFinite(u) || u <= 0 || !token) return null;
+  const floor = Number(token.floor_unit_price);
+  const last = Number(token.last_trade?.unit_price);
+  const [ref, refKind] = Number.isFinite(floor) && floor > 0 ? [floor, "floor"] : Number.isFinite(last) && last > 0 ? [last, "last trade"] : [null, null];
+  if (ref === null || u >= ref * LOW_PRICE_RATIO) return null;
+  return { ref, refKind, ratio: u / ref };
 }
 
 /**
@@ -407,10 +573,17 @@ export function listingRefusalText(e) {
   if (/withdraw first/i.test(msg)) return RAISE_PRICE_TEXT;
   // The first output of an open reservation (COMMIT) is never listed.
   if (/reserves a ticker|open commit/i.test(msg)) return COMMIT_CARRIER_PLAIN_TEXT;
+  // The listed outpoint does not hold exactly the listing's tokens (a UTXO
+  // with several tickers, or a stale view): the book names the balances.
+  if (/^outpoint (carries|balances are) \{/.test(msg)) {
+    return `The order book refused this listing: this UTXO's tokens do not match it (${msg.replace(/\.$/, "")}). Refresh; if it holds more than one ticker, move this ticker to its own carrier first.`;
+  }
   // A listing whose version / input sequence no fill could relay
   // (the book says "listing tx version must be 1 or 2 …" and "input0
-  // nSequence … sets a relative timelock").
-  if (/tx version|nversion|nsequence|relative (time)?lock|timelock|can never be filled/i.test(msg)) {
+  // nSequence … sets a relative timelock"). Case-sensitive, lower-case or
+  // camel-case words only: a ticker is upper-case, so one named TIMELOCK or
+  // NVERSION in another refusal never reads as this one.
+  if (/tx version|nVersion|nSequence|relative (time)?lock|timelock|can never be filled/.test(msg)) {
     return `The order book refused this listing because no buyer could ever complete it (${msg.replace(/\.$/, "")}). Sign it again; if this repeats, your wallet changed the transaction while signing.`;
   }
   // §7.4 per-seller cap: "seller has 10 open orders (cap 10)" — the whole

@@ -282,12 +282,93 @@ export function makeOpReturnScript(data) {
  * Extract the raw signed transaction (hex) from a FINALIZED PSBT — the
  * shape UniSat returns from `signPsbt({ autoFinalized: true })`. Used when
  * `unisat.pushPsbt` is unavailable or fails, to POST /broadcast instead.
+ * An input the wallet signed but left unfinalized is finalized here from
+ * its own signature (nothing new is signed); any other unfinished input
+ * makes the extraction fail.
  */
 export function extractRawTxHex(signedPsbtHex) {
   const tx = btc.Transaction.fromPSBT(hex.decode(signedPsbtHex));
+  finalizeSignedInputs(tx);
   const raw = hex.encode(tx.extract());
   assertSingleOpReturn(raw);
   return raw;
+}
+
+/**
+ * The transaction a PSBT carries, as the fields a signature must not
+ * change: version, lock time, each input's outpoint and nSequence, each
+ * output's script and amount.
+ */
+export function psbtTxShape(psbtHex) {
+  const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownInputs: true, allowUnknownOutputs: true, disableScriptCheck: true });
+  const inputs = [];
+  for (let i = 0; i < tx.inputsLength; i++) {
+    const inp = tx.getInput(i);
+    inputs.push({ txid: inp.txid ? hex.encode(inp.txid) : null, vout: inp.index ?? null, sequence: inp.sequence ?? 0xffffffff });
+  }
+  const outputs = [];
+  for (let i = 0; i < tx.outputsLength; i++) {
+    const o = tx.getOutput(i);
+    outputs.push({ script: o.script ? hex.encode(o.script) : null, amount: o.amount === undefined ? null : String(o.amount) });
+  }
+  return { version: tx.version, lockTime: tx.lockTime, inputs, outputs };
+}
+
+/**
+ * After-signing check: does the PSBT the wallet returned carry the very
+ * transaction it was asked to sign? A wallet may sign only what it was
+ * given — a changed lock time, nSequence (the RBF signal, a REVEAL's
+ * relative lock), input or output would otherwise be broadcast as is.
+ * → null when identical, else what differs (a short phrase).
+ */
+export function signedTxMismatch(unsignedPsbtHex, signedPsbtHex) {
+  let a;
+  let b;
+  try {
+    a = psbtTxShape(unsignedPsbtHex);
+  } catch {
+    return null; // not ours to judge: the flow built something this module cannot read
+  }
+  try {
+    b = psbtTxShape(signedPsbtHex);
+  } catch (e) {
+    return `the signed result is not a readable PSBT (${e?.message || e})`;
+  }
+  if (a.version !== b.version) return `the version changed (${a.version} → ${b.version})`;
+  if (a.lockTime !== b.lockTime) return `the lock time changed (${a.lockTime} → ${b.lockTime})`;
+  if (a.inputs.length !== b.inputs.length) return `the input count changed (${a.inputs.length} → ${b.inputs.length})`;
+  for (let i = 0; i < a.inputs.length; i++) {
+    const x = a.inputs[i];
+    const y = b.inputs[i];
+    if (x.txid !== y.txid || x.vout !== y.vout) return `input ${i} changed`;
+    if (x.sequence !== y.sequence) return `input ${i}'s sequence changed (${x.sequence} → ${y.sequence})`;
+  }
+  if (a.outputs.length !== b.outputs.length) return `the output count changed (${a.outputs.length} → ${b.outputs.length})`;
+  for (let i = 0; i < a.outputs.length; i++) {
+    if (a.outputs[i].script !== b.outputs[i].script) return `output ${i}'s script changed`;
+    if (a.outputs[i].amount !== b.outputs[i].amount) return `output ${i}'s amount changed`;
+  }
+  return null;
+}
+
+/** The outpoints ("txid:vout") of the inputs at `indexes` of a PSBT (all of them when `indexes` is not a list). */
+export function psbtInputKeys(psbtHex, indexes = null) {
+  const { inputs } = psbtTxShape(psbtHex);
+  const pick = Array.isArray(indexes) ? indexes.filter((i) => Number.isInteger(i) && i >= 0 && i < inputs.length) : inputs.map((_, i) => i);
+  return pick.map((i) => `${inputs[i].txid}:${inputs[i].vout}`);
+}
+
+/** Finalize every input of `tx` whose status is "signed" (a signature present, no final witness yet). */
+export function finalizeSignedInputs(tx) {
+  for (let i = 0; i < tx.inputsLength; i++) {
+    if (tx.inputStatus(i) !== "signed") continue;
+    try {
+      tx.finalizeIdx(i);
+    } catch (e) {
+      throw new Error(`input ${i} is signed but could not be finalized (${e?.message || e})`);
+    }
+  }
+  return tx;
 }
 
 /**
@@ -658,6 +739,98 @@ export function selectInputs({ utxos, target, excludeKeys, order = "smallest", m
   return { selected, total };
 }
 
+/**
+ * The most fee inputs one transaction may take. A wallet whose BTC is
+ * spread so thin that a single MINE or send needs more is asked to
+ * consolidate first (`code: "too-many-inputs"`), never handed a
+ * transaction whose fee is mostly the cost of its own inputs.
+ */
+export const MAX_FEE_INPUTS = 200;
+
+/** Too many inputs would be needed (see MAX_FEE_INPUTS). */
+export function tooManyInputsError(maxInputs = MAX_FEE_INPUTS) {
+  const err = new Error(
+    `this would need more than ${maxInputs} inputs: the wallet's BTC is spread over many small outputs — consolidate them in the wallet (send them to yourself in one transaction), or pick a lower fee rate`,
+  );
+  err.code = "too-many-inputs";
+  err.maxInputs = maxInputs;
+  return err;
+}
+
+/** Is `e` a selection that ran short (not enough value, or too many inputs needed) rather than a build error? */
+export function isShortfall(e) {
+  return !!e && (e.code === "insufficient" || e.code === "too-many-inputs");
+}
+
+/**
+ * Select fee inputs until the fee they cost is covered. `targetFor(fee)` =
+ * the value the inputs must reach when the fee is `fee` (≤ 0: none needed);
+ * `feeFor(n)` = the fee with `n` selected inputs. Each pass selects a
+ * PREFIX of one sorted list (selectInputs) for a target that only grows,
+ * so the input count only grows, and the loop stops the first time it does
+ * not (the fee is then the one the selection was made for): at most
+ * spendable.length + 2 passes. Never a fixed number of passes — a stop
+ * before convergence leaves a selection made for a smaller fee than it
+ * pays. `onEmpty()` builds the error when inputs are needed and there are
+ * none. → `{ selected, total, fee }` with total ≥ targetFor(fee).
+ */
+export function convergeSelection({ spendable, targetFor, feeFor, order, minEffectiveSats = 0, maxInputs = MAX_FEE_INPUTS, onEmpty = null }) {
+  let fee = 0;
+  let sel = { selected: [], total: 0 };
+  const passes = spendable.length + 2;
+  for (let pass = 0; pass < passes; pass++) {
+    const target = targetFor(fee);
+    if (target > 0) {
+      if (spendable.length === 0 && onEmpty) throw onEmpty();
+      sel = selectInputs({ utxos: spendable, target, excludeKeys: [], order, minEffectiveSats });
+    } else {
+      sel = { selected: [], total: 0 };
+    }
+    if (sel.selected.length > maxInputs) throw tooManyInputsError(maxInputs);
+    const next = feeFor(sel.selected.length);
+    if (next === fee) return { ...sel, fee };
+    fee = next;
+  }
+  // Unreachable (the count cannot grow more often than there are inputs); fail closed.
+  throw insufficientFundsError(targetFor(fee), sel.total, sel.selected.length);
+}
+
+/**
+ * The selection plans for an order: largest-first as asked; smallest-first
+ * (an asset-safe list consolidates) only over outputs worth at least TWICE
+ * their own input fee — at a high fee rate a smaller one would cost the
+ * transaction more than half of what it brings — and, when that runs short,
+ * largest-first over every output worth more than its input fee.
+ */
+function selectionPlans(order, inputCost) {
+  if (order === "largest") return [{ order: "largest", minEffectiveSats: inputCost }];
+  return [
+    { order: "smallest", minEffectiveSats: 2 * inputCost },
+    { order: "largest", minEffectiveSats: inputCost },
+  ];
+}
+
+/**
+ * Run `attempt(plan, withChange)` over the plans: every plan with a change
+ * output first, then — unless `requireChange` — every plan without one
+ * (sub-dust change folded into the fee). The first that does not run short
+ * wins; else the last shortfall is thrown.
+ */
+function firstFeasible(plans, attempt, { requireChange = false } = {}) {
+  let last = null;
+  for (const withChange of requireChange ? [true] : [true, false]) {
+    for (const plan of plans) {
+      try {
+        return { sel: attempt(plan, withChange), changeOmitted: !withChange };
+      } catch (e) {
+        if (!isShortfall(e)) throw e;
+        last = e;
+      }
+    }
+  }
+  throw last;
+}
+
 // ---- core builder --------------------------------------------------------------------------
 
 /**
@@ -727,49 +900,35 @@ function buildUnsigned({
   const fixedOutValue = outputs.reduce((s, o) => s + o.value, 0);
   const fixedAddresses = outputs.map((o) => o.address);
 
-  // Iterative selection + fee refinement: the input count drives vsize,
-  // vsize drives fee, fee drives the selection target. Converges in ≤ 3.
+  // Selection + fee refinement until they agree (convergeSelection): the
+  // input count drives vsize, vsize drives fee, fee drives the target.
   // `withChange` decides whether the estimate (and the +dust headroom on
   // the target) accounts for a change output.
-  const attempt = (withChange) => {
+  const attempt = (plan, withChange) => {
     const outputAddresses = withChange ? fixedAddresses.concat([address]) : fixedAddresses;
-    let selected, total;
-    let fee = 0;
-    for (let pass = 0; pass < 3; pass++) {
-      const target = fixedOutValue + fee + (withChange ? DUST_SATS : 0);
-      ({ selected, total } = selectInputs({ utxos: spendable, target, excludeKeys: [], order, minEffectiveSats: inputCostSats(type, satVb) }));
-      const vsize = estimateVsize({
-        inputCount: selected.length,
-        inputType: type,
-        outputAddresses,
-        opReturnScriptLen: opReturnLen,
-      });
-      const newFee = Math.ceil(Math.ceil(vsize) * satVb);
-      if (newFee === fee) break;
-      fee = newFee;
-    }
-    return { selected, total, fee, vsize: estimateVsize({
-      inputCount: selected.length, inputType: type, outputAddresses, opReturnScriptLen: opReturnLen,
-    }) };
+    const vsizeFor = (n) => estimateVsize({ inputCount: n, inputType: type, outputAddresses, opReturnScriptLen: opReturnLen });
+    const sel = convergeSelection({
+      spendable,
+      targetFor: (fee) => fixedOutValue + fee + (withChange ? DUST_SATS : 0),
+      feeFor: (n) => Math.ceil(Math.ceil(vsizeFor(n)) * satVb),
+      order: plan.order,
+      minEffectiveSats: plan.minEffectiveSats,
+    });
+    return { ...sel, vsize: vsizeFor(sel.selected.length) };
   };
 
   // Prefer a real change output. Only when the wallet cannot cover the
   // dust headroom do we fall back to folding sub-dust change into the
   // miner fee (unless the caller set requireChange).
-  let sel;
-  let changeOmitted = false;
-  try {
-    sel = attempt(true);
-  } catch (e) {
-    if (requireChange || !/insufficient funds/.test(String(e.message))) throw e;
-    sel = attempt(false);
-    changeOmitted = true;
-  }
+  const run = firstFeasible(selectionPlans(order, inputCostSats(type, satVb)), attempt, { requireChange });
+  const sel = run.sel;
+  let changeOmitted = run.changeOmitted;
   const { selected, total, fee } = sel;
 
   const change = total - fixedOutValue - fee;
   if (change < 0) {
-    throw new Error(`insufficient funds after fee (${fee.toLocaleString("en-US")} sats)`);
+    // Cannot happen once the selection converged — guard it loudly.
+    throw insufficientFundsError(fixedOutValue + fee, total, selected.length);
   }
   if (!changeOmitted && change < DUST_SATS) {
     // Cannot happen (target includes the headroom) — guard the invariant
@@ -835,43 +994,29 @@ function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints
   const fixedAddresses = fixed.map((o) => o.address);
   const pinnedValue = pinned.reduce((s, u) => s + u.sats, 0);
 
-  // Iterative selection + fee refinement (as buildUnsigned); `withChange`
-  // says whether the BTC change output is in the estimate and the target.
-  const attempt = (withChange) => {
+  // Selection + fee refinement until they agree (as buildUnsigned);
+  // `withChange` says whether the BTC change output is in the estimate and
+  // the target.
+  const attempt = (plan, withChange) => {
     const outputAddresses = withChange ? fixedAddresses.concat([address]) : fixedAddresses;
-    let selected = [];
-    let total = 0;
-    let fee = 0;
-    for (let pass = 0; pass < 3; pass++) {
-      const target = fixedOutValue + fee + (withChange ? DUST_SATS : 0) - pinnedValue;
-      if (target > 0) {
-        if (spendable.length === 0) throw noSpendableError(address, minInputSats);
-        ({ selected, total } = selectInputs({ utxos: spendable, target, excludeKeys: [], order: selectionOrder ?? defaultOrder(minInputSats), minEffectiveSats: inputCostSats(type, satVb) }));
-      } else {
-        selected = [];
-        total = 0;
-      }
-      const vsize = estimateVsize({ inputCount: pinned.length + selected.length, inputType: type, outputAddresses, opReturnScriptLen: opReturnScript.length });
-      const newFee = Math.ceil(Math.ceil(vsize) * satVb);
-      if (newFee === fee) break;
-      fee = newFee;
-    }
-    const vsize = estimateVsize({ inputCount: pinned.length + selected.length, inputType: type, outputAddresses, opReturnScriptLen: opReturnScript.length });
-    return { selected, total, fee, vsize };
+    const vsizeFor = (n) => estimateVsize({ inputCount: pinned.length + n, inputType: type, outputAddresses, opReturnScriptLen: opReturnScript.length });
+    const sel = convergeSelection({
+      spendable,
+      targetFor: (fee) => fixedOutValue + fee + (withChange ? DUST_SATS : 0) - pinnedValue,
+      feeFor: (n) => Math.ceil(Math.ceil(vsizeFor(n)) * satVb),
+      order: plan.order,
+      minEffectiveSats: plan.minEffectiveSats,
+      onEmpty: () => noSpendableError(address, minInputSats),
+    });
+    return { ...sel, vsize: vsizeFor(sel.selected.length) };
   };
 
-  let sel;
-  let changeOmitted = false;
-  try {
-    sel = attempt(true);
-  } catch (e) {
-    if (!/insufficient funds/.test(String(e.message))) throw e;
-    sel = attempt(false);
-    changeOmitted = true;
-  }
+  const run = firstFeasible(selectionPlans(selectionOrder ?? defaultOrder(minInputSats), inputCostSats(type, satVb)), attempt);
+  const sel = run.sel;
+  let changeOmitted = run.changeOmitted;
   const { selected, total, fee } = sel;
   const change = pinnedValue + total - fixedOutValue - fee;
-  if (change < 0) throw new Error(`insufficient funds after fee (${fee.toLocaleString("en-US")} sats)`);
+  if (change < 0) throw insufficientFundsError(fixedOutValue + fee - pinnedValue, total, selected.length);
   if (!changeOmitted && change < DUST_SATS) changeOmitted = true;
   const finalFee = changeOmitted ? fee + change : fee;
 
@@ -1203,8 +1348,8 @@ export function buildSendPsbt({
     const sats = Number.isInteger(own) && own > 0 ? own : satsByKey.get(outpointKey(u));
     if (!Number.isInteger(sats) || sats <= 0) {
       throw new Error(
-        `token UTXO ${u.txid}:${u.vout} has no known BTC value — refresh UTXOs ` +
-        `(indexer /btc-utxos) before sending`,
+        `token UTXO ${u.txid}:${u.vout} has no known BTC value: the indexer does not list it among this address's outputs right now ` +
+          `(the signature commits to the exact value) — try again after the next block`,
       );
     }
     return { txid: u.txid, vout: u.vout, sats };

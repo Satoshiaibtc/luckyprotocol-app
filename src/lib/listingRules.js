@@ -15,11 +15,16 @@
 //              Withdraw first (move the tokens on-chain), then list the new
 //              carrier; the same or a lower price replaces the listing.
 //              The indexer keeps guarding it after the book dropped the
-//              listing (TTL, eviction — the "listing floor").
+//              listing (TTL, eviction — the "listing floor"), and shows the
+//              seller such an off-book listing as a row with status
+//              "expired": it can still be bought at its price until the
+//              seller withdraws it.
 //   reserved   the first output of a step-1 reservation (COMMIT) that can
 //              still be published is never listed: a listing's signature
 //              covers only that output and the payment, so a buyer could
-//              publish the reserved ticker with the seller named creator.
+//              publish the reserved ticker with the seller named creator —
+//              nor, after the reservation expired, until its last block is
+//              final (a reorganization could still make it publishable).
 
 //   cap        one seller address may hold at most MAX_OPEN_LISTINGS_PER_ADDRESS
 //              OPEN listings at a time, across every ticker (spec §7.4
@@ -27,6 +32,7 @@
 //              has an open listing replaces it and takes no extra place.
 
 import { parseListing } from "./swap.js";
+import { FINAL_DEPTH, confirmationsAt } from "./finality.js";
 
 export const LISTING_VERSIONS = Object.freeze([1, 2]);
 
@@ -62,29 +68,161 @@ export function listingCapText(cap = MAX_OPEN_LISTINGS_PER_ADDRESS, used = cap) 
   const have = Number.isInteger(used) && used > cap
     ? `${used} open listings; the order book allows at most ${cap} for one address (all tokens together)`
     : `${cap} open listings, the most the order book allows for one address (all tokens together)`;
-  return `This address already has ${have}. To list another UTXO, withdraw one of your listings (the Portfolio page shows all of them), or wait until one sells or expires. A UTXO that is already listed can still be listed again at the same or a lower price.`;
+  return `This address already has ${have}. To list another UTXO, withdraw one of your listings (the Portfolio page shows all of them) or wait until one sells. A UTXO that is already listed can still be listed again at the same or a lower price.`;
+}
+
+// ---- listings that left the book --------------------------------------------------------
+
+/** A listing the book no longer shows whose signature is still valid (the seller's by-address rows with status "expired"). */
+export const isOffBook = (o) => !!o && o.status === "expired";
+
+/**
+ * The seller's words for an off-book listing of `amount` `ticker` at
+ * `unitText` sats per token (already formatted): what it still means, and
+ * the one thing that ends it.
+ */
+export function offBookText({ amount, ticker, unitText }) {
+  const what = amount ? `${Number(amount).toLocaleString("en-US")} ${ticker || ""}`.trim() : "these tokens";
+  return `An earlier listing of this output can still be bought at ${unitText} sats per token — withdraw to cancel it. It left the order book, but anyone who saved its signature can still complete it; until you withdraw, ${what} can be bought at that price.`;
+}
+
+/** The sell form's note under its carrier list when one of them has an off-book listing. */
+export const OFF_BOOK_LISTING_TEXT =
+  "an earlier listing of this output left the order book, but its signature is still valid: anyone who saved it can still buy these tokens at that price. Select it and Withdraw to cancel it.";
+
+/** The short status note of an off-book row in the listings tables. */
+export const OFF_BOOK_NOTE = "off the book · the signature is still valid until you withdraw";
+
+/**
+ * How a seller's listings table shows a closed or off-book row (`o` an
+ * OrderView) → `{ label, note }`:
+ *   filled, buyer = seller   "filled · self" — its own signature was used and
+ *                            the tokens came back to the seller's address
+ *   filled, no buyer         "filled" — paid, the tokens burned
+ *   filled                   "filled" — sold
+ *   cancelled, spent         "withdrawn" — spent on-chain without a fill (a
+ *                            withdrawal, a split or a send); never "sold"
+ *   cancelled, unspent       "cancelled" — the book dropped it after a chain
+ *                            reorganization; its signature may still be filled
+ *   expired                  "still buyable" — it left the book, the
+ *                            signature is valid until the seller withdraws
+ * Live rows (open / filling) keep their own words: null.
+ */
+export function listingStatusView(o) {
+  if (!o) return null;
+  if (o.status === "filled") {
+    if (o.buyer && o.buyer === o.seller) return { label: "filled · self", note: "filled with its own listing signature; the tokens came back to this address" };
+    if (!o.buyer) return { label: "filled", note: "paid in full; the tokens went to no address (burned)" };
+    return { label: "filled", note: null };
+  }
+  if (o.status === "cancelled") {
+    return o.spent_txid
+      ? { label: "withdrawn", note: "spent on-chain without a fill (a withdrawal, a split or a send)" }
+      : { label: "cancelled", note: "dropped after a chain reorganization — its signature can still be filled until you withdraw" };
+  }
+  if (isOffBook(o)) return { label: "still buyable", note: OFF_BOOK_NOTE };
+  return null;
+}
+
+// ---- sell-form row states ---------------------------------------------------------------
+
+/**
+ * The least BTC value a listed output may hold: the order book refuses a
+ * listing of a smaller one (a buyer's standard carriers are 546 sats).
+ */
+export const MIN_CARRIER_SATS = 546;
+
+/**
+ * The state of one of the seller's carriers in the sell form, first match wins:
+ *   "pending"   one of this browser's own unconfirmed transactions spends it
+ *               (`pendingSpent`, a Set of "txid:vout")
+ *   "multi"     it carries more than one ticker
+ *   "filling"   a spend of its live listing is in the mempool
+ *   "listed"    it has an open listing
+ *   "offbook"   an earlier listing left the book but can still be bought
+ *   "unknown"   its BTC value is not known (the indexer does not list the
+ *               output right now) — a listing commits the exact value
+ *   "small"     it holds fewer than 546 sats of BTC: the book lists only a
+ *               carrier of at least 546 (move the tokens to one first)
+ *   "fat"       it holds more than 546 sats of BTC (split first)
+ *   "listable"  none of the above
+ */
+export function sellRowState(row, pendingSpent = null) {
+  if (!row) return null;
+  if (pendingSpent && pendingSpent.has(String(row.key || "").toLowerCase())) return "pending";
+  if (row.multi) return "multi";
+  if (row.listing && row.listing.status === "filling") return "filling";
+  if (row.listing && row.listing.status === "open") return "listed";
+  if (row.offBook) return "offbook";
+  if (!Number.isInteger(row.sats)) return "unknown";
+  if (row.sats < MIN_CARRIER_SATS) return "small";
+  if (row.sats > MIN_CARRIER_SATS) return "fat";
+  return "listable";
+}
+
+/** The sell form's words for a carrier below MIN_CARRIER_SATS. */
+export function smallCarrierText(sats) {
+  return `This UTXO holds ${Number(sats).toLocaleString("en-US")} sats of BTC; the order book lists only a carrier of at least ${MIN_CARRIER_SATS} sats. Move the tokens to a fresh ${MIN_CARRIER_SATS}-sat carrier (a send to yourself) and list that once it confirms.`;
+}
+
+/**
+ * The words for a carrier whose BTC value is not known: the indexer does
+ * not list the output among the address's outputs right now (a signature
+ * commits to the exact value, so nothing can be signed for it yet).
+ */
+export const UNKNOWN_VALUE_TEXT =
+  "The BTC value of this UTXO is not known: the indexer does not list it among this address's outputs right now, and a signature must commit to the exact value. Try again after the next block.";
+
+/** The sell form's words for a carrier this browser is already spending. */
+export const OWN_PENDING_SPEND_TEXT =
+  "One of your transactions that has not confirmed yet already spends this UTXO. It cannot be listed, split or moved again; its new carrier appears here once that transaction confirms.";
+
+/**
+ * Why the carrier `sel` cannot be split or moved right now — or null.
+ * `ownPending` = this browser's own transaction spends it; a `filling`
+ * listing has a fill (or a withdrawal) in the mempool that a split would
+ * have to out-bid — only Withdraw replaces a pending fill on purpose.
+ */
+export function splitBlockedReason(sel, { ownPending = false } = {}) {
+  if (!sel) return null;
+  if (sel.pending) return OWN_PENDING_SPEND_TEXT;
+  if (sel.listing && sel.listing.status === "filling") {
+    return ownPending
+      ? "Your own transaction spending this UTXO is in the mempool — split it after that confirms."
+      : "A fill of this listing is in the mempool — this UTXO cannot be split until that fill confirms or drops. Withdraw is the only way to replace it.";
+  }
+  return null;
 }
 
 /**
  * Every order `address` has in the book, read page by page through
- * `fetchPage(offset, limit)` → `{ total, items }` (indexer.ordersByAddress).
- * The indexer lists them newest first, at most 200 a page, so an old open
- * listing can sit behind many closed ones: pages are read until `total` is
- * reached, at most `maxPages`. `complete: false` = some rows were not read,
- * so a count made from `items` is a lower bound.
+ * `fetchPage(offset, limit)` → `{ total, items, expired? }`
+ * (indexer.ordersByAddress). The indexer lists them newest first, at most
+ * 200 a page, so an old open listing can sit behind many closed ones:
+ * pages are read until `total` is reached, at most `maxPages`.
+ * `complete: false` = some rows were not read, so a count made from
+ * `items` is a lower bound. `expired` = the listings that left the book
+ * but can still be filled (sent with every page; kept from the first).
  */
 export async function readSellerOrders(fetchPage, { pageSize = 200, maxPages = 10 } = {}) {
   const items = [];
-  for (let n = 0, offset = 0; n < maxPages; n++, offset += pageSize) {
+  let expired = null;
+  for (let n = 0, offset = 0; n < maxPages; n++) {
     const pg = await fetchPage(offset, pageSize);
     const got = Array.isArray(pg?.items) ? pg.items : [];
+    if (expired === null) expired = Array.isArray(pg?.expired) ? pg.expired : [];
     items.push(...got);
+    // The next page starts where the server's page ended: its own `limit`
+    // when it names one (a server that clamps lower is still walked in
+    // full), else the size asked for.
+    const served = Number(pg?.limit);
+    offset += Number.isInteger(served) && served > 0 ? Math.min(served, pageSize) : pageSize;
     const total = Number(pg?.total);
-    const more = Number.isFinite(total) ? offset + pageSize < total : got.length >= pageSize;
-    if (!more) return { items, complete: true };
-    if (!got.length) return { items, complete: false };
+    const more = Number.isFinite(total) ? offset < total : got.length >= pageSize;
+    if (!more) return { items, expired, complete: true };
+    if (!got.length) return { items, expired, complete: false };
   }
-  return { items, complete: false };
+  return { items, expired: expired || [], complete: false };
 }
 
 /**
@@ -141,16 +279,29 @@ export const COMMIT_CARRIER_LISTING_TEXT =
 export const COMMIT_CARRIER_PLAIN_TEXT =
   "This output holds a ticker reservation: it is the first output of a step 1 (Reserve) transaction that can still be published. A listing's signature covers only this output and your payment, so a buyer could use it to publish that reserved ticker with you named as its creator. Move it with a send to yourself (or publish your own reservation) before listing it.";
 
+/** The sell form's words while an expired reservation's last block is not final yet. */
+export function commitExpiredWaitText(lastBlock, indexed) {
+  const n = Number.isInteger(lastBlock) && Number.isInteger(indexed) ? Math.max(1, FINAL_DEPTH - (confirmationsAt(lastBlock, indexed) ?? 0)) : null;
+  const when = Number.isInteger(lastBlock) ? ` from block ${(lastBlock + FINAL_DEPTH - 1).toLocaleString("en-US")}` : "";
+  return `This output held a ticker reservation that has just expired. The order book lists it only once the reservation's last block has ${FINAL_DEPTH} confirmations${when}${n ? ` — about ${n} more block${n === 1 ? "" : "s"}` : ""}. Nothing needs to be sent; list it then.`;
+}
+
 /**
  * Why outpoint `vout` of a tx whose /commits record is `commit` (a
  * CommitView, or null when the tx is not a recorded COMMIT) must not be
- * listed — or null. Only vout 0 of a COMMIT whose status is `open` and
- * whose window has not passed at `tip` (when known) is refused.
+ * listed — or null, exactly as the order book decides it: vout 0 of an
+ * unspent COMMIT whose status is `open`, or `expired` while its last
+ * reveal block (`expires_at_height`) has fewer than FINAL_DEPTH
+ * confirmations at `indexed` (the same indexer's applied height; unknown →
+ * refused, the book decides after the wait).
  */
-export function commitCarrierProblem(vout, commit, tip = null) {
-  if (Number(vout) !== 0 || !commit || commit.status !== "open") return null;
-  if (Number.isInteger(tip) && Number.isInteger(commit.expires_at_height) && tip >= commit.expires_at_height) return null;
-  return COMMIT_CARRIER_PLAIN_TEXT;
+export function commitCarrierProblem(vout, commit, indexed = null) {
+  if (Number(vout) !== 0 || !commit || commit.spent_txid) return null;
+  if (commit.status === "open") return COMMIT_CARRIER_PLAIN_TEXT;
+  if (commit.status !== "expired") return null;
+  const last = Number.isInteger(commit.expires_at_height) ? commit.expires_at_height : null;
+  if (last !== null && Number.isInteger(indexed) && (confirmationsAt(last, indexed) ?? 0) >= FINAL_DEPTH) return null;
+  return commitExpiredWaitText(last, Number.isInteger(indexed) ? indexed : null);
 }
 /** BIP68: bit 31 of nSequence disables the relative lock-time. */
 export const SEQUENCE_DISABLE_FLAG = 0x80000000;
@@ -186,19 +337,24 @@ export function listingShapeProblems(psbtHex) {
 /**
  * May the seller publish a listing of an outpoint at `priceSats` for
  * `amount` tokens, given the outpoint's current `listing` (the OrderView
- * the book shows for it, or null)? →
- *   { ok: true, kind: "new" | "same" | "lower" }
- *   { ok: false, kind: "raise" | "filling", current }   — Withdraw first
+ * the book shows for it — open, filling, or an off-book "expired" row — or
+ * null)? →
+ *   { ok: true, kind: "new" | "same" | "lower", offBook? }
+ *   { ok: false, kind: "raise" | "filling", current, offBook? }   — Withdraw first
+ * An off-book listing guards its price like a live one (its signature can
+ * still be filled), but a new listing of it takes a new place under the
+ * per-address cap: `offBook: true`.
  */
 export function relistDecision(listing, priceSats, amount) {
-  if (!listing || (listing.status !== "open" && listing.status !== "filling")) return { ok: true, kind: "new" };
+  const offBook = isOffBook(listing);
+  if (!listing || (listing.status !== "open" && listing.status !== "filling" && !offBook)) return { ok: true, kind: "new" };
   if (listing.status === "filling") return { ok: false, kind: "filling", current: listing };
   const newUnit = Number(priceSats) / Number(amount);
   const curUnit = Number(listing.unit_price ?? Number(listing.price_sats) / Number(listing.amount));
   if (!Number.isFinite(newUnit) || !Number.isFinite(curUnit)) return { ok: true, kind: "new" };
   // Compare totals when the amounts match (no float noise); unit prices otherwise.
   const higher = Number(listing.amount) === Number(amount) ? Number(priceSats) > Number(listing.price_sats) : newUnit > curUnit + 1e-9;
-  if (higher) return { ok: false, kind: "raise", current: listing };
+  if (higher) return offBook ? { ok: false, kind: "raise", current: listing, offBook } : { ok: false, kind: "raise", current: listing };
   const same = Number(listing.amount) === Number(amount) ? Number(priceSats) === Number(listing.price_sats) : Math.abs(newUnit - curUnit) <= 1e-9;
-  return { ok: true, kind: same ? "same" : "lower" };
+  return offBook ? { ok: true, kind: same ? "same" : "lower", offBook } : { ok: true, kind: same ? "same" : "lower" };
 }

@@ -6,6 +6,7 @@ import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Panel from "../components/hud/Panel.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
 import { fmtAgo, fmtDec, fmtInt } from "../lib/format.js";
+import { isIndexerBusy } from "../lib/errors.js";
 import { BUCKETS, DIGIT_SPACE, EXPECTED_YIELD, YIELD_SD, probabilityPct } from "../lib/yield.js";
 import {
   BLOCKS_PER_DAY,
@@ -66,10 +67,10 @@ const TIER_LABEL = Object.fromEntries(BUCKETS.map((b) => [b.id, b.label]));
  * independent of the last, and nothing here predicts the next one.
  */
 export default function ProbabilityPage() {
-  const { health } = useApp();
+  const { health, chainTip } = useApp();
   const mobile = useIsMobile();
   const [days, setDays] = useState(DAYS_DEFAULT);
-  const tip = health.data?.tip_height ?? null;
+  const tip = chainTip;
 
   // One /digits?days read per window (and per new block). Windows are by
   // real time: blocks per day are not fixed, so a window holds however many
@@ -124,7 +125,7 @@ export default function ProbabilityPage() {
                   {health.data?.last_progress_at ? <span className="muted"> · indexed {fmtAgo(health.data.last_progress_at)}</span> : null}
                 </>
               ) : health.error ? (
-                <span className="err">indexer offline</span>
+                <span className="err">{isIndexerBusy(health.error) ? "indexer busy" : "indexer offline"}</span>
               ) : (
                 "connecting…"
               )}

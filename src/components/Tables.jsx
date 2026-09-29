@@ -3,6 +3,7 @@ import { tokenHref } from "../hooks/useHashRoute.js";
 import { bucketOfYield, yieldDigit } from "../lib/yield.js";
 import { activityParties } from "../lib/activity.js";
 import { ownPendingSpendOf, replacedOwnSpendOf } from "../lib/txrecords.js";
+import { isOffBook, listingStatusView } from "../lib/listingRules.js";
 import { FINAL_DEPTH } from "../lib/finality.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
 import DigitChip from "./DigitChip.jsx";
@@ -352,7 +353,7 @@ export function HoldersTable({ q, minted, self, compact = false }) {
   );
 }
 
-const STATUS_LABEL = { open: "open", filling: "filling", filled: "filled", cancelled: "cancelled" };
+const STATUS_LABEL = { open: "open", filling: "filling", filled: "filled", cancelled: "cancelled", expired: "still buyable" };
 const LIVE = new Set(["open", "filling"]);
 
 /**
@@ -371,6 +372,11 @@ const LIVE = new Set(["open", "filling"]);
  * transaction. A row whose pending spend is someone
  * else's although the user's own withdrawal spent it too says the
  * withdrawal was replaced, and offers Withdraw again (it must out-bid).
+ *
+ * An `expired` row is a listing that left the book whose signature can
+ * still be filled: it says so, at what price, and offers Withdraw only
+ * (there is nothing to renew). A withdrawn listing reads "withdrawn",
+ * never "filled" (listingStatusView).
  */
 export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = false, records = null, empty = "No listings from this address." }) {
   const actions = !!(onCancel || onRenew);
@@ -389,7 +395,9 @@ export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = f
         ),
         body: q.rows.map((o) => {
           const live = LIVE.has(o.status);
-          const own = live && records ? ownPendingSpendOf(records, o.id, o.pending_spend_txid) : null;
+          const offBook = isOffBook(o);
+          const view = listingStatusView(o);
+          const own = (live || offBook) && records ? ownPendingSpendOf(records, o.id, o.pending_spend_txid) : null;
           const replaced = !own && o.status === "filling" && records ? replacedOwnSpendOf(records, o.id, o.pending_spend_txid) : null;
           // A `filling` order is exempt from the 14-day expiry while its spend sits in the mempool.
           const expires = o.status === "open" && !own ? fmtExpires(o.expires_at) : "";
@@ -414,7 +422,12 @@ export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = f
                     <small className="usd">until it confirms, the listing can still be bought</small>
                   </>
                 ) : (
-                  <span className={`status-tag s-${o.status}`}>{STATUS_LABEL[o.status] || o.status}</span>
+                  <span className={`status-tag s-${offBook ? "filling" : o.status}`} title={view?.note || undefined}>
+                    {view?.label || STATUS_LABEL[o.status] || o.status}
+                  </span>
+                )}
+                {!own && view?.note && (
+                  <small className="usd">{offBook ? `can still be bought at ${fmtUnit(o.unit_price)} — withdraw to cancel it` : view.note}</small>
                 )}
                 {o.status === "filling" && !own && (
                   <small className="usd" title={o.pending_spend_txid ? `pending spend ${o.pending_spend_txid}` : undefined}>
@@ -436,11 +449,11 @@ export function OrdersTable({ q, showTicker = false, onCancel, onRenew, busy = f
                 {actions ? (
                   own ? (
                     <span className="muted" title="Your own transaction spends this listing; it settles when that confirms.">pending</span>
-                  ) : live ? (
+                  ) : live || offBook ? (
                     <>
-                      {/* a `filling` order is exempt from expiry and POST /orders answers 409 for it — nothing to renew */}
+                      {/* a `filling` order is exempt from expiry and POST /orders answers 409 for it; an off-book one has no stored PSBT — nothing to renew */}
                       {onRenew && o.status === "open" && (
-                        <button className="btn btn-sm" type="button" onClick={() => onRenew(o)} disabled={busy} title="Re-publish the same signed listing so it does not expire (nothing to sign)">
+                        <button className="btn btn-sm" type="button" onClick={() => onRenew(o)} disabled={busy} title="Re-publish the same signed listing so the book keeps showing it (nothing to sign)">
                           Renew
                         </button>
                       )}

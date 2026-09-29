@@ -9,20 +9,22 @@ import { sendHref, tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Identicon from "../components/Identicon.jsx";
 import TxProgress, { ConnectPrompt } from "../components/TxProgress.jsx";
+import SpeedUpSend from "../components/SpeedUpSend.jsx";
 import { MinesTable, OrdersTable, TradesTable } from "../components/Tables.jsx";
 import ObservedMix from "../components/ObservedMix.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import { ledFromPoll } from "../components/hud/Led.jsx";
 import { txRecords } from "../lib/txrecords.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
-import { WITHDRAW_CONFIRMED_TEXT, WITHDRAW_PENDING_TEXT, listingRefusalText } from "../lib/market.js";
+import { WITHDRAW_CONFIRMED_TEXT, WITHDRAW_FEE_NOTE, WITHDRAW_PENDING_TEXT, listingRefusalText } from "../lib/market.js";
+import { isOffBook } from "../lib/listingRules.js";
 import { fmtInt, fmtMintedPct, fmtPct, fmtUnit, shortAddr, shortTxid, addrUrl, walletBalanceText } from "../lib/format.js";
 
 const POLL_MS = 15_000;
 const IDLE = { phase: "idle" };
 
 export default function PortfolioPage() {
-  const { wallet, address, tokens, price } = useApp();
+  const { wallet, address, tokens, price, fees } = useApp();
   const connected = wallet.status === "connected";
   const mobile = useIsMobile();
   const usd = price.data?.usd_per_btc ?? null;
@@ -41,7 +43,20 @@ export default function PortfolioPage() {
   const minesTotal = mixQ.data?.total ?? (mines.error ? null : mines.total);
   // Both per-address lists are paged by the indexer (50 / page, indexer API);
   // `total` is the real count and Load more walks the rest.
-  const orders = usePaged(address ? (offset, limit, s) => indexer.ordersByAddress(address, { offset, limit }, s) : null, { limit: 50, deps: [address], refreshMs: POLL_MS });
+  // Listings that left the book but can still be filled: the indexer sends
+  // all of them with every page of that list, outside its paging — kept
+  // from each read of the first page.
+  const [offBook, setOffBook] = useState({ address: null, rows: [] });
+  const orders = usePaged(
+    address
+      ? (offset, limit, s) =>
+          indexer.ordersByAddress(address, { offset, limit }, s).then((r) => {
+            if (offset === 0) setOffBook({ address, rows: r.expired || [] });
+            return r;
+          })
+      : null,
+    { limit: 50, deps: [address], refreshMs: POLL_MS },
+  );
   const trades = usePaged(address ? (offset, limit, s) => indexer.tradesByAddress(address, { offset, limit }, s) : null, { limit: 50, deps: [address], refreshMs: POLL_MS });
   const created = usePaged(address ? (offset, limit, s) => indexer.tokens({ deployer: address, offset, limit }, s) : null, { limit: 10, deps: [address], refreshMs: 30_000 });
 
@@ -58,16 +73,21 @@ export default function PortfolioPage() {
     return set.size === 1 ? [...set][0] : "";
   }, [mixRows]);
 
-  // Listings: live first (open / filling), then closed, newest first — within the loaded pages.
+  // Listings: live first (open / filling), then the ones that left the book
+  // but can still be bought, then closed, newest first — within the loaded pages.
   const listings = useMemo(() => {
-    const live = (o) => (o.status === "open" || o.status === "filling" ? 0 : 1);
-    return [...orders.rows].sort((a, b) => live(a) - live(b) || (b.updated_at ?? 0) - (a.updated_at ?? 0));
-  }, [orders.rows]);
+    const rank = (o) => (o.status === "open" || o.status === "filling" ? 0 : isOffBook(o) ? 1 : 2);
+    const ids = new Set(orders.rows.map((o) => o.id));
+    const off = offBook.address === address ? offBook.rows.filter((o) => !ids.has(o.id)) : [];
+    return [...orders.rows, ...off].sort((a, b) => rank(a) - rank(b) || (b.updated_at ?? b.dropped_at ?? 0) - (a.updated_at ?? a.dropped_at ?? 0));
+  }, [orders.rows, offBook, address]);
   const liveCount = listings.filter((o) => o.status === "open" || o.status === "filling").length;
   const fillingCount = listings.filter((o) => o.status === "filling").length;
+  const offBookCount = listings.filter(isOffBook).length;
 
   // Withdraw = SEND-to-self of the listed carrier (the spec's cancel; the replacement-fee rule lives in the hook); Renew = re-POST.
-  const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({ onSettled: () => orders.refresh() });
+  const sendFlow = useSendToSelf({ onSettled: () => orders.refresh() });
+  const { chain, status, run, reset, stopWaiting, busy } = sendFlow;
   // This browser's own pending transactions: a listing whose pending spend
   // is one of them is the user's own withdrawal, not a buyer's fill.
   // Re-read whenever the listings poll answers.
@@ -85,9 +105,10 @@ export default function PortfolioPage() {
       setRenew({ phase: "error", id: o.id, error: listingRefusalText(e) ?? friendlyError(e) });
     }
   };
+  // A listing that left the book may not name its carrier's value: the build reads it from the wallet's UTXOs.
   const cancelOrder = (o) => {
     const [txid, vout] = o.id.split(":");
-    run({ kind: "cancel", ticker: o.ticker, amount: o.amount, utxo: { txid, vout: Number(vout), sats: o.carrier_sats }, order: o });
+    run({ kind: "cancel", ticker: o.ticker, amount: o.amount, utxo: { txid, vout: Number(vout), sats: o.carrier_sats }, order: isOffBook(o) ? null : o });
   };
 
   if (!connected) {
@@ -205,13 +226,18 @@ export default function PortfolioPage() {
           aria-label="My listings"
           right={
             <span className="label">
-              {fmtInt(liveCount)} live{fillingCount ? ` · ${fmtInt(fillingCount)} filling` : ""}{orders.total > orders.rows.length ? ` of ${fmtInt(orders.rows.length)} loaded` : ""} · {fmtInt(orders.total)} total
+              {fmtInt(liveCount)} live{fillingCount ? ` · ${fmtInt(fillingCount)} filling` : ""}{offBookCount ? ` · ${fmtInt(offBookCount)} off the book, still buyable` : ""}{orders.total > orders.rows.length ? ` of ${fmtInt(orders.rows.length)} loaded` : ""} · {fmtInt(orders.total)} total
             </span>
           }
         >
           {renew.phase === "busy" && <div className="muted">Renewing…</div>}
           {renew.phase === "done" && <div className="ok">Renewed — the book keeps it 14 more days.</div>}
           {renew.phase === "error" && <div className="err">{renew.error}</div>}
+          {offBookCount > 0 && (
+            <div className="notice notice-raise" role="alert">
+              {offBookCount === 1 ? "One of your listings has" : `${fmtInt(offBookCount)} of your listings have`} left the order book but can still be bought: anyone who saved {offBookCount === 1 ? "its signature" : "their signatures"} can complete {offBookCount === 1 ? "it" : "them"} at the old price. Withdraw a row marked <em>still buyable</em> to cancel it.
+            </div>
+          )}
           {chain.phase !== "idle" && (
             <>
               {chain.rule?.raised && (
@@ -226,16 +252,18 @@ export default function PortfolioPage() {
                 onStopWaiting={stopWaiting}
                 labels={{
                   building: "Building the withdrawal — a SEND of the listed UTXO to yourself.",
+                  signing: `Awaiting signature — ${WITHDRAW_FEE_NOTE}`,
                   pending: WITHDRAW_PENDING_TEXT,
                   confirmed: WITHDRAW_CONFIRMED_TEXT,
                   final: "Withdrawn on-chain and final. The old signed listing can no longer be filled.",
                 }}
               />
+              <SpeedUpSend send={sendFlow} fees={fees?.data} note="Until it confirms, anyone who saved the listing can still fill it with a higher-fee transaction." />
             </>
           )}
           <OrdersTable q={{ ...orders, rows: listings }} showTicker onCancel={cancelOrder} onRenew={renewOrder} busy={busy || renew.phase === "busy"} records={records} empty="No listings from this address. List a carrier on a token's Market tab." />
           <p className="fineprint">
-            A listing expires 14 days after it was (re)published; <strong>Renew</strong> re-POSTs the same signed PSBT for free. <strong>Withdraw</strong> is a SEND to yourself — the only thing that voids a signed listing. A <em>filling</em> row has someone else&apos;s fill in the mempool: if it confirms you are paid, and withdrawing it must out-bid that fill. A <em>withdrawing</em> row is your own withdrawal waiting for a block — until it confirms, the listing can still be bought.
+            The book shows a listing for 14 days after it was (re)published; <strong>Renew</strong> re-POSTs the same signed PSBT for free. A listing that leaves the book is not void: marked <em>still buyable</em>, it can be completed at its price by anyone who saved it. <strong>Withdraw</strong> is a SEND to yourself — the only thing that voids a signed listing. A <em>filling</em> row has someone else&apos;s fill in the mempool: if it confirms you are paid, and withdrawing it must out-bid that fill. A <em>withdrawing</em> row is your own withdrawal waiting for a block — until it confirms, the listing can still be bought. A <em>withdrawn</em> row was spent on-chain without a fill.
           </p>
         </Panel>
 

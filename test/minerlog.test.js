@@ -18,6 +18,7 @@ import {
   mempoolLine,
   heartbeatLine,
   settlementLine,
+  settlementSeenKey,
   blockFoundLine,
   digitLine,
   yoursLine,
@@ -152,7 +153,13 @@ const keep = (l) => {
   assert.equal(s.kind, "tier");
   assert.equal(s.tier, 100);
   assert.equal(s.text, "SATS mine settled  digit 1 → yield 100  block 968,661  (bc1q…9k2)");
-  assert.equal(s.key, `settle:${TXID}`);
+  assert.equal(s.key, `settle:${TXID}:${HASH_1}`, "keyed by txid AND block hash");
+  // The same MINE settled again in another block (a chain reorganization): a new line, kept beside the first.
+  const moved = settlementLine({ ...row, block_hash: HASH_F, block_height: 968_662 }, "LUCKY", T0);
+  assert.notEqual(moved.key, s.key);
+  assert.notEqual(settlementSeenKey({ ...row, block_hash: HASH_F }), settlementSeenKey(row), "the feed diff sees the move");
+  assert.equal(appendLine(appendLine([], s), moved).length, 2, "both settlements stay in the log");
+  assert.equal(appendLine(appendLine([], s), settlementLine(row, "LUCKY", T0)).length, 1, "the same settlement is not printed twice");
   const f = keep(settlementLine({ ...row, block_hash: HASH_F, yield_smallest: 1000 }, "LUCKY", T0));
   assert.equal(f.tier, 1000);
   assert.equal(f.text, "SATS mine settled  digit f → yield 1,000  block 968,661  (bc1q…9k2)");

@@ -5,13 +5,13 @@
 // paths (timeout, network error, server error, non-JSON, and a 404 beside
 // an outage) through an injected fetch. Plain Node, no framework, no network.
 import assert from "node:assert/strict";
-import { SECOND_SOURCE_ORIGIN, SECOND_SOURCE_TIMEOUT_MS, carrierAmountCheck, checkSecondSource, compareSecondSource, payloadOfTxVouts, secondSourceAllowsSigning, secondSourceUrls } from "../src/lib/secondSource.js";
+import { SECOND_SOURCE_ORIGIN, SECOND_SOURCE_TIMEOUT_MS, carrierAmountCheck, checkSecondSource, compareSecondSource, originCheckState, originRefused, payloadOfTxVouts, secondSourceAllowsSigning, secondSourceUrls } from "../src/lib/secondSource.js";
 
 const TXID = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const SCRIPT = "5120" + "ab".repeat(32); // a P2TR scriptPubKey
 const FEE = "0014" + "ee".repeat(20);
 // `OP_RETURN <one push>` as an explorer serialises it: 6a + PUSHBYTES_n + ascii.
-const opret = (text) => ({ scriptpubkey: `6a${text.length.toString(16).padStart(2, "0")}${Buffer.from(text, "ascii").toString("hex")}`, scriptpubkey_type: "op_return", value: 0 });
+const opret = (text) => ({ scriptpubkey: `6a${text.length > 75 ? "4c" : ""}${text.length.toString(16).padStart(2, "0")}${Buffer.from(text, "ascii").toString("hex")}`, scriptpubkey_type: "op_return", value: 0 });
 // The reference SEND layout (§2.3 / a fill's §7.2): vout1 is TO_OUT here.
 const listing = { txid: TXID, vout: 1, carrierSats: 546, scriptHex: SCRIPT, ticker: "LUCKY", amount: 1200 };
 
@@ -97,7 +97,35 @@ const agreeTx = {
   assert.equal(amt.verdict, "disagree");
   assert.match(amt.reasons[0], /moves 1300 LUCKY to vout 1, the listing says 1200/);
   const otherTicker = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|SEND|ORE|1200|1|4") });
-  assert.match(otherTicker.reasons[0], /OP_RETURN for ORE, the listing says LUCKY/);
+  assert.equal(otherTicker.verdict, "disagree", "TO_OUT of a SEND of another ticker holds only that ticker");
+  assert.match(otherTicker.reasons[0], /SEND of ORE whose LUCKY residual goes to vout 4, the listing is vout 1/);
+  // §4.1: every ticker's residual lands on the residual slot — a carrier left
+  // there by a SEND of another ticker (a "move ORE to its own carrier" send
+  // of a UTXO that also held LUCKY) is a real LUCKY carrier: unverified, never a dead listing.
+  const otherResidual = compareSecondSource({ ...listing, vout: 4, amount: 300 }, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|SEND|ORE|1200|1|4") });
+  assert.equal(otherResidual.verdict, "unverified", "the residual slot of a SEND of another ticker");
+  assert.equal(otherResidual.reasons.length, 0);
+  assert.match(otherResidual.notes[0], /residual output of a SEND of ORE: it holds whatever LUCKY/);
+  assert.equal(secondSourceAllowsSigning(otherResidual.verdict, { unverifiedAck: true }), true, "a buyer can confirm and sign it");
+  const otherResidualFallback = carrierAmountCheck({ vout: 0, ticker: "LUCKY", amount: 300 }, withPayload("LUCKY-20|SEND|ORE|1200|1|9"));
+  assert.deepEqual([otherResidualFallback.reasons.length, otherResidualFallback.notes.length], [0, 1], "CHANGE_OUT unusable → the default output is the residual slot");
+  const commitOrigin = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload(`LUCKY-20|COMMIT|${"ab".repeat(32)}`) });
+  assert.equal(commitOrigin.verdict, "disagree");
+  assert.match(commitOrigin.reasons[0], /the creating tx is a COMMIT, which credits no token output/, "never \"OP_RETURN for undefined\"");
+  assert.equal(originRefused({ verdict: "disagree", reasons: commitOrigin.reasons }), true, "a COMMIT output is refused for its origin");
+  assert.equal(originRefused({ verdict: "disagree", reasons: ["mempool.space shows no LUCKY-20 OP_RETURN on the creating tx — vout 1 is not a MINE or SEND token output"] }), true, "a plain transfer is refused for its origin");
+  assert.equal(originRefused({ verdict: "disagree", reasons: ["mempool.space says the outpoint is already spent"] }), false, "spent says nothing about the origin");
+  assert.equal(originRefused({ verdict: "unreachable", reasons: [] }), false);
+  assert.equal(originRefused({ verdict: "unverified", reasons: [] }), false);
+  // The sell form: signing waits until the check has answered for the selected carrier.
+  const row = { key: `${TXID}:1` };
+  assert.deepEqual(originCheckState({ key: row.key, refused: false, checking: true }, row), { blocked: false, pending: true }, "still asking: not listable yet");
+  assert.deepEqual(originCheckState({ key: `${TXID}:0`, refused: false }, row), { blocked: false, pending: true }, "the answer is for the carrier selected before");
+  assert.deepEqual(originCheckState({ key: null, refused: false }, row), { blocked: false, pending: true }, "never asked");
+  assert.deepEqual(originCheckState({ key: row.key, refused: true }, row), { blocked: true, pending: false }, "answered: a buyer would refuse it");
+  assert.deepEqual(originCheckState({ key: row.key, refused: false }, row), { blocked: false, pending: false }, "answered (an unreachable source included): listable");
+  assert.deepEqual(originCheckState({ key: null, refused: false, checking: true }, { ...row, multi: true }), { blocked: false, pending: false }, "a multi-ticker carrier is not checked");
+  assert.deepEqual(originCheckState({ key: null, refused: false }, null), { blocked: false, pending: false }, "nothing selected");
   const residual = compareSecondSource({ ...listing, vout: 4, amount: 7 }, { outspend: agreeOutspend, tx: agreeTx });
   assert.equal(residual.verdict, "unverified", "the CHANGE_OUT residual slot is a token slot too (§2.3 / §4.1) — but its balance depends on the inputs: amount not independently verified");
   assert.equal(residual.reasons.length, 0);

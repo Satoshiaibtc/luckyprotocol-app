@@ -636,8 +636,10 @@ A listing is a PSBT with **exactly one input and exactly one output**:
   with a SEND-to-self (§2.3, `vout0` = 546 sats carrying `AMT` of that
   ticker, `vout3` = the residual of every ticker) and lists the new
   `vout0`. The input carries `witnessUtxo` (real script + real value
-  — 546 for a fresh carrier, more for a SEND change output), the PSBT
-  `sighashType` field = `0x83`, and `tapInternalKey` for P2TR.
+  — at least 546: 546 for a fresh carrier, more for a SEND change
+  output), the PSBT `sighashType` field = `0x83`, and, for P2TR,
+  optionally `tapInternalKey` (kept only when it tweaks to the output
+  key, §7.4).
 - `output0` — `price_sats` to **the same script as `input0`** (the seller
   pays themself). `price_sats ≥ 546` **and `price_sats ≥
   witnessUtxo.value`** (the carrier's own BTC value).
@@ -732,8 +734,10 @@ confirms.
 A signed listing is a bearer instrument: anyone who saved the PSBT can
 still fill it, so an off-chain "cancel" is meaningless. The only real
 cancel is to **move the tokens on-chain** (a SEND-to-self of that UTXO,
-§2.3). Re-listing the same outpoint at a LOWER price replaces the order in
-the book but does NOT invalidate the earlier signed PSBT; the UI must say
+§2.3), signed by the seller's wallet with its ordinary signature type —
+any type but the listing's `0x83`; such a spend is never a fill (§7.5).
+Re-listing the same outpoint at a LOWER price replaces the order in the
+book but does NOT invalidate the earlier signed PSBT; the UI must say
 so. A HIGHER price is refused as long as a cheaper signed listing of the
 outpoint can be filled — while it is live, and after the book dropped it
 (its listing floor, §7.4): the seller withdraws first — spends the
@@ -856,12 +860,26 @@ is unchanged:
   price_sats ≥ 546`; **`price_sats ≥ witnessUtxo.value`** (BTC above
   price on the carrier goes to the buyer, §7.1); **`price_sats ≤ amount ×
   1e8`** (at most 1 BTC per whole token); `1 ≤ amount ≤ 21_000_000`;
+- **`witnessUtxo.value ≥ 546`** — the listed output holds at least 546
+  sats; a smaller one is refused ("listed output holds fewer than 546
+  sats; send the tokens to a 546-sat carrier first"). A buyer-side client
+  that builds only standard 546-sat carriers could not fill it, so it
+  would sit in the book as a floor nobody using such a client can take;
 - **price band**: when the ticker has at least one other
   `open` ask, the new ask's unit price must be **≤ 100 × the current best
-  (lowest) open ask**; a higher one is refused. A new listing of the
+  (lowest) open ask**; a higher one is refused. The comparison is exact
+  (`price_sats × best.amount ≤ 100 × best.price_sats × amount`, in
+  integers), so an ask at exactly 100× is accepted. A new listing of the
   same outpoint is measured against the other asks only, and a ticker
   with no other open ask has no band (only the absolute 1 BTC/token cap
-  applies);
+  applies). The band applies to every ask, one priced at its carrier's
+  own value (the least price §7.1 allows) included — exempting it would
+  let a seller fill their own one-token listing from a second address and
+  print a trade at any unit price. A carrier whose whole balance is too
+  small to be listed inside the band is listed after combining carriers
+  (a SEND to self): at a best ask of `b` sats per token, a carrier listed
+  at `p` sats needs at least `⌈p / (100 × b)⌉` tokens. While a far
+  cheaper ask is open, such a small listing would not sell anyway;
 - `input0.sighashType == 0x83`, and the signature **verifies** against
   the prevout: P2TR key-path → Schnorr over the BIP-341 key-spend
   signature hash of input 0 for sighash type 0x83 (`SIGHASH_SINGLE |
@@ -890,19 +908,25 @@ is unchanged:
   withdraws first (spends the outpoint, §7.3) and lists the new carrier.
   **Listing floor**: a live listing that leaves the book
   while its outpoint is unspent — expired by the TTL or evicted by a cap,
-  below — still counts. The book remembers its unit price as the
-  outpoint's listing floor (the lowest such price) and refuses a pricier
-  listing of the outpoint the same way; a listing at or below the
-  floor is accepted and replaces it. A floor stops applying once the
-  outpoint is spent and is dropped when that spend is 12 blocks deep
-  (`REORG_HORIZON` — a reorg that restores the outpoint before then finds
-  it in place); at most 20,000 floors are kept, the oldest dropped first.
+  below — still counts. The book remembers its unit price, its seller
+  and its carrier's value as the outpoint's listing floor (the lowest
+  such price) and refuses a pricier listing of the outpoint the same
+  way; a listing at or below the floor is accepted and replaces it. The
+  signed PSBT of a floor still fills at its price: a fill of it is
+  recorded as a trade (§7.5), and the seller's own list of orders shows
+  every floor whose outpoint the seller still holds as `expired`, so the
+  seller can withdraw it (spend the outpoint, §7.3). A floor stops
+  applying once the outpoint is spent and is dropped when that spend is
+  12 blocks deep (`REORG_HORIZON` — a reorg that restores the outpoint
+  before then finds it in place); at most 20,000 floors are kept — past
+  that, floors of spent outpoints are dropped first, then the oldest.
 
 **Capacity and lifetime (never a permanent "book full"):**
 
 - **TTL**: an open order expires **14 days after `updated_at`** and is
   dropped from the book (the order's `expires_at`); its price stays the
-  outpoint's listing floor (above), because its PSBT can still be filled. Re-submitting the same
+  outpoint's listing floor (above), because its PSBT can still be filled
+  — and a fill of it is still recorded (§7.5). Re-submitting the same
   PSBT refreshes it for free — it replaces the entry and counts against no
   cap; at the **same `price_sats`** it keeps its `created_at`, i.e. its
   place among equal-priced asks (the book is ordered `unit_price` asc,
@@ -916,7 +940,8 @@ is unchanged:
   (filled / cancelled) orders are evicted first, then the **open order
   with the oldest `updated_at`**, and only after every open one a
   `filling` order. A listing is a bearer PSBT the seller can re-submit at
-  any time, so eviction destroys nothing; an evicted live listing
+  any time, so eviction destroys nothing in the book (a rebuild cannot
+  re-derive an evicted order's fill, §7.5); an evicted live listing
   leaves its listing floor.
 - **Per-ticker cap 7,500 open orders**: the book keeps a ticker's 7,500
   best asks. A new ask that undercuts the worst (highest unit price)
@@ -939,7 +964,21 @@ are NOT part of it. While the book cannot be persisted a new listing is
 refused, since a listing held only in memory would vanish with a restart.
 In a persisted book the `filling` status, the `pending_*` fields and the
 listing floors (`floors: [{ id, ticker, amount, price_sats, dropped_at,
-gone_since }]`) are optional.
+gone_since, seller, carrier_sats }]`) are optional, and so are a floor's
+`gone_since`, `seller` and `carrier_sats`.
+
+**Canonical listing.** The book stores and serves an accepted listing
+in canonical form, rebuilt from what it verified: the unsigned tx; for
+input 0 the `witnessUtxo`, the `sighashType` field `0x83` and the one
+signature that verified — for P2WPKH the `partialSig` of the
+witness-program key, for P2TR the `tapKeySig` plus the `tapInternalKey`
+only when it tweaks (with no script tree) to the output key; nothing
+else. Anything else the submitted PSBT carried (other partial
+signatures, a `nonWitnessUtxo`, derivation paths, unknown or
+proprietary fields, bytes after the PSBT) is dropped, not refused: it
+changes nothing the signature commits to, but a buyer-side parser could
+refuse it, which would leave a listing in the book that such a buyer
+cannot fill.
 
 An order holds its `id`, `ticker`, `amount`, `price_sats`, `unit_price`
 (`price_sats / amount`), `seller`, `carrier_sats` (the listed output's
@@ -952,23 +991,53 @@ otherwise.
 
 ### 7.5 Fill detection and trade history
 
-When a tx is applied (§5), after its payload has been applied, every
-spent outpoint that matches a live (`open` or `filling`) order is settled. Let `i` be the
-index of the listed outpoint among the tx's inputs — `SIGHASH_SINGLE`
-pairs input `i` with output `i`, so the seller's signature commits to
-`vout[i]`, which is `vout0` only in the reference layout (§7.2, listing
-at `input0`):
+When a tx is applied (§5), after its payload has been applied and its
+input pool routed (§4), every spent outpoint that matches a live (`open`
+or `filling`) order is settled. Let `i` be the index of the listed
+outpoint among the tx's inputs — `SIGHASH_SINGLE` pairs input `i` with
+output `i`, so the seller's signature commits to `vout[i]`, which is
+`vout0` only in the reference layout (§7.2, listing at `input0`). Only
+the listing's own signature makes a fill; the seller's wallet signs a
+withdraw, a split or a send with its ordinary signature type:
 
-- the tx is a SEND for the order's ticker with `applied == true`, its
-  `vout[i]` pays **≥ `price_sats`** to the seller's script, and `TO_OUT`
-  routes to a non-OP_RETURN vout → order `filled`; a trade is
-  recorded with `price_sats` = the actual `vout[i]` value and `buyer` =
-  the address of `vout[TO_OUT]`;
-- any other spend → order `cancelled` (`spent_txid` set).
+- input `i` is signed with **`SIGHASH_SINGLE | SIGHASH_ANYONECANPAY`
+  (0x83)** — a P2TR key-path Schnorr signature of 65 bytes whose last
+  byte is `0x83`, or a P2WPKH witness whose first element (the DER
+  signature) ends in `0x83` — and `vout[i]` pays **≥ `price_sats`** to
+  the seller's script → order `filled`. A trade is recorded with
+  `price_sats` = the actual `vout[i]` value and `buyer` = the address of
+  the output that received the listing's tokens: `vout[TO_OUT]` when
+  the tx is a SEND of the order's ticker with `applied == true`,
+  otherwise the output the tx's residual routed to (§4.1 — a SEND
+  without its fee, a SEND of another ticker, another payload, or none).
+  `buyer` is null when the tokens burned or landed on an output that has
+  no address;
+- any other spend → order `cancelled` (`spent_txid` set). This includes
+  every spend whose input `i` carries another signature type (a 64-byte
+  P2TR signature is `SIGHASH_DEFAULT`), whatever the amounts: a
+  withdraw, split or send of a listed carrier is never a trade, even
+  when an output at index `i` pays the seller the asked price or more.
 
 A tx that spends several listed outpoints settles each of them this way,
 each judged at its own index — a fill of two listings at inputs 0 and 1
 paying their sellers at `vout0` and `vout1` records two trades.
+
+A fill does not need the SEND fee. Routing moves the listing's tokens
+whatever the payload (§4), so a buyer who leaves out the 546-sat fee
+output — or the SEND itself — still receives the tokens, and the trade
+is recorded all the same. On a whole-UTXO sale the fee cannot be
+enforced; this is a known property of the market. The token rules are
+unchanged: a SEND without its fee is still not applied (§2.3), and the
+tokens follow its `CHANGE_OUT` like any residual.
+
+A listing that left the book (its listing floor, §7.4) is settled the
+same way when a spend of its outpoint is a fill: judged against the
+floor's price like a live order, the trade is recorded with the floor's
+seller and amount, `price_sats` = the actual `vout[i]` value and
+`order_id` = the outpoint; any other spend records nothing. The floor
+outlives a reorg like the order book does and is dropped only once the
+spend is 12 blocks deep, so a replay within that depth records the fill
+again.
 
 Settlement is re-derivable. The order book outlives a cold rescan
 and a full rebuild of the chain-derived state, while the trade log
@@ -981,16 +1050,23 @@ they re-create the outpoint with the listed balance and settle it by the
 spend they contain — the same fill (its trade recorded again), another
 buyer's fill, the seller's cancel, or none, and then the order stays
 `open`. A trade is never recorded twice for one txid and order.
+A rebuild re-derives only the fills of orders and listing floors the
+book still holds. A fill whose floor was dropped (the spend 12 blocks
+deep, or past the 20,000-floor cap) or whose filled order the global
+cap has since evicted (§7.4) is not recorded again, so a rebuilt trade
+log, and each ticker's trade count and volume, can be missing such
+fills.
 
 A trade (chain-derived; it lives in the snapshot and is rolled back with
 it on reorg) holds the fill's `txid`, `block_height`, `block_hash` and
 `block_time`, the `ticker`, `amount`, `price_sats`, `unit_price`,
 `seller`, `buyer`, the `order_id` it settled and `self_trade`.
 
-`self_trade` is true when `buyer == seller` (the seller filled their own
-listing). Such fills are recorded and listed like any other, but they do
-not count toward a ticker's trade count or volume and never become its
-last trade — a 546-sat wash must not print a price.
+`self_trade` is true when `buyer == seller` — the listing's signature
+took the outpoint and the tokens came back to the seller. Such fills are
+recorded and listed like any other, but they do not count toward a
+ticker's trade count or volume and never become its last trade — a wash
+must not print a price.
 
 On every restore (reorg, restart, or the empty state a full rebuild
 starts from) every closed order whose outpoint is present again in

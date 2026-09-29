@@ -5,16 +5,16 @@ import { useMinerLog } from "../hooks/useMinerLog.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { droppedMessage } from "../hooks/useTxStatus.js";
 import * as indexer from "../lib/indexer.js";
-import { estimateMineFeeSats } from "../lib/psbt.js";
+import { estimateMineFeeSats, inputCostSats, isP2tr } from "../lib/psbt.js";
 import { missingFeeHint } from "../lib/feechoice.js";
 import { PROJECT_FEE_ADDRESS, DUST_SATS, MINE_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
 import { fmtInt, txUrl } from "../lib/format.js";
 import { syncPauseText } from "../lib/sync.js";
 import { YIELD_HIGH, yieldDigit } from "../lib/yield.js";
 import { activationNotice, activationState } from "../lib/activation.js";
-import { deployWaitText, mineIdleReason, readyText, recentMintRate, tailWarning } from "../lib/statusText.js";
+import { deployWaitText, mineIdleReason, readyText, recentMintRate, tailWarning, waitingMineText } from "../lib/statusText.js";
 import { deployDeepEnough } from "../lib/finality.js";
-import { inMempoolCount, isFinished, mineButtonLabel, pendingMineRow } from "../lib/minePending.js";
+import { inMempoolCount, isFinished, mineButtonLabel, mineSpeedUpState, pendingMineRow } from "../lib/minePending.js";
 import {
   acceptedLine,
   againAfterReorg,
@@ -33,7 +33,9 @@ import {
   resumedLine,
   settledYoursLine,
   settlementLine,
+  settlementSeenKey,
   signLine,
+  speedUpMineLine,
   tipLine,
   untrackedLine,
   walletLine,
@@ -43,6 +45,7 @@ import TipReadout from "./TipReadout.jsx";
 import EVReadout from "./EVReadout.jsx";
 import FeeSelector from "./FeeSelector.jsx";
 import MinerLog from "./MinerLog.jsx";
+import SpeedUpSend from "./SpeedUpSend.jsx";
 import Led from "./hud/Led.jsx";
 
 const HEARTBEAT_MS = 60_000;
@@ -66,17 +69,17 @@ const FEE_LOG_MIN_MS = 10 * 60_000;
  * be started at once.
  */
 export default function MinePanel({ ticker, tokenInfo, onSettled }) {
-  const { wallet, fee, fees, indexerOk, tipBlock, refreshAll, health, sync } = useApp();
+  const { wallet, fee, fees, indexerOk, tipBlock, refreshAll, sync, chainTip } = useApp();
   // Before the activation height the indexer ignores every protocol tx, so a
   // MINE would only cost fees — lock the button and say when it opens. An
   // unknown tip counts as pre-activation (fail closed).
-  const tipNow = health.data?.tip_height ?? null;
+  const tipNow = chainTip;
   const preActivation = activationState(tipNow).locked;
   const settled = useCallback(() => {
     refreshAll();
     onSettled?.();
   }, [refreshAll, onSettled]);
-  const { mine, flow, pendings, startMine, resetMine, stopWaiting, dismissMine, clearFinished, busy } = useMine({
+  const { mine, flow, pendings, spare, startMine, resetMine, stopWaiting, dismissMine, clearFinished, speedUp, speedUpQuote, busy } = useMine({
     wallet,
     ticker,
     tokenInfo,
@@ -86,6 +89,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     // "unknown" drops nothing while it lags or has no peers
     tip: sync.indexed,
     trustUnseen: sync.trustUnseen,
+    incrementalRelayFee: fees.data?.incrementalrelayfee ?? undefined,
   });
   const { lines, push, clear, meta } = useMinerLog(ticker);
 
@@ -97,10 +101,15 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   const remaining = tokenInfo ? Math.max(0, supply - minted) : null;
   const nearCap = !exhausted && remaining !== null && remaining < YIELD_HIGH;
   const feeRate = fee.satVb;
+  // The preview counts ONE fee input; each further input the wallet needs
+  // (small outputs are combined) adds `perInput`. The exact fee and inputs
+  // are shown before the wallet opens.
   const feeEstimate = useMemo(() => {
     if (!feeRate || !tokenInfo) return null;
     try {
-      return estimateMineFeeSats({ address: wallet.address || PROJECT_FEE_ADDRESS, ticker, feeRateSatVb: feeRate });
+      const address = wallet.address || PROJECT_FEE_ADDRESS;
+      const est = estimateMineFeeSats({ address, ticker, feeRateSatVb: feeRate });
+      return { ...est, perInput: inputCostSats(isP2tr(address) ? "tr" : "wpkh", feeRate) };
     } catch {
       return null;
     }
@@ -215,7 +224,13 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     const setStage = (txid, stage, reorgs) => logged.set(txid, { stage, reorgs: reorgs ?? logged.get(txid)?.reorgs ?? 0 });
     for (const item of pendings) {
       const was = logged.get(item.txid);
-      if (!was) {
+      const fromTxid = item.replaces?.length ? item.replaces[item.replaces.length - 1] : null;
+      if (!was && fromTxid && logged.has(fromTxid)) {
+        // A Speed up: the same MINE under a new txid.
+        ownTxidsRef.current.add(item.txid);
+        push(speedUpMineLine(fromTxid, item));
+        setStage(item.txid, "pending", item.reorgs || 0);
+      } else if (!was) {
         ownTxidsRef.current.add(item.txid);
         if (item.resumed) {
           // Picked up again after a reload / a return: one line with the
@@ -310,25 +325,27 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
     [push],
   );
 
-  // (h) other miners' settlements for this ticker, diffed by txid.
+  // (h) other miners' settlements for this ticker.
   const feed = usePoll((s) => indexer.minesFeed({ ticker, limit: FEED_LIMIT }, s), FEED_POLL_MS, [ticker]);
   // Near the end of the supply: MINEs already queued in the mempool may use
   // up the rest — said from the recent minting rate the feed shows.
   const mintRate = useMemo(() => recentMintRate(feed.data?.items, sync.indexed, { limit: FEED_LIMIT }), [feed.data, sync.indexed]);
   const tailText = !exhausted && !nearCap && remaining !== null ? tailWarning({ ticker, remaining, rate: mintRate }) : null;
-  const seenRef = useRef({ ticker: null, txids: new Set() });
+  // Diffed by txid AND block hash: a settlement a chain reorganization moved
+  // to another block is printed again, with its new block.
+  const seenRef = useRef({ ticker: null, keys: new Set() });
   useEffect(() => {
     const items = feed.data?.items;
     if (!items) return;
     const seen = seenRef.current;
     if (seen.ticker !== ticker) {
       // First result after mount: seed silently so a page load does not dump history.
-      seenRef.current = { ticker, txids: new Set(items.map((r) => r.txid)) };
+      seenRef.current = { ticker, keys: new Set(items.map(settlementSeenKey)) };
       return;
     }
     const own = ownTxidsRef.current;
-    const fresh = items.filter((r) => !seen.txids.has(r.txid));
-    for (const r of items) seen.txids.add(r.txid);
+    const fresh = items.filter((r) => !seen.keys.has(settlementSeenKey(r)));
+    for (const r of items) seen.keys.add(settlementSeenKey(r));
     fresh
       .filter((r) => !own.has(r.txid))
       .slice(0, FEED_MAX_PER_POLL)
@@ -357,6 +374,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
           <span className="k">Network fee</span>
           <span className="v">{feeEstimate ? `≈ ${fmtInt(feeEstimate.feeSats)} sats` : "—"}</span>
           {feeRate ? ` @ ${feeRate} sat/vB` : null}
+          {feeEstimate ? <span className="muted"> · one input; each extra input adds ≈ {fmtInt(feeEstimate.perInput)}</span> : null}
         </span>
         <span>
           <span className="k">Protocol fee</span>
@@ -392,6 +410,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
       <StatusLine
         flow={flow}
         waiting={waiting}
+        spare={spare}
         wallet={wallet}
         onReset={resetMine}
         onStopWaiting={stopWaiting}
@@ -406,7 +425,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
         deployTooNew={deployTooNew}
       />
 
-      <PendingMines pendings={pendings} ticker={ticker} onDismiss={dismissMine} onClearFinished={clearFinished} />
+      <PendingMines pendings={pendings} ticker={ticker} onDismiss={dismissMine} onClearFinished={clearFinished} speedUp={speedUp} speedUpQuote={speedUpQuote} fees={fees.data} />
 
       <MinerLog lines={lines} mine={mine} ticker={ticker} onClear={onClear} litDigit={litDigit} busy={busy || waiting > 0} clearable={!busy} />
     </div>
@@ -418,7 +437,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
  * one row each: waiting for a block → confirmed (digit, tier) → the
  * indexer's credit, or dropped. Hidden when there are none.
  */
-function PendingMines({ pendings, ticker, onDismiss, onClearFinished }) {
+function PendingMines({ pendings, ticker, onDismiss, onClearFinished, speedUp, speedUpQuote, fees }) {
   if (!pendings.length) return null;
   const waiting = inMempoolCount(pendings);
   const finished = pendings.filter(isFinished).length;
@@ -450,6 +469,7 @@ function PendingMines({ pendings, ticker, onDismiss, onClearFinished }) {
                   ×
                 </button>
               )}
+              <MineSpeedUp item={item} speedUp={speedUp} speedUpQuote={speedUpQuote} fees={fees} />
             </li>
           );
         })}
@@ -459,11 +479,36 @@ function PendingMines({ pendings, ticker, onDismiss, onClearFinished }) {
 }
 
 /**
+ * Speed up for one MINE still waiting for a block: the same transaction
+ * with a higher fee from its change (SpeedUpSend's controls). A MINE
+ * without a change output, or one whose PSBT this browser no longer holds,
+ * says so instead.
+ */
+function MineSpeedUp({ item, speedUp, speedUpQuote, fees }) {
+  const state = mineSpeedUpState(item);
+  if (item.phase !== "pending") return null;
+  if (state === "no-change") {
+    return <div className="mine-pending-extra muted">No change output to take a higher fee from — it confirms when a block includes it.</div>;
+  }
+  if (state !== "yes") return null;
+  const send = {
+    chain: { phase: "pending", psbt: item.psbt, txid: item.txid, speeding: item.speeding || null, speedError: item.speedError || null },
+    speedUpQuote: (rate) => speedUpQuote(item.txid, rate),
+    speedUp: (rate) => speedUp(item.txid, rate),
+  };
+  return (
+    <div className="mine-pending-extra">
+      <SpeedUpSend send={send} fees={fees} note="A MINE credits only if it confirms before the supply is used up." />
+    </div>
+  );
+}
+
+/**
  * One-line status above the terminal: why MINE is off (or Ready), the
  * in-flight phases, the error with its Reset — and, while the build waits
  * for the indexer's scan of this wallet, Stop waiting.
  */
-function StatusLine({ flow, waiting, wallet, onReset, onStopWaiting, indexerOk, lagText, fee, feeRate, exhausted, preActivation, ticker, deployBlock, deployTooNew }) {
+function StatusLine({ flow, waiting, spare, wallet, onReset, onStopWaiting, indexerOk, lagText, fee, feeRate, exhausted, preActivation, ticker, deployBlock, deployTooNew }) {
   let led = "idle";
   let text;
   let detail = null;
@@ -507,7 +552,7 @@ function StatusLine({ flow, waiting, wallet, onReset, onStopWaiting, indexerOk, 
       else if (!feeRate) text = missingFeeHint(fee.choice, feeRate, "mine", { awaitingAck: !!fee.highFee?.pending });
       else if (waiting) {
         led = "ok";
-        text = `${waiting === 1 ? "Your MINE is" : `${fmtInt(waiting)} of your MINEs are`} waiting for a block (below). You can start another one now — it uses different inputs.`;
+        text = waitingMineText(waiting, spare);
       } else text = readyText(wallet.assetSafe, "Mine");
     }
   }

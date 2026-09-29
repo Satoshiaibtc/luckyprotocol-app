@@ -11,27 +11,29 @@ import { FINAL_DEPTH } from "../lib/finality.js";
 import { changeSign, fmtChangePct } from "../lib/market.js";
 import { fmtAgo, fmtCompact, fmtInt, fmtMintedPct, fmtUnit, fmtUsd } from "../lib/format.js";
 import { REQUIRED_TOKEN_SUPPLY } from "../lib/payloads.js";
-import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
+import { indexerErrorText, indexerErrorTitle, isIndexerBusy } from "../lib/errors.js";
 
 /**
  * #/market — every OPEN market (a token whose cumulative credited yield
  * reached its supply — minted out, for good) as a sortable table, then the
  * tokens closest to 100 % ("Next to open"). Reads the same /tokens poll as
- * the board (App.jsx, limit 200, every 30 s); sats-first, USD sub-labels
- * only while /price answers.
+ * the board (App.jsx: every page of the registry, every 30 s); sats-first,
+ * USD sub-labels only while /price answers.
  */
 export default function MarketPage() {
-  const { tokens, health, price } = useApp();
+  const { tokens, health, price, chainTip } = useApp();
   const mobile = useIsMobile();
   const usd = price.data?.usd_per_btc ?? null;
   const [sort, setSort] = useState("volume");
 
   const items = useMemo(() => tokens.data?.items || [], [tokens.data]);
   const { open, next } = useMemo(() => partitionMarkets(items, { sort }), [items, sort]);
-  const tip = health.data?.tip_height ?? null;
+  const tip = chainTip;
   const led = ledFromPoll(tokens);
   // No answer yet (or only a failed one): the counts are unknown, not 0.
   const unknown = !tokens.data;
+  // Some registry pages could not be read: the lists below may lack tokens.
+  const partial = tokens.data?.complete === false;
 
   return (
     <main className="page market-page">
@@ -46,7 +48,7 @@ export default function MarketPage() {
                   {health.data?.last_progress_at ? <span className="muted"> · indexed {fmtAgo(health.data.last_progress_at)}</span> : null}
                 </>
               ) : health.error ? (
-                <span className="err">indexer offline</span>
+                <span className="err">{isIndexerBusy(health.error) ? "indexer busy" : "indexer offline"}</span>
               ) : (
                 "connecting…"
               )}
@@ -67,6 +69,11 @@ export default function MarketPage() {
           </div>
         </div>
 
+        {partial && (
+          <div className="notice">
+            {fmtInt(items.length)} of {fmtInt(tokens.data.total)} tokens could be loaded — a market may be missing here. Retrying every 30 s.
+          </div>
+        )}
         {tokens.error && items.length === 0 ? (
           <div className="err" title={indexerErrorTitle(tokens.error)}>
             {indexerErrorText(tokens.error, { retrySec: 30 })}

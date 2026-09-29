@@ -19,6 +19,7 @@
 
 import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
+import { hash160 } from "@scure/btc-signer/utils.js";
 import {
   DUST_SATS,
   PROJECT_FEE_ADDRESS,
@@ -32,7 +33,9 @@ import {
   decodeAddress,
   xOnlyFromCompressedHex,
   filterSpendable,
-  selectInputs,
+  convergeSelection,
+  insufficientFundsError,
+  isShortfall,
   estimateVsize,
   inputVsize,
   inputCostSats,
@@ -115,6 +118,36 @@ function checkOutpoint(txid, vout) {
   if (!Number.isInteger(vout) || vout < 0 || vout > 1e6) throw new Error(`invalid vout ${vout}`);
 }
 
+/**
+ * The seller's signature entry of a P2WPKH listing input: the one
+ * `[pubkey, sig]` of `partialSig` whose HASH160(pubkey) is the witness
+ * program of `script` (0x00 0x14 <20 bytes>) — whatever else the PSBT
+ * carries. Null when none matches. Any other entry is not the seller's
+ * and must never end up in the fill's witness.
+ */
+export function sellerPartialSig(partialSig, script) {
+  if (!Array.isArray(partialSig) || !(script instanceof Uint8Array) || script.length !== 22 || script[0] !== 0x00 || script[1] !== 0x14) return null;
+  const program = script.subarray(2);
+  for (const entry of partialSig) {
+    const [pub, sig] = Array.isArray(entry) ? entry : [];
+    if (pub instanceof Uint8Array && sig instanceof Uint8Array && equalBytes(hash160(pub), program)) return [pub, sig];
+  }
+  return null;
+}
+
+/** Does a finalized input 0's witness carry the seller's own 0x83 listing signature (P2TR key path or P2WPKH)? */
+function sellerFinalWitnessOk(input) {
+  const w = input?.finalScriptWitness;
+  const script = input?.witnessUtxo?.script;
+  if (!Array.isArray(w) || !script) return false;
+  const type = scriptType(script);
+  if (type === "tr") return w.length === 1 && w[0].length === 65 && w[0][64] === LISTING_SIGHASH;
+  if (type === "wpkh") {
+    return w.length === 2 && w[0].length > 0 && w[0][w[0].length - 1] === LISTING_SIGHASH && !!sellerPartialSig([[w[1], w[0]]], script);
+  }
+  return false;
+}
+
 // ---- §7.1 listing -----------------------------------------------------------------------
 
 /**
@@ -133,8 +166,11 @@ export function buildListingPsbt({ address, pubkeyHex, tokenUtxo, priceSats, amo
   if (!tokenUtxo || typeof tokenUtxo !== "object") throw new Error("tokenUtxo is required");
   checkOutpoint(tokenUtxo.txid, tokenUtxo.vout);
   const sats = Number(tokenUtxo.sats);
+  if (Number.isInteger(sats) && sats > 0 && sats < DUST_SATS) {
+    throw new Error(`token UTXO ${tokenUtxo.txid}:${tokenUtxo.vout} holds ${sats} sats — the order book lists only a carrier of at least ${DUST_SATS} sats; move the tokens to a ${DUST_SATS}-sat carrier (a send to yourself) first`);
+  }
   if (!Number.isInteger(sats) || sats < DUST_SATS) {
-    throw new Error(`token UTXO ${tokenUtxo.txid}:${tokenUtxo.vout} needs its real BTC value (≥ ${DUST_SATS} sats) — refresh UTXOs`);
+    throw new Error(`token UTXO ${tokenUtxo.txid}:${tokenUtxo.vout} needs its real BTC value (≥ ${DUST_SATS} sats), and the indexer does not list it among this address's outputs right now — try again after the next block`);
   }
   const price = Number(priceSats);
   if (!Number.isInteger(price) || price < MIN_PRICE_SATS) {
@@ -216,6 +252,9 @@ export function parseListing(psbtHex) {
         tapKeySig: in0.tapKeySig || null,
         partialSig: in0.partialSig || null,
         tapInternalKey: in0.tapInternalKey || null,
+        // A listing is never finalized: the fill builds input 0's witness
+        // from the seller's signature itself.
+        finalized: !!(in0.finalScriptWitness || in0.finalScriptSig),
         scriptType: inScript ? scriptType(inScript) : "unknown",
         address: inScript ? scriptAddress(inScript) : null,
         status: tx.inputsLength ? tx.inputStatus(0) : "unsigned",
@@ -275,12 +314,16 @@ export function verifyListing({ psbtHex, order }) {
         : `${L.inputCount} in / ${L.outputCount} out · lockTime 0 · outpoint ${order.id}`,
   );
 
-  // 2. sighash 0x83 + a signature present (tapKeySig for P2TR, partialSig for P2WPKH)
+  // 2. sighash 0x83 + a signature present (tapKeySig for P2TR; for P2WPKH the
+  //    partialSig whose key hashes to the witness program — never simply the
+  //    first entry, which anyone can put in front of the seller's)
   let sigOk = false;
   let sigDetail = "no input";
   if (L.input0) {
     const st = L.input0.sighashType;
-    if (st !== LISTING_SIGHASH) {
+    if (L.input0.finalized) {
+      sigDetail = "input 0 is already finalized — a listing carries the seller's signature unfinalized";
+    } else if (st !== LISTING_SIGHASH) {
       sigDetail = st === null ? "sighashType field missing" : `sighashType 0x${Number(st).toString(16)} ≠ 0x83`;
     } else if (L.input0.scriptType === "tr") {
       const sig = L.input0.tapKeySig;
@@ -289,10 +332,12 @@ export function verifyListing({ psbtHex, order }) {
       else { sigOk = true; sigDetail = "SINGLE|ANYONECANPAY · Schnorr key-path signature present"; }
     } else if (L.input0.scriptType === "wpkh") {
       const ps = L.input0.partialSig;
+      const own = sellerPartialSig(ps, L.input0.witnessUtxo?.script);
       if (!ps || ps.length === 0) sigDetail = "no partialSig on the P2WPKH input";
+      else if (!own) sigDetail = "no partialSig from the key of the listed UTXO";
       else {
-        const sig = ps[0][1];
-        if (!sig || sig[sig.length - 1] !== LISTING_SIGHASH) sigDetail = "partialSig does not end with the 0x83 sighash byte";
+        const sig = own[1];
+        if (!sig || sig[sig.length - 1] !== LISTING_SIGHASH) sigDetail = "the seller's partialSig does not end with the 0x83 sighash byte";
         else { sigOk = true; sigDetail = "SINGLE|ANYONECANPAY · ECDSA signature present"; }
       }
     } else {
@@ -346,12 +391,18 @@ export function verifyListing({ psbtHex, order }) {
 
 /**
  * Fee/vsize model for a fill: input0 is the seller's (type from its
- * script), inputs 1..n are the buyer's.
+ * script), inputs 1..n are the buyer's. A Taproot key-path signature with
+ * a sighash other than the default carries the sighash byte: the seller's
+ * 0x83 signature is 65 bytes, a quarter vbyte more than the 64-byte
+ * signature the per-input estimate assumes. (A P2WPKH estimate already
+ * covers the longest DER signature.)
  */
+export const SELLER_TR_SIGHASH_BYTE_VB = 0.25;
 function fillVsize({ sellerType, buyerType, buyerInputCount, outputAddresses, opReturnScriptLen }) {
   return (
     estimateVsize({ inputCount: buyerInputCount, inputType: buyerType, outputAddresses, opReturnScriptLen }) +
-    inputVsize(sellerType)
+    inputVsize(sellerType) +
+    (sellerType === "tr" ? SELLER_TR_SIGHASH_BYTE_VB : 0)
   );
 }
 
@@ -375,12 +426,17 @@ export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 
   // The node charges for whole vbytes (ceil(weight / 4)): round the size up before the rate.
   const feeSats = Math.ceil(Math.ceil(vsize) * rate);
   const price = Number(order.price_sats) || 0;
+  const carrier = Number.isInteger(Number(order.carrier_sats)) && Number(order.carrier_sats) > 0 ? Number(order.carrier_sats) : 0;
+  const totalSats = price + FILL_FIXED_SATS + feeSats;
   return {
     vsize: Math.ceil(vsize),
     feeSats,
     priceSats: price,
     slotSats: FILL_FIXED_SATS,
-    totalSats: price + FILL_FIXED_SATS + feeSats,
+    totalSats,
+    // The listed UTXO's own BTC is input 0 of the fill and returns in the buyer's change.
+    carrierInSats: carrier,
+    netSats: totalSats - carrier,
   };
 }
 
@@ -466,29 +522,20 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
 
   const attempt = (withChange) => {
     const outputAddresses = withChange ? fixedAddresses.concat([address]) : fixedAddresses;
-    let selected = [];
-    let total = 0;
-    let fee = 0;
-    for (let pass = 0; pass < 3; pass++) {
-      const target = fixedOutValue + fee + (withChange ? DUST_SATS : 0) - carrierSats;
-      // Largest-first with uneconomic outputs skipped: a
-      // fill is a one-off purchase, never a consolidation — smallest-first
-      // could pull dozens of small outputs and multiply the fee the sheet
-      // quoted (it quotes ONE buyer input).
-      ({ selected, total } = selectInputs({ utxos: spendable, target: Math.max(1, target), excludeKeys: [], order: "largest", minEffectiveSats: inputCostSats(buyerType, satVb) }));
-      const vsize = fillVsize({
-        sellerType,
-        buyerType,
-        buyerInputCount: selected.length,
-        outputAddresses,
-        opReturnScriptLen: opReturnScript.length,
-      });
-      const newFee = Math.ceil(Math.ceil(vsize) * satVb);
-      if (newFee === fee) break;
-      fee = newFee;
-    }
-    const vsize = fillVsize({ sellerType, buyerType, buyerInputCount: selected.length, outputAddresses, opReturnScriptLen: opReturnScript.length });
-    return { selected, total, fee, vsize };
+    const vsizeFor = (n) => fillVsize({ sellerType, buyerType, buyerInputCount: n, outputAddresses, opReturnScriptLen: opReturnScript.length });
+    // Largest-first with uneconomic outputs skipped: a fill is a one-off
+    // purchase, never a consolidation — smallest-first could pull dozens of
+    // small outputs and multiply the fee the sheet quoted (it quotes ONE
+    // buyer input). At least one buyer input, always. Selected until the fee
+    // of the inputs it takes is covered (convergeSelection).
+    const sel = convergeSelection({
+      spendable,
+      targetFor: (fee) => Math.max(1, fixedOutValue + fee + (withChange ? DUST_SATS : 0) - carrierSats),
+      feeFor: (n) => Math.ceil(Math.ceil(vsizeFor(n)) * satVb),
+      order: "largest",
+      minEffectiveSats: inputCostSats(buyerType, satVb),
+    });
+    return { ...sel, vsize: vsizeFor(sel.selected.length) };
   };
 
   let sel;
@@ -496,13 +543,13 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   try {
     sel = attempt(true);
   } catch (e) {
-    if (!/insufficient funds/.test(String(e.message))) throw e;
+    if (!isShortfall(e)) throw e;
     sel = attempt(false);
     changeOmitted = true;
   }
   const { selected, total, fee } = sel;
   const change = carrierSats + total - fixedOutValue - fee;
-  if (change < 0) throw new Error(`insufficient funds after fee (${fee.toLocaleString("en-US")} sats)`);
+  if (change < 0) throw insufficientFundsError(fixedOutValue + fee - carrierSats, total, selected.length);
   if (!changeOmitted && change < DUST_SATS) changeOmitted = true;
   const finalFee = changeOmitted ? fee + change : fee;
 
@@ -532,6 +579,8 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
     priceSats,
     slotSats: FILL_FIXED_SATS,
     totalSats: priceSats + FILL_FIXED_SATS + finalFee,
+    carrierInSats: carrierSats,
+    netSats: priceSats + FILL_FIXED_SATS + finalFee - carrierSats,
     changeSats: changeOmitted ? 0 : change,
     changeOmitted,
     changeVout: changeOmitted ? null : FILL_BTC_CHANGE_VOUT,
@@ -543,9 +592,13 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
 }
 
 /**
- * After UniSat signed (and finalized) the buyer's inputs: finalize input0
- * from the seller's SINGLE|ANYONECANPAY signature, assert every input is
- * finalized, and extract the raw transaction hex for broadcast.
+ * After the wallet signed the buyer's inputs: finalize input0 from the
+ * seller's SINGLE|ANYONECANPAY signature — for P2WPKH only the partialSig
+ * whose key is the listed UTXO's, any other entry is dropped first — then
+ * finalize any buyer input the wallet signed but left unfinalized, assert
+ * every input is finalized, and extract the raw transaction hex for
+ * broadcast. An input 0 that arrives finalized must carry the seller's
+ * own 0x83 signature.
  */
 export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
   const tx = loadPsbt(signedPsbtHex);
@@ -556,10 +609,33 @@ export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
   // laid out with 546-sat token / residual slots at the payload's indices.
   checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), expect);
   if (!expect || expect.op === "SEND") checkFillLayout(tx);
-  if (tx.inputStatus(0) !== "finalized") tx.finalizeIdx(0);
+  const in0 = tx.getInput(0);
+  if (tx.inputStatus(0) === "finalized") {
+    if (!sellerFinalWitnessOk(in0)) throw new Error("input 0 came back finalized with a witness that is not the seller's listing signature — not broadcast");
+  } else {
+    if (in0.witnessUtxo && scriptType(in0.witnessUtxo.script) === "wpkh") {
+      const own = sellerPartialSig(in0.partialSig, in0.witnessUtxo.script);
+      if (!own) throw new Error("input 0 has no signature from the key of the listed UTXO");
+      if ((in0.partialSig || []).length !== 1) {
+        tx.updateInput(0, { partialSig: undefined }, true);
+        tx.updateInput(0, { partialSig: [own] }, true);
+      }
+    }
+    tx.finalizeIdx(0);
+  }
+  for (let i = 1; i < tx.inputsLength; i++) {
+    // A wallet that signed without finalizing: assemble its signature into the witness here.
+    if (tx.inputStatus(i) === "signed") {
+      try {
+        tx.finalizeIdx(i);
+      } catch (e) {
+        throw new Error(`input ${i} is signed but could not be finalized (${e?.message || e})`);
+      }
+    }
+  }
   for (let i = 0; i < tx.inputsLength; i++) {
     const st = tx.inputStatus(i);
-    if (st !== "finalized") throw new Error(`input ${i} is ${st} — UniSat did not sign/finalize it`);
+    if (st !== "finalized") throw new Error(`input ${i} is ${st} — your wallet did not sign it`);
   }
   return hex.encode(tx.extract());
 }

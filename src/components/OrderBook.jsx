@@ -1,4 +1,4 @@
-import { orderSelectable, sortAsks } from "../lib/market.js";
+import { fillingRowTitle, orderSelectable, sortAsks } from "../lib/market.js";
 import { fmtBtcShort, fmtInt, fmtSatsShort, fmtUnit, fmtUsd, shortAddr } from "../lib/format.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
@@ -53,7 +53,7 @@ export default function OrderBook({ ticker, rows, loading, error, address, selec
                   pick();
                 }
               }}
-              title={sel.reason === "own" ? "Your own listing — manage it under List / Split / Withdraw" : sel.reason === "filling" ? `A fill of this listing is already in the mempool${o.pending_feerate !== null ? ` at ${o.pending_feerate} sat/vB` : ""} — a second one would only be rejected as a double-spend` : undefined}
+              title={sel.reason === "own" ? "Your own listing — manage it under List / Split / Withdraw" : sel.reason === "filling" ? fillingRowTitle(o) : undefined}
             >
               <span className={`pick${on ? " on" : ""}`} aria-hidden="true" />
               <span className="num right">

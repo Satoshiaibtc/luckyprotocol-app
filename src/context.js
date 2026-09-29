@@ -6,6 +6,7 @@ import { createContext, useContext } from "react";
  * indexer health, fee estimates (`fees`) and the user's fee-rate choice
  * (`fee`, see useFeeRate), the USD price poll (`price` — `data.usd_per_btc`
  * is null whenever USD must not be shown), the token registry poll,
+ * `chainTip` (the chain height to show and gate on: sync.js chainTipOf),
  * routing, and the mock flag.
  */
 export const AppContext = createContext(null);

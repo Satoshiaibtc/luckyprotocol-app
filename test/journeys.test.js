@@ -135,7 +135,7 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(mineIdleReason({ ...base, exhausted: true }), "BLOK is fully minted — mining is closed; a MINE would credit 0.");
   assert.match(mineIdleReason({ ...base, preActivation: true }), /Locked until block #969,299/);
   assert.equal(mineIdleReason({ ...base, connected: false }), "Connect a wallet to mine.");
-  assert.match(mineIdleReason({ ...base, indexerOk: false, preActivation: true }), /Indexer offline/, "offline first (the unknown tip is why it reads locked)");
+  assert.match(mineIdleReason({ ...base, indexerOk: false, preActivation: true }), /indexer is not answering/, "offline first (the unknown tip is why it reads locked)");
   assert.match(readyText(true, "Mine"), /^Ready\. Fee inputs are selected from spendable BTC only/);
   const okx = readyText(false, "Mine");
   assert.match(okx, /^Ready to mine\. This wallet has no asset-safe UTXO list/);

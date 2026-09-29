@@ -184,14 +184,28 @@ export function settlementLine(row, ticker, at = Date.now()) {
   const tk = row.ticker || ticker;
   const who = row.sender ? `  (${shortAddr(row.sender, 4, 3)})` : "";
   const block = `  block ${fmtInt(row.block_height)}`;
+  // The line speaks of a block, so its key carries that block's hash: the
+  // same MINE settled again in another block (a chain reorganization) is a
+  // new line, not a duplicate.
+  const key = settlementKey(row);
   if (row.status === "invalid") {
-    return line({ key: `settle:${row.txid}`, kind: "err", text: `${tk} invalid mine${block}${who}`, ts: at });
+    return line({ key, kind: "err", text: `${tk} invalid mine${block}${who}`, ts: at });
   }
   const d = yieldDigit(row.block_hash);
   const digit = d ? `  digit ${d} → ` : "  ";
   const y = row.cap_exhausted ? "yield 0 (supply exhausted)" : `yield ${fmtInt(row.yield_smallest)}`;
   const tier = tierOfHash(row.block_hash) ?? (row.cap_exhausted ? null : tierOfYield(row.yield_smallest));
-  return line({ key: `settle:${row.txid}`, kind: "tier", tier, text: `${tk} mine settled${digit}${y}${block}${who}`, ts: at });
+  return line({ key, kind: "tier", tier, text: `${tk} mine settled${digit}${y}${block}${who}`, ts: at });
+}
+
+/** The settlement feed's identity of a /mines row: its txid AND its block (hash). */
+export function settlementSeenKey(row) {
+  return `${String(row?.txid || "").toLowerCase()}:${String(row?.block_hash || "").toLowerCase()}`;
+}
+
+/** The log key of another miner's settlement line (see settlementLine). */
+export function settlementKey(row) {
+  return `settle:${settlementSeenKey(row)}`;
 }
 
 /**
@@ -381,6 +395,16 @@ export function reorgLine(item, ticker, at = Date.now()) {
  */
 export function againAfterReorg(l, reorgs) {
   return l && Number.isInteger(reorgs) && reorgs > 0 ? { ...l, key: `${l.key}:r${reorgs}` } : l;
+}
+
+/**
+ * `sped up  tx 1a2b3…c4d → 5e6f7…8a9  fee 12,345 sats @ 20 sat/vB` — a
+ * waiting MINE replaced by the same transaction paying more (the earlier
+ * version may still confirm instead).
+ */
+export function speedUpMineLine(fromTxid, item, at = Date.now()) {
+  const fee = Number.isFinite(item?.feeSats) ? `  fee ${fmtInt(item.feeSats)} sats${item.feeRateSatVb ? ` @ ${item.feeRateSatVb} sat/vB` : ""}` : "";
+  return line({ key: `speedup:${item.txid}`, kind: "act", text: `sped up  tx ${shortTxid(fromTxid, 5, 3)} → ${shortTxid(item.txid, 5, 3)}${fee}`, ts: at });
 }
 
 /** `resumed tracking  tx a3f9c…21e  ·  broadcast 20:20:39` — a MINE picked up again after a reload or a return to the page. */

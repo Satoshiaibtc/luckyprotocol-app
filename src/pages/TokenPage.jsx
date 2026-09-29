@@ -36,7 +36,7 @@ const DATA_TABS = [
 const TIER_SUMMARY = BUCKETS.map((b) => `${b.label} ${probabilityPct(b)}% → ${b.yield}`).join(" · ");
 
 export default function TokenPage({ ticker, params, navigate }) {
-  const { address, health, sync, tipBlock } = useApp();
+  const { address, sync, tipBlock, chainTip } = useApp();
   const mobile = useIsMobile();
   const tokenQ = usePoll((s) => indexer.token(ticker, s), POLL_MS, [ticker]);
   const token = tokenQ.data;
@@ -86,7 +86,7 @@ export default function TokenPage({ ticker, params, navigate }) {
   }, [tokenQ, mixQ, mobile]);
 
   const mix = useMemo(() => summarizeMix(mixQ.data?.items || []), [mixQ.data]);
-  const tip = health.data?.tip_height ?? null;
+  const tip = chainTip;
 
   if (notFound) {
     const act = activationState(tip);

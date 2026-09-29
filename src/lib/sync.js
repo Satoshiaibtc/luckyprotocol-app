@@ -104,14 +104,14 @@ export function syncPauseText(sync, what) {
  */
 export function syncWarningText(sync, { tipTime = null, now = Date.now() } = {}) {
   if (!sync) return null;
-  if (sync.rebuilding) return "The indexer is rebuilding its state from the chain: balances, tokens and listings may be incomplete until it finishes. Creating, mining and sending are paused.";
-  if (sync.stalled && sync.noPeers) return "The indexer's Bitcoin node has no peers, so what you see may be out of date. Creating, mining and sending are paused until it reconnects.";
-  if (sync.stalled) return "The indexer has stopped making progress, so what you see may be out of date. Creating, mining and sending are paused until it recovers.";
+  if (sync.rebuilding) return "The indexer is rebuilding its state from the chain: balances, tokens and listings may be incomplete until it finishes. Creating, mining, sending, listing and buying are paused.";
+  if (sync.stalled && sync.noPeers) return "The indexer's Bitcoin node has no peers, so what you see may be out of date. Creating, mining, sending, listing and buying are paused until it reconnects.";
+  if (sync.stalled) return "The indexer has stopped making progress, so what you see may be out of date. Creating, mining, sending, listing and buying are paused until it recovers.";
   if (sync.networkLag > 0) {
-    return `Our Bitcoin node is ${blocks(sync.networkLag)} behind the network, so what you see may be out of date. Creating, mining and sending are paused until it catches up.`;
+    return `Our Bitcoin node is ${blocks(sync.networkLag)} behind the network, so what you see may be out of date. Creating, mining, sending, listing and buying are paused until it catches up.`;
   }
   if (sync.noPeers) return "The indexer's Bitcoin node has no peers right now: new blocks and transactions may reach it late.";
-  if (Number.isInteger(sync.lag) && sync.lag >= SYNC_WARN_LAG) return `The indexer is catching up: ${blocks(sync.lag)} behind the chain tip. Creating, mining and sending resume when it has caught up.`;
+  if (Number.isInteger(sync.lag) && sync.lag >= SYNC_WARN_LAG) return `The indexer is catching up: ${blocks(sync.lag)} behind the chain tip. Creating, mining, sending, listing and buying resume when it has caught up.`;
   if (sync.synced && Number.isInteger(tipTime) && now / 1000 - tipTime > OLD_TIP_WARN_S) {
     const min = Math.floor((now / 1000 - tipTime) / 60);
     return `No new block for about ${n2(min)} minutes. Bitcoin sometimes goes that long, but our node may also be behind.`;

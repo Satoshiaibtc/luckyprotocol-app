@@ -48,7 +48,13 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.deepEqual([junk.pending_spend_txid, junk.pending_fee_sats, junk.pending_vsize, junk.pending_feerate], [null, null, null, null], "out-of-range pending fields → null (the cancel fee rule then falls back to the rate floor)");
   const leak = orderRow({ ...base, status: "open", pending_feerate: 0.1, pending_fee_sats: 100 });
   assert.equal(leak.pending_feerate, null, "pending_* on a non-filling order are dropped");
-  assert.equal(orderRow({ ...base, status: "expired" }), null, "unknown status → row dropped");
+  assert.equal(orderRow({ ...base, status: "withdrawn" }), null, "unknown status → row dropped");
+  // A listing that left the book with its outpoint unspent (the seller's own list): still fillable.
+  const off = orderRow({ ...base, status: "expired", carrier_sats: undefined, created_at: undefined, dropped_at: 1791489290 });
+  assert.equal(off.status, "expired", "an off-book listing is kept");
+  assert.equal(off.carrier_sats, null, "its carrier value may be unknown");
+  assert.equal(off.dropped_at, 1791489290);
+  assert.equal(orderRow({ ...base, carrier_sats: undefined }), null, "a live order still needs its carrier value");
   assert.equal(orderRow({ ...base, unit_price: 1 }).unit_price, 87_121 / 1921, "unit_price is price / amount — a wire value that disagreed would mis-sort the book");
   assert.equal(orderRow({ ...base, unit_price: undefined }).unit_price, 87_121 / 1921);
   console.log("views OrderView: filling + pending_* (bounded, only while filling) + expires_at; null is null");

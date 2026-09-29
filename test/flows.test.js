@@ -34,9 +34,9 @@ import {
   SEED_WAIT_BUDGET_MS,
 } from "../src/lib/retry.js";
 import { seedWaitFields } from "../src/lib/httpError.js";
-import { landedOrThrow, walletError } from "../src/lib/wallet.js";
+import { LANDED_CHECK_WAITS_MS, landedOrThrow, nodeRefused, walletError } from "../src/lib/wallet.js";
 import { friendlyError } from "../src/hooks/useWallet.js";
-import { REVEAL_REASONS, defaultOutIdx, isFillOf, revealRejection, routeDecision } from "../src/lib/mockRouting.js";
+import { REVEAL_REASONS, defaultOutIdx, inputSighash, isFillOf, listedScriptType, revealRejection, routeDecision, settleListingSpend } from "../src/lib/mockRouting.js";
 import { commitHashFor } from "../src/lib/payloads.js";
 import { PROJECT_FEE_ADDRESS } from "../src/lib/payloads.js";
 
@@ -442,13 +442,41 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const ok = await landedOrThrow(summary, { kind: "deploy" }, new Error("push failed · indexer relay: timeout"), { txStatus: async () => ({ confirmed: false, seen: true }), sleep: noSleep, record });
   assert.equal(ok, TX("e"));
   assert.deepEqual(recorded, [[TX("e"), "deploy"]]);
-  // the node never saw it → a retry is safe, nothing recorded
+  // it reaches the node only at the third look (15 s): still a success — three looks, at the documented waits
+  recorded.length = 0;
+  const waits = [];
+  let looks = 0;
+  const late = await landedOrThrow(summary, { kind: "mine" }, new Error("push failed"), {
+    txStatus: async () => ({ confirmed: false, seen: ++looks >= 3 }),
+    sleep: async (ms) => waits.push(ms),
+    record,
+  });
+  assert.equal(late, TX("e"));
+  assert.deepEqual(waits, LANDED_CHECK_WAITS_MS, "2 s, then 6 s, then 15 s after the broadcast");
+  assert.deepEqual(recorded, [[TX("e"), "mine"]]);
+  // never seen in ~15 s → it may still arrive: recorded (its inputs stay out of the next build), never "nothing was spent"
   recorded.length = 0;
   await assert.rejects(
     landedOrThrow(summary, { kind: "deploy" }, new Error("push failed"), { txStatus: async () => ({ confirmed: false, seen: false }), sleep: noSleep, record }),
-    (e) => e.landed === false && /nothing was spent — you can try again/.test(e.message),
+    (e) => e.landed === null && e.recorded === true && /has not seen tx .* yet/.test(e.message) && !/nothing was spent/.test(e.message),
   );
+  assert.deepEqual(recorded, [[TX("e"), "deploy"]]);
+  // the node REFUSED it (the relay said so): a retry is safe, nothing recorded, one look is enough
+  recorded.length = 0;
+  let asked = 0;
+  await assert.rejects(
+    landedOrThrow(summary, { kind: "deploy" }, new Error("push failed"), { txStatus: async () => (asked++, { confirmed: false, seen: false }), sleep: noSleep, record, refused: true }),
+    (e) => e.landed === false && /refused tx .*nothing was spent — you can try again/.test(e.message),
+  );
+  assert.equal(asked, 1);
   assert.deepEqual(recorded, []);
+  // which relay answers count as the node's refusal
+  assert.equal(nodeRefused(Object.assign(new Error("/broadcast HTTP 400: bad-txns-inputs-missingorspent"), { status: 400 })), true);
+  assert.equal(nodeRefused(Object.assign(new Error("/broadcast HTTP 400: min relay fee not met, 100 < 141"), { status: 400 })), true);
+  assert.equal(nodeRefused(Object.assign(new Error("/broadcast HTTP 400: mempool min fee not met"), { status: 400 })), false, "a full mempool elsewhere may still take it");
+  assert.equal(nodeRefused(Object.assign(new Error("/broadcast HTTP 503: server busy"), { status: 503 })), false);
+  assert.equal(nodeRefused(new Error("Indexer unreachable: … — Failed to fetch")), false);
+  recorded.length = 0;
   // unknown → recorded (so the Create page keeps the ticker blocked) and told to check first
   await assert.rejects(
     landedOrThrow(summary, { kind: "deploy" }, new Error("push failed"), {
@@ -558,15 +586,72 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   assert.equal(revealRejection(V, { commit: vc(V4, SPK_M), height: 969_401 }), null, "vector 4");
   assert.equal(revealRejection(V, { commit: vc(V1, SPK_M), height: 969_401 }), "hash_mismatch", "vector 1's H through vector 4's script");
   assert.equal(REVEAL_REASONS.length, 9);
-  // §7.5: the payment is judged at the listed input's index
+  // §7.5: the payment is judged at the listed input's index, and only a
+  // spend signed SIGHASH_SINGLE|ANYONECANPAY (the listing's own signature) fills.
+  const SIG64 = "11".repeat(64); // P2TR key path, SIGHASH_DEFAULT
+  const SIG65 = "11".repeat(64) + "83"; // P2TR key path, 0x83
+  const DER = (b) => "30" + "44".repeat(69) + b; // a DER signature ending with its sighash byte
+  const PUB = "02" + "22".repeat(32);
+  assert.equal(inputSighash([SIG64]), 0x00, "64-byte Schnorr: default sighash");
+  assert.equal(inputSighash([SIG65]), 0x83);
+  assert.equal(inputSighash([SIG65, "50aa"]), 0x83, "an annex does not hide the key-path signature");
+  assert.equal(inputSighash([DER("83"), PUB]), 0x83, "P2WPKH: the DER signature's last byte");
+  assert.equal(inputSighash([DER("01"), PUB]), 0x01);
+  assert.equal(inputSighash([]), null);
+  assert.equal(inputSighash(["00", "11", "22"]), null, "a script-path spend is no listing signature");
+  // With the spent output's script type — as the indexer reads a block — the type decides the rule:
+  const CONTROL33 = "c0" + "33".repeat(32); // a one-leaf taproot control block, 33 bytes like a key
+  assert.equal(inputSighash([DER("83"), CONTROL33], "tr"), null, "P2TR [script, control block]: a script-path spend, never read as a P2WPKH signature");
+  assert.equal(inputSighash([DER("83"), CONTROL33]), 0x83, "…which only the shape guess would misread");
+  assert.equal(inputSighash([SIG65], "tr"), 0x83);
+  assert.equal(inputSighash([SIG64, "50aa"], "tr"), 0x00, "annex set aside: the 64-byte default signature");
+  assert.equal(inputSighash([SIG65], "wpkh"), null, "P2WPKH needs a signature and a key");
+  assert.equal(inputSighash([DER("83"), "04" + "22".repeat(64)], "wpkh"), 0x83, "P2WPKH: any key element, the DER signature's last byte");
+  assert.equal(inputSighash(["30" + "44".repeat(73) + "83", PUB], "wpkh"), null, "a 75-byte element is no DER signature");
+  assert.equal(inputSighash([SIG65], null), null, "another script type: no listing signature");
+  assert.equal(listedScriptType("bc1p" + "q".repeat(58)), "tr");
+  assert.equal(listedScriptType("bc1q" + "q".repeat(38)), "wpkh");
+  assert.equal(listedScriptType("bc1q" + "q".repeat(58)), null, "a 32-byte v0 program (P2WSH) is neither");
+  assert.equal(listedScriptType("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), null);
   const order = { ticker: "LUCKY", seller: "bc1qseller", price_sats: 60_000 };
   const fillAt1 = {
     payload: { op: "SEND", ticker: "LUCKY", amount: 1, toOutIdx: 2, changeOutIdx: 4 },
     outputs: [out(0, { address: ADDR, sats: 5_000 }), out(1, { address: "bc1qseller", sats: 60_000 }), out(2, { address: ADDR }), FEE(3, 546), out(4, { address: ADDR }), out(5, { opReturn: true })],
+    witnesses: [[SIG64], [SIG65]],
   };
   const d1 = routeDecision(fillAt1, { pool: { LUCKY: 1 } });
-  assert.equal(isFillOf(fillAt1, d1, order, 1), true, "listing at input 1 paid at vout1 → filled");
+  assert.equal(isFillOf(fillAt1, d1, order, 1), true, "listing at input 1 (0x83) paid at vout1 → filled");
   assert.equal(isFillOf(fillAt1, d1, order, 0), false, "judged at vout0 it would not be");
+  assert.deepEqual(settleListingSpend(fillAt1, d1, order, 1), { filled: true, buyer: ADDR, selfTrade: false, priceSats: 60_000 }, "buyer = TO_OUT of the applied SEND");
+  // The same layout signed with the default sighash (a withdrawal, a split, a send): never a trade.
+  const withdrawn = { ...fillAt1, witnesses: [[SIG64], [SIG64]] };
+  assert.equal(isFillOf(withdrawn, d1, order, 1), false, "a 64-byte signature is the seller's own spend → cancelled");
+  assert.equal(isFillOf({ ...fillAt1, witnesses: [[SIG64], [DER("01"), PUB]] }, d1, order, 1), false, "SIGHASH_ALL → cancelled");
+  // A withdrawal priced exactly at the listing's 546-sat minimum: the self-payment is no fill.
+  const cheap = { ticker: "LUCKY", seller: ADDR, price_sats: 546 };
+  const toSelf = {
+    payload: { op: "SEND", ticker: "LUCKY", amount: 1, toOutIdx: 0, changeOutIdx: 3 },
+    outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true }), out(3, { address: ADDR }), out(4, { address: ADDR, sats: 90_000 })],
+    witnesses: [[SIG64], [SIG64]],
+  };
+  const dSelf = routeDecision(toSelf, { pool: { LUCKY: 1 } });
+  assert.equal(isFillOf(toSelf, dSelf, cheap, 0), false, "a withdrawal at the 546-sat price is cancelled, not a self-trade");
+  assert.equal(isFillOf(toSelf, dSelf, { ...cheap, price_sats: 50_000 }, 4), false, "a listed carrier landing at input 4 against the change output: cancelled");
+  // A 0x83 spend without the protocol fee (no SEND applies) is still a trade: the buyer is where the residual lands.
+  const noFeeFill = { ...fillAt1, outputs: fillAt1.outputs.filter((o) => o.vout !== 3).map((o, i) => ({ ...o, vout: i })) };
+  noFeeFill.payload = { op: "SEND", ticker: "LUCKY", amount: 1, toOutIdx: 2, changeOutIdx: 3 };
+  const dNoFee = routeDecision(noFeeFill, { pool: { LUCKY: 1 } });
+  assert.equal(dNoFee.applied, false, "no fee output → the SEND does not apply");
+  assert.deepEqual(settleListingSpend(noFeeFill, dNoFee, order, 1), { filled: true, buyer: ADDR, selfTrade: false, priceSats: 60_000 }, "…the tokens still land on the residual output: a trade");
+  // No payload at all: default routing → the lowest non-OP_RETURN output.
+  const plain = { payload: null, outputs: [out(0, { address: "bc1qseller", sats: 60_000 }), out(1, { address: ADDR })], witnesses: [[SIG65], [SIG64]] };
+  assert.deepEqual(settleListingSpend(plain, routeDecision(plain), order, 0), { filled: true, buyer: "bc1qseller", selfTrade: true, priceSats: 60_000 }, "tokens back on the seller's own output: a self-trade");
+  const plain2 = { payload: null, outputs: [out(0, { address: ADDR }), out(1, { address: "bc1qseller", sats: 60_000 })], witnesses: [[SIG64], [SIG65]] };
+  assert.deepEqual(settleListingSpend(plain2, routeDecision(plain2), order, 1), { filled: true, buyer: ADDR, selfTrade: false, priceSats: 60_000 }, "listing at input 1, tokens to vout0");
+  const burn = { payload: null, outputs: [out(0, { address: null, sats: 1_000 }), out(1, { address: "bc1qseller", sats: 60_000 })], witnesses: [[SIG64], [SIG65]] };
+  assert.deepEqual(settleListingSpend(burn, routeDecision(burn), order, 1), { filled: true, buyer: null, selfTrade: false, priceSats: 60_000 }, "burned tokens: a fill with no buyer");
+  const short = { ...fillAt1, outputs: fillAt1.outputs.map((o) => (o.vout === 1 ? { ...o, sats: 59_999 } : o)) };
+  assert.equal(isFillOf(short, d1, order, 1), false, "paying less than the price is no fill");
   console.log("mock routing: fee checks, MINE vout0 rule, default-output burn, §2.1 commit-reveal rules + carrier-bound H + committer attribution, §7.5 index all as the spec says");
 }
 

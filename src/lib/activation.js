@@ -28,7 +28,8 @@ const at = (h) => `#${h.toLocaleString("en-US")}`;
 
 /**
  * `{ locked, unknown, blocksLeft, active, blocksToActivation }` for a tip
- * height (null / undefined = unknown).
+ * height (null / undefined = unknown; so is 0 — what an indexer that has
+ * not read its node yet reports, never a real tip).
  *
  *   locked              tip < UNLOCK_HEIGHT (or unknown) — Reserve and Mine stay off
  *   blocksLeft          blocks until the gate opens (tip reaches UNLOCK_HEIGHT); null while unknown
@@ -36,7 +37,7 @@ const at = (h) => `#${h.toLocaleString("en-US")}`;
  *   blocksToActivation  blocks until ACTIVATION_HEIGHT is mined; null while unknown
  */
 export function activationState(tip) {
-  if (!Number.isInteger(tip)) return { locked: true, unknown: true, blocksLeft: null, active: false, blocksToActivation: null };
+  if (!Number.isInteger(tip) || tip <= 0) return { locked: true, unknown: true, blocksLeft: null, active: false, blocksToActivation: null };
   return {
     locked: tip < UNLOCK_HEIGHT,
     unknown: false,

@@ -16,7 +16,7 @@ const fmt = (n) => Number(n).toLocaleString("en-US");
 /** Is `e` a builder's "nothing to spend" / "not enough" error? */
 export function isFundingError(e) {
   if (!e) return false;
-  if (e.code === "no-spendable" || e.code === "insufficient") return true;
+  if (e.code === "no-spendable" || e.code === "insufficient" || e.code === "too-many-inputs") return true;
   return /insufficient funds|no spendable BTC|no usable fee input/.test(String(e.message || e));
 }
 
@@ -37,6 +37,13 @@ export function fundingMessage(e, utxoRes = null, { action = "this transaction" 
     : "Unconfirmed outputs and token carriers are not used.";
   const waitingNote = waiting > 0 ? ` ${fmt(waiting)} sats in this wallet have not confirmed yet — they can be used once a block confirms them.` : "";
 
+  if (e.code === "too-many-inputs") {
+    // The value is there, spread over too many small outputs: more BTC would not help.
+    return (
+      `This wallet's confirmed BTC is spread over many small outputs: ${action} would need more than ${fmt(e.maxInputs || 200)} of them at this fee rate. ` +
+      "Combine them in your wallet (send them to yourself in one transaction), or pick a lower fee rate."
+    );
+  }
   if (e.code === "insufficient" && Number.isFinite(e.needSats) && Number.isFinite(e.haveSats)) {
     return (
       `Not enough confirmed BTC for ${action}: it needs ${fmt(e.needSats)} sats (outputs + network fee) and ${fmt(e.haveSats)} sats can be used.${waitingNote} ` +

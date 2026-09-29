@@ -170,14 +170,90 @@ export function revealRejection(d, { isDeployed = () => false, commit = null, he
   return null;
 }
 
+/** SIGHASH_SINGLE | SIGHASH_ANYONECANPAY — the sighash of every listing signature. */
+export const LISTING_SIGHASH_BYTE = 0x83;
+
 /**
- * §7.5 (as the indexer implements it): a spend of a listed outpoint fills
- * the order when the tx is an APPLIED SEND of the order's ticker, and the
- * output at the SAME index as the listed input — SIGHASH_SINGLE pairs them
- * — pays ≥ price_sats to the seller. Anything else cancels it.
+ * The script type of the output an address pays, as far as the listing
+ * rules care: "tr" (P2TR, a 32-byte v1 program), "wpkh" (P2WPKH, a
+ * 20-byte v0 program), or null for anything else.
  */
+export function listedScriptType(address) {
+  const a = String(address || "");
+  if (/^bc1p[02-9ac-hj-np-z]{58}$/.test(a)) return "tr";
+  if (/^bc1q[02-9ac-hj-np-z]{38}$/.test(a)) return "wpkh";
+  return null;
+}
+
+/**
+ * The sighash byte an input's witness (hex elements, `decodeRawTx`
+ * `witnesses[i]`) was signed with, read from its signature the way the
+ * indexer reads it from the block, for the script type of the output it
+ * spends (`prevoutType`, listedScriptType):
+ *   "tr" (key path) — one element once an annex (a last element starting
+ *     0x50, when there are at least two) is set aside: a 64-byte
+ *     signature is SIGHASH_DEFAULT (0x00), a 65-byte one ends with its
+ *     sighash byte;
+ *   "wpkh" — two elements, a DER signature of 9–73 bytes first: its last
+ *     byte.
+ * Null for any other shape or script type. Without `prevoutType` the
+ * type is guessed from the witness shape (a 33-byte second element reads
+ * as a P2WPKH key).
+ */
+export function inputSighash(witness, prevoutType) {
+  const w = Array.isArray(witness) ? witness.map((x) => String(x || "").toLowerCase()) : [];
+  const bytes = (h) => h.length / 2;
+  const type = prevoutType === undefined ? (w.length === 2 && bytes(w[1]) === 33 && !w[1].startsWith("50") ? "wpkh" : "tr") : prevoutType;
+  if (type === "tr") {
+    const annex = w.length >= 2 && w[w.length - 1].startsWith("50");
+    if (w.length - (annex ? 1 : 0) !== 1) return null;
+    if (bytes(w[0]) === 64) return 0x00;
+    if (bytes(w[0]) === 65) return parseInt(w[0].slice(-2), 16);
+    return null;
+  }
+  if (type === "wpkh") {
+    if (w.length !== 2 || bytes(w[0]) < 9 || bytes(w[0]) > 73) return null;
+    return parseInt(w[0].slice(-2), 16);
+  }
+  return null;
+}
+
+/**
+ * §7.5 (as the indexer decides it) for a listed outpoint spent as input
+ * `inputIdx` of decoded tx `d` (`swap.decodeRawTx` shape, with
+ * `witnesses`) under routing `decision` (routeDecision):
+ *
+ *   A FILL only when that input is signed SIGHASH_SINGLE|ANYONECANPAY
+ *   (0x83) — the seller's listing signature — AND the output at the same
+ *   index (SIGHASH_SINGLE pairs them) pays the seller ≥ price_sats. Any
+ *   other spend — a withdrawal, split or send, signed with the default
+ *   sighash, whatever it pays — cancels the order.
+ *
+ *   The buyer is the address of the output the listing's tokens landed on
+ *   after routing: an applied SEND of the order's ticker → its TO_OUT;
+ *   otherwise (a SEND without the fee, another payload, none) the residual
+ *   target. Tokens landing on the seller's own address make a self-trade;
+ *   burned tokens (no address) leave the buyer null. The protocol fee is
+ *   not required: a whole-UTXO sale moves the tokens either way.
+ *
+ * → { filled, buyer, selfTrade, priceSats } (`priceSats` = what the paired output pays)
+ */
+export function settleListingSpend(d, decision, order, inputIdx) {
+  const outputs = d.outputs || [];
+  // The listed output pays the seller's own script, so its type is the
+  // seller address's (a listing is only ever P2TR or P2WPKH; an address the
+  // rule cannot type leaves it to the witness shape).
+  const sighash = inputSighash((d.witnesses || [])[inputIdx], listedScriptType(order.seller) ?? undefined);
+  const pay = outputs[inputIdx];
+  const paid = sighash === LISTING_SIGHASH_BYTE && !!pay && !isOpReturnOut(pay) && pay.address === order.seller && pay.sats >= order.price_sats;
+  if (!paid) return { filled: false, buyer: null, selfTrade: false, priceSats: null };
+  const landVout = decision && decision.send && decision.send.ticker === order.ticker ? decision.send.vout : decision ? decision.residualVout : null;
+  const land = Number.isInteger(landVout) ? outputs[landVout] : null;
+  const buyer = land && !isOpReturnOut(land) && land.address ? land.address : null;
+  return { filled: true, buyer, selfTrade: !!buyer && buyer === order.seller, priceSats: pay.sats };
+}
+
+/** Does this spend of a listed outpoint fill the order (settleListingSpend)? */
 export function isFillOf(d, decision, order, inputIdx) {
-  if (!decision.applied || decision.op !== "SEND" || !decision.send || decision.send.ticker !== order.ticker) return false;
-  const pay = (d.outputs || [])[inputIdx];
-  return !!pay && !isOpReturnOut(pay) && pay.address === order.seller && pay.sats >= order.price_sats;
+  return settleListingSpend(d, decision, order, inputIdx).filled;
 }

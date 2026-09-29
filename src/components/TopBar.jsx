@@ -3,6 +3,7 @@ import { useApp } from "../context.js";
 import { fmtInt, shortAddr, walletBalanceText } from "../lib/format.js";
 import { chipLabel } from "../lib/walletShapes.js";
 import { chainTipOf } from "../lib/sync.js";
+import { indexerErrorText, isIndexerBusy } from "../lib/errors.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
 import Led from "./hud/Led.jsx";
@@ -34,7 +35,16 @@ export default function TopBar() {
   let led = "busy";
   let pillText = <>SYS · connecting…</>;
   let compactText = <>…</>;
-  if (health.error) {
+  const busy = isIndexerBusy(health.error);
+  if (health.error && busy) {
+    // It answered — rate-limited or overloaded, not down: the next poll
+    // usually gets through. Writes still pause meanwhile (their requests
+    // would be turned away the same way).
+    pillClass += " pill-warn";
+    led = "busy";
+    pillText = <>SYS · busy</>;
+    compactText = <>busy</>;
+  } else if (health.error) {
     pillClass += " pill-danger";
     led = "err";
     pillText = <>SYS · offline</>;
@@ -81,7 +91,9 @@ export default function TopBar() {
   }
   const syncWord = syncWordOf(h, sync);
   const pillTitle = health.error
-    ? String(health.error.message)
+    ? busy
+      ? indexerErrorText(health.error)
+      : String(health.error.message)
     : `indexer ${h?.network || ""} · block height${syncWord ? ` · ${syncWord}` : ""}${mock ? " · VITE_MOCK=1 (fake indexer)" : ""}`;
 
   const submit = (e) => {
@@ -148,7 +160,7 @@ export default function TopBar() {
               mock
             </span>
           )}
-          <span className={pillClass} title={pillTitle} aria-label={mobile ? `System: ${h ? `block #${fmtInt(chainTipOf(h))}${syncWord ? `, ${syncWord}` : ""}` : health.error ? "offline" : "connecting"}` : undefined}>
+          <span className={pillClass} title={pillTitle} aria-label={mobile ? `System: ${h ? `block #${fmtInt(chainTipOf(h))}${syncWord ? `, ${syncWord}` : ""}` : health.error ? (busy ? "busy" : "offline") : "connecting"}` : undefined}>
             <Led state={led} />
             {mobile ? compactText : pillText}
           </span>

@@ -105,7 +105,9 @@ export default function App() {
   useEffect(() => {
     setStatusPollMs(sync.lag > 0 ? LAGGING_POLL_MS : STATUS_POLL_MS);
   }, [sync.lag]);
-  const tokens = usePoll((s) => indexer.tokens({ limit: 200 }, s), 30_000, []);
+  // The whole registry, page by page (`complete: false` when a page was
+  // missing — a ticker the list lacks may still exist).
+  const tokens = usePoll((s) => indexer.allTokens(s), 30_000, []);
   const tipHeight = chainTipOf(health.data);
   const feesPoll = usePoll((s) => indexer.fees(s), 30_000, [tipHeight]);
   // The second source's recommended rates: the Fast tier follows it when it
@@ -136,7 +138,7 @@ export default function App() {
   const connectedAddress = w.connected ? w.address : null;
   useEffect(() => {
     if (!connectedAddress || MOCK) return;
-    indexer.btcUtxos(connectedAddress).catch(() => {});
+    indexer.btcUtxos(connectedAddress, undefined, { firstPageOnly: true }).catch(() => {});
   }, [connectedAddress]);
 
   // Stable "refresh everything" handle for flows that settle on-chain.
@@ -168,6 +170,10 @@ export default function App() {
       fee,
       price,
       tipBlock,
+      // The chain height every page shows and gates on: the node's tip,
+      // never below what the indexer applied (chainTipOf) — the raw tip
+      // reads 0 for a moment after an indexer restart.
+      chainTip: tipHeight,
       indexerOk,
       sync,
       mock: MOCK,
@@ -175,7 +181,7 @@ export default function App() {
       navigate,
       refreshAll,
     }),
-    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, walletModalOpen, openWalletModal, closeWalletModal, health, tokens, fees, fee, price, tipBlock, indexerOk, sync, route, navigate, refreshAll],
+    [w.wallet, w.connected, w.address, w.pubkeyHex, w.connect, w.disconnect, w.useMock, w.refreshBalance, walletModalOpen, openWalletModal, closeWalletModal, health, tokens, fees, fee, price, tipBlock, tipHeight, indexerOk, sync, route, navigate, refreshAll],
   );
 
   let page;

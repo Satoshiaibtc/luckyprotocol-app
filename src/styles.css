@@ -5592,6 +5592,15 @@ button.wallet-addr:focus-visible {
   overflow-wrap: anywhere;
   color: var(--muted);
 }
+/* Speed up (or why not) of a waiting MINE: a full-width line under its row. */
+.mine-pending-extra {
+  grid-column: 1 / -1;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.mine-pending-extra .cr-speedup {
+  margin-top: 0;
+}
 .mine-pending-row.t-ok .mine-pending-text {
   color: var(--text);
 }

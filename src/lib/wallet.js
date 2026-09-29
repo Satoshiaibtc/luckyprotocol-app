@@ -25,10 +25,10 @@
 
 import * as indexer from "./indexer.js";
 import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
-import { MIN_FEE_INPUT_SATS_UNSAFE, assertSingleOpReturn, extractRawTxHex, p2trAddressOfXOnly, rawTxSummary } from "./psbt.js";
+import { MIN_FEE_INPUT_SATS_UNSAFE, assertSingleOpReturn, extractRawTxHex, p2trAddressOfXOnly, psbtInputKeys, rawTxSummary, signedTxMismatch } from "./psbt.js";
 import { DUST_SATS } from "./payloads.js";
 import { isAbortError, retryWhileSeeding, seedFailureText } from "./retry.js";
-import { pendingSpentOutpoints, recordBroadcastTx, refreshTxRecords } from "./txrecords.js";
+import { pendingSpentOutpoints, recordBroadcastTx, refreshTxRecords, txRecords } from "./txrecords.js";
 import {
   PROVIDER_IDS,
   PROVIDER_META,
@@ -337,6 +337,9 @@ export async function connect(id, { silent = false } = {}) {
 
   if (!pubkeyHex) {
     if (typeof p.getPublicKey !== "function") {
+      // A page-load restore never errors for what only a prompt can give:
+      // it stays disconnected and Connect asks for the key.
+      if (silent) return null;
       throw new Error(`${name} did not share this account's public key, which is needed to build transactions — update the ${name} app or extension and connect again`);
     }
     try {
@@ -546,11 +549,16 @@ function waitingSatsOf(list, outpoints, floor) {
 async function excludePendingSpends(address, res) {
   const records = await refreshTxRecords(address, (txid) => indexer.txStatus(txid));
   const spent = pendingSpentOutpoints(records);
+  // …and the inputs of a transaction this page is signing or broadcasting
+  // right now (no record yet): a second flow must not pick them.
+  const busy = inFlightOutpoints();
+  for (const k of busy) spent.add(k);
   if (spent.size === 0) return { ...res, pendingSpentOutpoints: [] };
   const key = (u) => `${u.txid}:${u.vout}`.toLowerCase();
   const pendingSpent = res.utxos.filter((u) => spent.has(key(u))).map(({ txid, vout }) => ({ txid, vout }));
   const utxos = res.utxos.filter((u) => !spent.has(key(u)));
   if (utxos.length === 0 && pendingSpent.length > 0) {
+    if (pendingSpent.every((u) => busy.has(key(u)))) throw inFlightError();
     const keys = new Set(pendingSpent.map(key));
     const ids = records
       .filter((r) => r.inputs.some((k) => keys.has(k)))
@@ -581,6 +589,67 @@ export function walletError(e, what = "sign") {
   return err;
 }
 
+// ---- inputs in flight ----------------------------------------------------------------------
+//
+// Between a signature and its broadcast a transaction has no record yet
+// (txrecords.js), so a second flow on the page — a withdrawal while a fill
+// waits in the wallet, a MINE started again after its tab was left and
+// re-opened — would pick the same fee input: the later broadcast is then
+// refused as a conflict, or replaces the earlier one. The inputs a
+// broadcastable signature spends are held here from the moment it is
+// asked for until its broadcast settles (then the record guards them), or
+// for IN_FLIGHT_TTL_MS when a flow stops in between.
+
+/** How long inputs stay held when a flow never reaches its broadcast. */
+export const IN_FLIGHT_TTL_MS = 15 * 60 * 1000;
+const inFlight = new Map(); // "txid:vout" → ms when the hold ends
+
+/** The outpoints ("txid:vout") held by a signature or broadcast in progress on this page. */
+export function inFlightOutpoints(now = Date.now()) {
+  for (const [k, until] of inFlight) if (until <= now) inFlight.delete(k);
+  return new Set(inFlight.keys());
+}
+
+/** Release the held inputs of `psbtHex` (all its inputs), or of a list of outpoints (keys or `{ txid, vout }`). */
+export function releaseInputs(psbtOrKeys) {
+  let keys = [];
+  if (Array.isArray(psbtOrKeys)) keys = psbtOrKeys.map((k) => (typeof k === "string" ? k : `${k.txid}:${k.vout}`));
+  else if (typeof psbtOrKeys === "string" && psbtOrKeys) {
+    try {
+      keys = psbtInputKeys(psbtOrKeys);
+    } catch {
+      keys = [];
+    }
+  }
+  for (const k of keys) inFlight.delete(String(k).toLowerCase());
+}
+
+/** The refusal when a signature would spend what another transaction of this page is already spending. */
+export function inFlightError() {
+  const err = new Error(
+    "Another transaction of yours is waiting for the wallet or its broadcast and uses the same BTC. Confirm or reject it in the wallet first, then try again.",
+  );
+  err.code = "busy";
+  return err;
+}
+
+/**
+ * The outpoints a new signature must not spend: those in flight, and the
+ * inputs of this address's recorded broadcasts that are not final — except
+ * those of `replaces` (the txids a Speed up deliberately replaces).
+ */
+function guardedOutpoints(address, replaces) {
+  const out = inFlightOutpoints();
+  const skip = new Set((replaces || []).map((t) => String(t).toLowerCase()));
+  if (address) {
+    for (const r of txRecords(address)) {
+      if (skip.has(r.txid)) continue;
+      for (const k of r.inputs) out.add(k);
+    }
+  }
+  return out;
+}
+
 /**
  * Sign every input in `inputIndexes` with `address`.
  *
@@ -589,20 +658,53 @@ export function walletError(e, what = "sign") {
  *   sighashTypes  (default unset) — e.g. [0x83] for a listing; providers
  *                                   refuse non-default sighashes unless
  *                                   they are declared here
+ *   replaces      (default none)  — txids of this wallet's own pending
+ *                                   transactions this one replaces (Speed
+ *                                   up): their inputs may be spent again
+ *
+ * A signature that is going to be broadcast holds its inputs (see above):
+ * one that would spend an input already held, or an input of one of this
+ * address's own broadcasts that is not final, is refused BEFORE the wallet
+ * opens (`code: "busy"`). The PSBT the wallet returns must carry the very
+ * transaction it was given — version, lock time, every input's outpoint
+ * and nSequence, every output — or nothing is broadcast.
  *
  * Returns the signed PSBT hex.
  */
-export async function signPsbt(psbtHex, { inputIndexes, address, autoFinalized = true, sighashTypes } = {}) {
+export async function signPsbt(psbtHex, { inputIndexes, address, autoFinalized = true, sighashTypes, replaces = null } = {}) {
   const p = need();
+  let held = [];
+  if (autoFinalized !== false) {
+    let keys = [];
+    try {
+      keys = psbtInputKeys(psbtHex, inputIndexes);
+    } catch {
+      keys = [];
+    }
+    const guarded = guardedOutpoints(address || current?.address, replaces);
+    if (keys.some((k) => guarded.has(k))) throw inFlightError();
+    const until = Date.now() + IN_FLIGHT_TTL_MS;
+    for (const k of keys) inFlight.set(k, until);
+    held = keys;
+  }
   const args = signPsbtArgs(current.id, psbtHex, { inputIndexes, address, autoFinalized, sighashTypes });
   let signed;
   try {
-    signed = await p.signPsbt(...args);
+    try {
+      signed = await p.signPsbt(...args);
+    } catch (e) {
+      throw walletError(e, "sign");
+    }
+    if (typeof signed !== "string" || !/^[0-9a-f]+$/i.test(signed) || signed.length % 2 !== 0) {
+      throw new Error(`${providerName()} returned an unexpected signPsbt result`);
+    }
+    const changed = signedTxMismatch(psbtHex, signed);
+    if (changed) {
+      throw new Error(`${providerName()} changed the transaction while signing (${changed}), so nothing was sent. Update the wallet, or use another one, and try again.`);
+    }
   } catch (e) {
-    throw walletError(e, "sign");
-  }
-  if (typeof signed !== "string" || !/^[0-9a-f]+$/i.test(signed) || signed.length % 2 !== 0) {
-    throw new Error(`${providerName()} returned an unexpected signPsbt result`);
+    releaseInputs(held);
+    throw e;
   }
   return signed.toLowerCase();
 }
@@ -631,17 +733,33 @@ function _msg(e) {
 
 /** How long to wait before asking the indexer whether a "failed" broadcast reached the node anyway. */
 export const LANDED_CHECK_DELAY_MS = 2_000;
+/**
+ * The waits before each look at a "failed" broadcast (2 s, 6 s and 15 s
+ * after it): a tx the wallet's relay passed on before failing takes a few
+ * seconds to reach the indexer's node over the network.
+ */
+export const LANDED_CHECK_WAITS_MS = [LANDED_CHECK_DELAY_MS, 4_000, 9_000];
 
 /**
- * Record a broadcast tx under the connected address (its inputs are then
- * excluded from fee selection until it confirms or drops; a DEPLOY / MINE
- * is remembered with its ticker). Never throws.
+ * Record a broadcast tx under the address that built it (`meta.address`,
+ * else the connected one): its inputs are then excluded from fee selection
+ * until it confirms or drops; a DEPLOY / MINE is remembered with its
+ * ticker. The building address is the one that spends — a wallet switched
+ * while the signature was open must not get the record. Never throws.
  */
 function remember(summary, meta) {
   try {
-    const address = current?.address;
+    const address = meta?.address || current?.address;
     if (!address || !summary) return;
-    recordBroadcastTx(address, { txid: summary.txid, kind: meta?.kind || "other", ticker: meta?.ticker || null, inputs: summary.inputs });
+    recordBroadcastTx(address, {
+      txid: summary.txid,
+      kind: meta?.kind || "other",
+      ticker: meta?.ticker || null,
+      inputs: summary.inputs,
+      psbt: meta?.psbt ?? null,
+      changeVout: meta?.changeVout ?? null,
+      replaces: meta?.replaces ?? [],
+    });
   } catch {
     /* the record is a safety net, never a reason to fail a broadcast */
   }
@@ -670,37 +788,73 @@ function notifyBroadcast(txid) {
   }
 }
 
+// A Bitcoin node's own refusal of a transaction (consensus or relay policy)
+// as the indexer's /broadcast relays it: such a tx is not in its mempool
+// and no node with the standard rules takes it either. A full mempool's
+// "mempool min fee not met" is left out — another node may still take it.
+const NODE_REFUSAL_RE =
+  /bad-txns|missingorspent|missing-inputs|mandatory-script-verify|non-final|non-BIP68-final|\bdust\b|tx-size|scriptpubkey|min relay fee not met|insufficient fee|txn-mempool-conflict|absurdly-high-fee|max-fee-exceeded|Fee exceeds maximum|TX decode failed|OP_RETURN outputs|not LUCKY-20/i;
+
+/** Did the indexer's relay report that its node REFUSED the tx (not a transport failure)? */
+export function nodeRefused(relayErr) {
+  return !!relayErr && Number(relayErr.status) === 400 && NODE_REFUSAL_RE.test(String(relayErr.message || relayErr));
+}
+
 /**
- * Both relays failed. A relay can fail AFTER the node accepted the tx (a
- * timeout on the way back), so before telling the user to try again ask
- * the indexer whether the tx is in its node's mempool — a blind retry of a
- * DEPLOY would pay the fees twice. Returns the txid when
- * it landed; otherwise throws `err` with the verdict appended
- * (`err.landed` false = not seen by the node, null = could not tell).
+ * Both relays failed. A relay can fail AFTER passing the tx on (a timeout
+ * on the way back, a wallet backend that relayed and then errored), so
+ * before telling the user anything the indexer is asked — with answers no
+ * cache holds — whether its node has the tx, three times over ~15 s
+ * (LANDED_CHECK_WAITS_MS). Returns the txid when it is there. Otherwise
+ * throws `err` with the verdict appended:
+ *
+ *   `err.landed = false` — the indexer's node REFUSED it (`refused`): not
+ *                          sent, nothing is held, a retry is safe;
+ *   `err.landed = null`  — not seen yet, or no answer: it may still reach
+ *                          the network, so it is RECORDED (`err.recorded`)
+ *                          — its inputs stay out of the next build and a
+ *                          DEPLOY / MINE keeps its ticker — until the record
+ *                          resolves (seen, confirmed, or gone for good).
  */
-export async function landedOrThrow(summary, meta, err, { txStatus = (txid) => indexer.txStatus(txid), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), record = remember } = {}) {
+export async function landedOrThrow(
+  summary,
+  meta,
+  err,
+  { txStatus = (txid) => indexer.txStatus(txid, undefined, { fresh: true }), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), record = remember, refused = false } = {},
+) {
   if (!summary) throw err;
-  await sleep(LANDED_CHECK_DELAY_MS);
-  let st = null;
-  try {
-    st = await txStatus(summary.txid);
-  } catch {
-    st = null;
-  }
-  if (st && (st.confirmed || st.seen)) {
-    record(summary, meta);
-    return summary.txid;
+  let answered = false;
+  for (const wait of LANDED_CHECK_WAITS_MS) {
+    await sleep(wait);
+    let st = null;
+    try {
+      st = await txStatus(summary.txid);
+      answered = !!st;
+    } catch {
+      st = null;
+    }
+    if (st && (st.confirmed || st.seen)) {
+      record(summary, meta);
+      return summary.txid;
+    }
+    // Refused by the node itself: one look settles it.
+    if (refused && answered) break;
   }
   err.txid = summary.txid;
-  if (st) {
-    err.message += ` · the indexer's node has not seen tx ${summary.txid.slice(0, 12)}…, so nothing was spent — you can try again`;
+  const tx = `${summary.txid.slice(0, 12)}…`;
+  if (refused && answered) {
+    err.message += ` · the indexer's node refused tx ${tx}, so nothing was spent — you can try again`;
     err.landed = false;
     throw err;
   }
-  // Unknown: keep its inputs excluded and its ticker remembered until the
-  // record resolves, so a retry cannot silently double it.
+  // Not seen yet, or not known: keep its inputs excluded and its ticker
+  // remembered until the record resolves, so a retry cannot silently double
+  // it (or replace it).
   record(summary, meta);
-  err.message += ` · could not check whether tx ${summary.txid.slice(0, 12)}… reached the network — wait a minute and check it before trying again`;
+  err.recorded = true;
+  err.message += answered
+    ? ` · the indexer's node has not seen tx ${tx} yet. A relay can fail after passing a transaction on, so it may still arrive: its BTC inputs stay reserved for a few minutes — check the transaction before you try again`
+    : ` · could not check whether tx ${tx} reached the network — wait a minute and check it before trying again`;
   err.landed = null;
   throw err;
 }
@@ -722,23 +876,42 @@ function summarize(rawHex) {
 export async function broadcastSignedPsbt(signedPsbtHex, meta = {}) {
   // Extract first: a PSBT that does not finalize, or a finalized tx with
   // more than one OP_RETURN output, never reaches any relay.
-  const raw = extractRawTxHex(signedPsbtHex);
+  let raw;
+  try {
+    raw = extractRawTxHex(signedPsbtHex);
+  } catch (e) {
+    releaseInputs(signedPsbtHex);
+    throw e;
+  }
   const summary = summarize(raw);
   try {
-    const txid = await pushPsbt(signedPsbtHex);
-    remember(summary, meta);
-    return txid;
-  } catch (pushErr) {
     try {
-      const txid = await indexer.broadcast(raw);
+      // The wallet that signed relays it — unless another wallet (or none) is
+      // connected by now: then only the indexer's relay is used.
+      if (!sameWallet(meta)) throw new Error("the wallet changed after signing");
+      const txid = await pushPsbt(signedPsbtHex);
       remember(summary, meta);
       return txid;
-    } catch (bErr) {
-      const err = new Error(`${_msg(pushErr)} · indexer relay: ${_msg(bErr)}`);
-      err.conflict = isConflictError(pushErr) || isConflictError(bErr);
-      return landedOrThrow(summary, meta, err);
+    } catch (pushErr) {
+      try {
+        const txid = await indexer.broadcast(raw);
+        remember(summary, meta);
+        return txid;
+      } catch (bErr) {
+        const err = new Error(`${_msg(pushErr)} · indexer relay: ${_msg(bErr)}`);
+        err.conflict = isConflictError(pushErr) || isConflictError(bErr);
+        return await landedOrThrow(summary, meta, err, { refused: nodeRefused(bErr) });
+      }
     }
+  } finally {
+    // Recorded (or refused): the hold on its inputs ends here.
+    releaseInputs(summary ? summary.inputs : signedPsbtHex);
   }
+}
+
+/** Is the wallet that built and signed (`meta.address`) still the connected one? (no address named: yes) */
+function sameWallet(meta) {
+  return !meta?.address || (!!current && String(current.address).toLowerCase() === String(meta.address).toLowerCase());
 }
 
 /**
@@ -750,19 +923,24 @@ export async function broadcastRawTx(rawHex, meta = {}) {
   assertSingleOpReturn(rawHex);
   const summary = summarize(rawHex);
   try {
-    const txid = await pushTx(rawHex);
-    remember(summary, meta);
-    return txid;
-  } catch (pushErr) {
     try {
-      const txid = await indexer.broadcast(rawHex);
+      if (!sameWallet(meta)) throw new Error("the wallet changed after signing");
+      const txid = await pushTx(rawHex);
       remember(summary, meta);
       return txid;
-    } catch (bErr) {
-      const err = new Error(`${_msg(pushErr)} · indexer relay: ${_msg(bErr)}`);
-      err.conflict = isConflictError(pushErr) || isConflictError(bErr);
-      return landedOrThrow(summary, meta, err);
+    } catch (pushErr) {
+      try {
+        const txid = await indexer.broadcast(rawHex);
+        remember(summary, meta);
+        return txid;
+      } catch (bErr) {
+        const err = new Error(`${_msg(pushErr)} · indexer relay: ${_msg(bErr)}`);
+        err.conflict = isConflictError(pushErr) || isConflictError(bErr);
+        return await landedOrThrow(summary, meta, err, { refused: nodeRefused(bErr) });
+      }
     }
+  } finally {
+    if (summary) releaseInputs(summary.inputs);
   }
 }
 

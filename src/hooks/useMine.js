@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
-import { buildMinePsbt, expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
+import { buildMinePsbt, buildSpeedUpPsbt, decodeAddress, expectPsbtPayload, filterSpendable, inputCostSats, minFeeInputSats, outpointKey } from "../lib/psbt.js";
 import { isUsableFeeRate } from "../lib/feechoice.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { DROP_GRACE_MS, forgetTx, markTxConfirmed, markTxUnconfirmed, recordBroadcastTx, txRecords } from "../lib/txrecords.js";
@@ -15,8 +15,12 @@ import {
   confirmedFromRow,
   isFinished,
   mineFocus,
+  mineSpeedUpState,
+  mineVersions,
   newPendingMine,
+  pickMineVersion,
   resumeMinePendings,
+  switchMineVersion,
   updatePendingMine,
   withDepth,
 } from "../lib/minePending.js";
@@ -49,6 +53,24 @@ export function resumeMineState(address, ticker, records = address ? txRecords(a
 }
 
 /**
+ * How many confirmed outputs of `utxos` could still pay for another MINE
+ * once `used` (the inputs of the one just built) are spent: not a token
+ * carrier, above the list's fee-input floor, and worth more than their own
+ * input fee at `feeRate`. → a count.
+ */
+export function spareFeeInputs({ utxos, tokenOutpoints, used, assetSafe, address, feeRate }) {
+  let type = "tr";
+  try {
+    type = decodeAddress(address).type;
+  } catch {
+    type = "tr";
+  }
+  const spent = new Set((used || []).map(outpointKey));
+  const floor = inputCostSats(type, feeRate);
+  return filterSpendable(utxos, tokenOutpoints, { minSats: minFeeInputSats(assetSafe) }).filter((u) => !spent.has(outpointKey(u)) && Number(u.sats) > floor).length;
+}
+
+/**
  * The mine console's state:
  *
  *   flow      idle → building → signing → broadcasting → idle   (↘ error)
@@ -74,10 +96,23 @@ export function resumeMineState(address, ticker, records = address ? txRecords(a
  * `mine` is the single state the terminal's LEDs / caption / digit strip
  * follow (mineFocus). `onSettled` runs after each confirmation and each
  * credit so callers refresh balances / token stats / feeds.
+ *
+ * `spare` = how many other fee inputs the wallet had left after the last
+ * MINE built here (null = not known): 0 means the next MINE has to wait
+ * for a pending one's change to confirm.
+ *
+ * Speed up (`speedUp(txid, rate)`, preview `speedUpQuote(txid, rate)`): a
+ * MINE still waiting for a block is replaced by the same transaction —
+ * same inputs, same outputs, the same MINE payload — paying a higher fee
+ * taken from its BTC change (psbt.buildSpeedUpPsbt). The item follows the
+ * new txid and keeps asking about the versions it replaced: a miner may
+ * still confirm one of them, and then that one is the MINE (its block, its
+ * digit, its credit).
  */
-export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, onSettled, tip = null, trustUnseen = true }) {
+export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, onSettled, tip = null, trustUnseen = true, incrementalRelayFee = undefined }) {
   const [flow, setFlow] = useState(IDLE_MINE);
   const [pendings, setPendings] = useState([]);
+  const [spare, setSpare] = useState(null);
   const settledRef = useRef(onSettled);
   settledRef.current = onSettled;
   const pendingsRef = useRef(pendings);
@@ -95,6 +130,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
   useEffect(() => {
     seedWait.stop();
     setFlow(IDLE_MINE);
+    setSpare(null);
     setPendings(address ? resumeMinePendings(txRecords(address), ticker) : []);
   }, [address, ticker, seedWait]);
 
@@ -143,10 +179,26 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       expectPsbtPayload(built.psbtHex, { op: "MINE", ticker });
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: addr });
       setFlow((m) => ({ ...m, phase: "broadcasting" }));
-      const txid = await wallet.broadcastSignedPsbt(signed, { kind: "mine", ticker });
+      // The unsigned PSBT and its change output ride with the record: a Speed up rebuilds from them, also after a reload.
+      const meta = { kind: "mine", ticker, address: addr, psbt: built.psbtHex, changeVout: built.changeVout ?? null };
+      const item = (txid) => newPendingMine({ txid, ticker, psbt: built.psbtHex, changeVout: built.changeVout ?? null });
+      setSpare(spareFeeInputs({ utxos: utxoRes.utxos, tokenOutpoints, used: built.inputs, assetSafe: utxoRes.assetSafe, address: addr, feeRate: built.feeRateSatVb }));
+      let txid;
+      try {
+        txid = await wallet.broadcastSignedPsbt(signed, meta);
+      } catch (e) {
+        // Neither relay confirmed it, but it may still reach the network (it
+        // is recorded): it joins the list and is followed like any other —
+        // seen, confirmed, or given up after the grace period.
+        if (e?.recorded && e.txid) {
+          addPendingTokenOutpoints([{ txid: e.txid, vout: 0 }], addr);
+          setPendings((l) => addPendingMine(l, item(e.txid)));
+        }
+        throw e;
+      }
       addPendingTokenOutpoints([{ txid, vout: 0 }], addr);
       // Into the pending list; the button is free again for the next MINE.
-      setPendings((l) => addPendingMine(l, newPendingMine({ txid, ticker })));
+      setPendings((l) => addPendingMine(l, item(txid)));
       setFlow(IDLE_MINE);
     } catch (e) {
       // Stop waiting (or the page left): back to idle, nothing to report.
@@ -160,6 +212,79 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       seedWait.done(signal);
     }
   }, [walletState, tokenInfo, ticker, feeRateSatVb, seedWait]);
+
+  /** The replacement a Speed up of pending MINE `txid` at `rate` would sign, `{ error, code }` when it cannot, or null. Pure preview. */
+  const speedUpQuote = useCallback(
+    (txid, rate) => {
+      const x = pendingsRef.current.find((p) => p.txid === txid);
+      if (!x || mineSpeedUpState(x) === "no") return null;
+      try {
+        return buildSpeedUpPsbt({ psbtHex: x.psbt, changeVout: x.changeVout, feeRateSatVb: rate, incrementalRelayFee });
+      } catch (e) {
+        return { error: String(e?.message || e), code: e?.code || null };
+      }
+    },
+    [incrementalRelayFee],
+  );
+
+  /** Replace pending MINE `txid` with a copy that pays `rate` sat/vB (same inputs, outputs and payload) and follow it. */
+  const speedUp = useCallback(
+    async (txid, rate) => {
+      const x = pendingsRef.current.find((p) => p.txid === txid);
+      if (!x || !address || x.speeding || mineSpeedUpState(x) !== "yes") return;
+      const set = (fn) => setPendings((l) => updatePendingMine(l, txid, fn));
+      set((p) => ({ ...p, speeding: "building", speedError: null }));
+      try {
+        const st = await indexer.txStatus(txid);
+        if (st && st.confirmed) throw new Error("It has just confirmed — no need to speed it up.");
+        const q = buildSpeedUpPsbt({ psbtHex: x.psbt, changeVout: x.changeVout, feeRateSatVb: rate, incrementalRelayFee });
+        // The same guard as the first signature: one OP_RETURN, a MINE of this ticker.
+        expectPsbtPayload(q.psbtHex, { op: "MINE", ticker: x.ticker });
+        set((p) => ({ ...p, speeding: "signing" }));
+        // A replacement: the inputs of every version it replaces may be spent
+        // again — an earlier one whose faster copy was never confirmed as
+        // sent still keeps its record.
+        const signed = await wallet.signPsbt(q.psbtHex, { inputIndexes: q.inputIndexes, address, replaces: mineVersions(x) });
+        set((p) => ({ ...p, speeding: "broadcasting" }));
+        const replaces = [...(x.replaces || []), txid];
+        let newTxid;
+        let unsure = null;
+        try {
+          newTxid = await wallet.broadcastSignedPsbt(signed, { kind: "mine", ticker: x.ticker, address, psbt: q.psbtHex, changeVout: x.changeVout, replaces });
+        } catch (e) {
+          // Neither relay confirmed the faster version, but it may still
+          // reach the network (it is recorded): the item follows it and
+          // keeps asking about the earlier one.
+          if (!(e?.recorded && e.txid)) throw e;
+          newTxid = e.txid;
+          unsure = e;
+        }
+        // The replacement spends the same inputs: its record guards them now
+        // (the earlier record stays while the faster one is not seen).
+        if (!unsure) forgetTx(address, txid);
+        addPendingTokenOutpoints([{ txid: newTxid, vout: 0 }], address);
+        const now = Date.now();
+        setPendings((l) =>
+          updatePendingMine(l, txid, (p) => ({
+            ...p,
+            txid: newTxid,
+            psbt: q.psbtHex,
+            replaces,
+            unseenSince: now,
+            lastChecked: null,
+            pollError: null,
+            speeding: null,
+            speedError: unsure ? friendlyError(unsure) : null,
+            feeSats: q.feeSats,
+            feeRateSatVb: q.feeRateSatVb,
+          })),
+        );
+      } catch (e) {
+        set((p) => ({ ...p, speeding: null, speedError: friendlyError(e) }));
+      }
+    },
+    [address, incrementalRelayFee],
+  );
 
   /** Clear the flow's error (the pending list is untouched). */
   const resetMine = useCallback(() => setFlow((f) => (MINE_FLOW_BUSY.has(f.phase) ? f : IDLE_MINE)), []);
@@ -223,38 +348,74 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
           continue;
         }
         if (!alive) return;
-        const cur = pendingsRef.current.find((x) => x.txid === txid);
-        if (!cur) continue;
+        // A MINE that was sped up: while it is not confirmed, every earlier
+        // version is asked about too — the one a block confirms is the MINE.
+        let version = txid;
+        if (before.phase !== "confirmed" && before.replaces?.length && !(s && s.confirmed)) {
+          const answers = [{ txid, status: s }];
+          for (const v of mineVersions(before).slice(1)) {
+            let vs = null;
+            try {
+              vs = await indexer.txStatus(v);
+            } catch {
+              vs = null;
+            }
+            answers.push({ txid: v, status: vs });
+          }
+          if (!alive) return;
+          const pick = pickMineVersion(before, answers);
+          version = pick.txid;
+          s = pick.status ?? s;
+        }
+        const cur0 = pendingsRef.current.find((x) => x.txid === txid);
+        if (!cur0) continue;
+        const cur = switchMineVersion(cur0, version);
         let next = applyMineStatus(cur, s, Date.now(), DROP_GRACE_MS, { trustUnseen: trustRef.current });
         if (next.phase === "dropped" && cur.phase === "pending") {
           // Before giving it up: the indexer's ledger may already hold it
-          // (confirmed while its node did not report the tx).
+          // (confirmed while its node did not report the tx) — any version of it.
           try {
-            const row = await indexer.mineByTxid(txid);
-            if (!alive) return;
-            if (row) next = confirmedFromRow(cur, row);
+            for (const v of mineVersions(cur)) {
+              const row = await indexer.mineByTxid(v);
+              if (!alive) return;
+              if (row) {
+                next = confirmedFromRow(switchMineVersion(cur, v), row);
+                break;
+              }
+            }
           } catch {
             next = { ...cur, lastChecked: Date.now() }; // unknown — ask again next time
           }
         }
-        if (next === cur) continue;
+        if (next === cur && cur === cur0) continue;
+        if (address && next.txid !== txid) {
+          // An earlier version confirmed instead of the faster one: its
+          // record (the same inputs) takes over the guard.
+          const inputs = txRecords(address).find((r) => r.txid === txid)?.inputs ?? [];
+          recordBroadcastTx(address, { txid: next.txid, kind: "mine", ticker: cur.ticker, inputs });
+          forgetTx(address, txid);
+          addPendingTokenOutpoints([{ txid: next.txid, vout: 0 }], address);
+        }
         // Given up: its record goes, but the item keeps the inputs — seen
         // again or confirmed after all, the record comes back and guards them
         // (until final) so no later build spends them again.
         if (address && next.phase === "dropped" && cur.phase !== "dropped") next = { ...next, inputs: txRecords(address).find((r) => r.txid === txid)?.inputs ?? [] };
-        setPendings((l) => updatePendingMine(l, txid, (x) => (x === cur || x.phase === cur.phase ? withDepth(next, tip) : x)));
+        setPendings((l) => updatePendingMine(l, txid, (x) => (x === cur0 || x.phase === cur0.phase ? withDepth(next, tip) : x)));
         if (!address) continue;
-        if (cur.phase === "dropped" && next.phase !== "dropped" && Array.isArray(cur.inputs)) recordBroadcastTx(address, { txid, kind: "mine", ticker: cur.ticker, inputs: cur.inputs });
+        const t = next.txid;
+        if (cur.phase === "dropped" && next.phase !== "dropped" && Array.isArray(cur.inputs)) recordBroadcastTx(address, { txid: t, kind: "mine", ticker: cur.ticker, inputs: cur.inputs });
         if (next.phase === "dropped" && cur.phase !== "dropped") {
-          forgetTx(address, txid);
+          forgetTx(address, t);
         } else if (next.phase === "confirmed" && (cur.phase !== "confirmed" || next.blockHash !== cur.blockHash)) {
           // The record stays until the block is final and the credit shown:
           // leaving the page before that still resumes this MINE.
-          markTxConfirmed(address, txid, next.blockHeight);
+          markTxConfirmed(address, t, next.blockHeight);
+          // A change output confirmed: what the wallet can spend next is not known any more.
+          if (cur.phase !== "confirmed") setSpare(null);
           settledRef.current?.();
         } else if (next.phase === "pending" && cur.phase === "confirmed") {
           // Back in the mempool (a chain reorganization): guarded again.
-          markTxUnconfirmed(address, txid);
+          markTxUnconfirmed(address, t);
           settledRef.current?.();
         }
       }
@@ -315,11 +476,14 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
     mine: mineFocus(flow, pendings),
     flow,
     pendings,
+    spare,
     startMine,
     resetMine,
     stopWaiting,
     dismissMine,
     clearFinished,
+    speedUp,
+    speedUpQuote,
     busy: MINE_FLOW_BUSY.has(flow.phase),
   };
 }

@@ -5,7 +5,7 @@ import { friendlyError } from "../hooks/useWallet.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useDeployLog } from "../hooks/useMinerLog.js";
 import { useFeeRate } from "../hooks/useFeeRate.js";
-import { useCommitReveal } from "../hooks/useCommitReveal.js";
+import { txidOfRaw, useCommitReveal } from "../hooks/useCommitReveal.js";
 import { MAX_FEE_RATE_SAT_VB, estimateCommitFeeSats, estimateRevealFeeSats, speedUpFloorRate } from "../lib/psbt.js";
 import { refreshTxRecords, txRecords } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
@@ -17,6 +17,7 @@ import {
   EXPIRY_WARN_BLOCKS,
   PUBLISH_CUTOFF_BLOCKS,
   PUBLISH_MIN_CONFIRMATIONS,
+  canResendStep,
   commitStatusText,
   expiryText,
   invalidReasonText,
@@ -71,13 +72,13 @@ function ownDeployText(ticker, own) {
 }
 
 export default function CreatePage({ params, navigate }) {
-  const { wallet: walletState, address, pubkeyHex, fee, fees, indexerOk, health, sync, tipBlock, refreshAll } = useApp();
+  const { wallet: walletState, address, pubkeyHex, fee, fees, indexerOk, sync, tipBlock, refreshAll, chainTip } = useApp();
   const connected = walletState.status === "connected";
   const providerName = walletState.providerName;
   // Reserving is locked below UNLOCK_HEIGHT (969,299); an UNKNOWN tip counts
   // as locked — the gate fails closed. The app's lock time keeps anything
   // sent from confirming before ACTIVATION_HEIGHT.
-  const tipNow = health.data?.tip_height ?? null;
+  const tipNow = chainTip;
   const preActivation = activationState(tipNow).locked;
 
   // ---- the Deploy // log buffer (the flow hook writes into it) ------------------------------------
@@ -358,7 +359,7 @@ export default function CreatePage({ params, navigate }) {
     minted: 0,
     deployer: address || "bc1p…you",
     deploy_txid: "0".repeat(64),
-    deploy_block: health.data?.tip_height ? health.data.tip_height + 1 : 0,
+    deploy_block: chainTip ? chainTip + 1 : 0,
     holders: 0,
     mine_count: 0,
   };
@@ -847,7 +848,7 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
             </>
           ) : (
             <>
-              Abandon {rec?.ticker}?{phase === "reserve-pending" || phase === "reserve-unseen" ? " Step 1 may still confirm." : ""}
+              Abandon {rec?.ticker}?{phase === "reserve-pending" || phase === "reserve-unseen" || phase === "reserve-unsent" ? " Step 1 may still confirm." : ""}
               {phase === "publish-unseen" ? " Step 2 may still confirm — and still count as yours." : ""} Its {fmtInt(DUST_SATS)}-sat output stays in your wallet, but this reservation can no
               longer publish the name.
             </>
@@ -873,6 +874,13 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
         Abandon reservation
       </button>
     );
+  // "Send again": the same signed transaction (same txid) relayed once more.
+  const resendBtn = (step) =>
+    canResendStep(rec?.[step], txidOfRaw) ? (
+      <button className="btn btn-sm" type="button" onClick={() => cr.resend(step)} disabled={cr.busy}>
+        Send again
+      </button>
+    ) : null;
   const doneBtn = (
     <button className="btn btn-sm" type="button" onClick={cr.finish} disabled={cr.busy}>
       Done
@@ -930,17 +938,35 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
         break;
       case "reserve-unseen":
         led = "busy";
-        text = `Step 1 has not been seen by the indexer's node for a few minutes and has not confirmed. It may still confirm, so your reservation code stays saved and this page keeps checking. If you are sure it is gone, abandon the reservation and reserve again.`;
-        actions = abandonBtn();
+        text = `Step 1 has not been seen by the indexer's node for a few minutes and has not confirmed. It may still confirm, so your reservation code stays saved and this page keeps checking. You can send the same signed transaction again; if you are sure it is gone, abandon the reservation and reserve again.`;
+        actions = (
+          <>
+            {resendBtn("commit")}
+            {abandonBtn()}
+          </>
+        );
         break;
       case "publish-unseen":
         led = "busy";
-        text = `Step 2 has not been seen by the indexer's node for a few minutes. It may still confirm; this page keeps checking and opens Publish again if it is gone.`;
-        actions = abandonBtn();
+        text = `Step 2 has not been seen by the indexer's node for a few minutes. It may still confirm; this page keeps checking and opens Publish again if it is gone. You can send the same signed transaction again.`;
+        actions = (
+          <>
+            {resendBtn("reveal")}
+            {abandonBtn()}
+          </>
+        );
         break;
       case "reserve-unsent":
         led = "busy";
-        text = "Checking whether step 1 reached the network…";
+        text = canResendStep(rec.commit, txidOfRaw)
+          ? "Step 1 is signed, but no relay confirmed that it was sent. It may still have reached the network, so your reservation code stays saved and this page keeps checking. Send the same signed transaction again, or wait."
+          : "Checking whether step 1 reached the network…";
+        actions = (
+          <>
+            {resendBtn("commit")}
+            {abandonBtn()}
+          </>
+        );
         break;
       case "reserve-pending":
         led = "busy";
@@ -1012,7 +1038,10 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
         break;
       case "publish-unsent":
         led = "busy";
-        text = "Checking whether step 2 reached the network…";
+        text = canResendStep(rec.reveal, txidOfRaw)
+          ? "Step 2 is signed, but no relay confirmed that it was sent. It may still have reached the network, so this page keeps checking. Send the same signed transaction again, or wait."
+          : "Checking whether step 2 reached the network…";
+        actions = resendBtn("reveal");
         break;
       case "publish-pending":
         led = "busy";
@@ -1143,7 +1172,7 @@ function SettlingNotes({ cr, indexed }) {
 
 /** Why Reserve is off while no reservation is open, or null when nothing but the fee rate can stop it. */
 function idleReason({ indexerOk, preActivation, valid, availState, typed, sync }) {
-  if (!indexerOk) return "Indexer offline — token creation paused until it is reachable.";
+  if (!indexerOk) return "The indexer is not answering right now — token creation is paused until it does.";
   if (preActivation) return lockedHint();
   if (!typed) return "Type a ticker to check whether it is free.";
   if (!valid) return "Tickers are 1–8 characters, A–Z and 0–9.";
