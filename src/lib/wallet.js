@@ -27,6 +27,7 @@ import * as indexer from "./indexer.js";
 import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
 import { MIN_FEE_INPUT_SATS_UNSAFE, assertSingleOpReturn, extractRawTxHex, p2trAddressOfXOnly, psbtInputKeys, rawTxSummary, signedTxMismatch } from "./psbt.js";
 import { DUST_SATS } from "./payloads.js";
+import { signedSighashMismatch } from "./sighash.js";
 import { isAbortError, retryWhileSeeding, seedFailureText } from "./retry.js";
 import { pendingSpentOutpoints, recordBroadcastTx, refreshTxRecords, txRecords } from "./txrecords.js";
 import {
@@ -667,7 +668,10 @@ function guardedOutpoints(address, replaces) {
  * address's own broadcasts that is not final, is refused BEFORE the wallet
  * opens (`code: "busy"`). The PSBT the wallet returns must carry the very
  * transaction it was given — version, lock time, every input's outpoint
- * and nSequence, every output — or nothing is broadcast.
+ * and nSequence, every output — and every input of `inputIndexes` must be
+ * signed with a type of `sighashTypes` (0x00 or 0x01 when unset; a listing
+ * asks for exactly 0x83), or nothing is broadcast (`code:
+ * "sighash-mismatch"` for a wrong type).
  *
  * Returns the signed PSBT hex.
  */
@@ -701,6 +705,17 @@ export async function signPsbt(psbtHex, { inputIndexes, address, autoFinalized =
     const changed = signedTxMismatch(psbtHex, signed);
     if (changed) {
       throw new Error(`${providerName()} changed the transaction while signing (${changed}), so nothing was sent. Update the wallet, or use another one, and try again.`);
+    }
+    // The signature TYPE decides token balances (§4 rule 6): a listing is
+    // signed 0x83 and nothing else; every other input this app asks for is
+    // signed over the whole transaction (0x00 / 0x01).
+    const allowed = Array.isArray(sighashTypes) && sighashTypes.length ? sighashTypes.map(Number) : [0x00, 0x01];
+    const bad = signedSighashMismatch(signed, inputIndexes, allowed);
+    if (bad) {
+      throw Object.assign(
+        new Error(`${providerName()}: ${bad}, not the type this transaction needs, so nothing was sent. Update the wallet, or use another one, and try again.`),
+        { code: "sighash-mismatch" },
+      );
     }
   } catch (e) {
     releaseInputs(held);

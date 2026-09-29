@@ -1,11 +1,12 @@
 // The Send page's pure logic — unit-tested in test/send.test.js.
 //
 // A SEND moves `AMT` of ONE ticker from the tx's input pool (the carriers
-// it spends) to vout0; the residual of that ticker AND every other ticker
-// on those carriers go to vout3, the sender's own 546-sat residual slot
-// (§2.3 / §4.1). So the same page that sends tokens to someone else also
-// splits a multi-ticker carrier: send the ticker to yourself and it lands
-// alone on vout0, the other tickers together on vout3.
+// it spends) to vout1; the rest of that ticker AND every other ticker on
+// those carriers go to vout2, the sender's own 546-sat residual output
+// (§2.3 / §4.1). vout0 is the protocol fee output. So the same page that
+// sends tokens to someone else also splits a multi-ticker carrier: send the
+// ticker to yourself and it lands alone on vout1, the other tickers
+// together on vout2.
 //
 //   sendCarrierRows   the address's carriers of a ticker, with why a row
 //                     cannot be spent right now (listed / fill pending /
@@ -21,14 +22,14 @@
 //   sendVersions      every version of a sped-up send (switchSendVersion follows one)
 
 import { checkRecipientAddress } from "./psbt.js";
-import { DUST_SATS, PROJECT_FEE_ADDRESS, SEND_PROTOCOL_FEE_SATS } from "./payloads.js";
+import { DUST_SATS, PROJECT_FEE_ADDRESS, SEND_PROTOCOL_FEE_SATS, SEND_RESIDUAL_VOUT, SEND_TO_VOUT } from "./payloads.js";
 import { fmtUnit } from "./format.js";
 
 const key = (u) => `${String(u.txid).toLowerCase()}:${Number(u.vout)}`;
 
-/** Your token outputs of a SEND just broadcast: vout3 (residual slot) always, vout0 too when it pays you. */
+/** Your token outputs of a SEND just broadcast: vout2 (the residual output) always, vout1 too when it pays you. */
 export function sendPendingOutpoints(txid, { toSelf = false } = {}) {
-  return toSelf ? [{ txid, vout: 0 }, { txid, vout: 3 }] : [{ txid, vout: 3 }];
+  return toSelf ? [{ txid, vout: SEND_TO_VOUT }, { txid, vout: SEND_RESIDUAL_VOUT }] : [{ txid, vout: SEND_RESIDUAL_VOUT }];
 }
 
 /** Every txid a send has had: the current version first, then the ones a Speed up replaced, newest first. */
@@ -100,7 +101,7 @@ export function carrierNote(row, ticker) {
   if (row.offBook) {
     return `an earlier listing of it can still be bought at ${fmtUnit(row.offBook.unit_price)} sats per token — sending it cancels that listing`;
   }
-  if (row.others.length) return `also carries ${row.others.map(([t, a]) => `${Number(a).toLocaleString("en-US")} ${t}`).join(", ")} — those go to your residual carrier (vout3), not to the recipient`;
+  if (row.others.length) return `also carries ${row.others.map(([t, a]) => `${Number(a).toLocaleString("en-US")} ${t}`).join(", ")} — those go to your residual carrier (vout2), not to the recipient`;
   if (Number.isInteger(row.sats) && row.sats > DUST_SATS) return `also holds ${row.sats.toLocaleString("en-US")} sats of BTC — they come back to you as change`;
   return `${ticker} only`;
 }
@@ -118,7 +119,7 @@ const autoEligible = (r) => !r.blocked && Number.isInteger(r.sats);
  * carrier holding exactly the amount; else the smallest single-ticker
  * carrier that covers it; else single-ticker carriers largest-first; only
  * then carriers that also hold other tickers (they drag those tickers
- * into the residual slot — harmless, but not what a plain send expects).
+ * into the residual output — harmless, but not what a plain send expects).
  */
 export function autoPickCarriers(rows, amount) {
   const a = Number(amount);
@@ -273,9 +274,9 @@ export function pendingSendsOf(records, ticker) {
 /**
  * What each output of the SEND carries, for the confirm screen:
  * `[{ vout, sats, to, carries }]` in the §2.3 reference layout, from the
- * picked rows' balances (the input pool) — vout0 gets `amount` of the
- * ticker, vout3 the rest of it plus every other ticker. `changeSats` null
- * = "BTC change, if ≥ 546 sats".
+ * picked rows' balances (the input pool) — vout0 is the protocol fee,
+ * vout1 gets `amount` of the ticker, vout2 the rest of it plus every other
+ * ticker. `changeSats` null = "BTC change, if ≥ 546 sats".
  */
 export function sendLayout({ rows, keys, ticker, amount, toAddress, self, payloadText, changeSats = null }) {
   const set = new Set(keys || []);
@@ -291,10 +292,10 @@ export function sendLayout({ rows, keys, ticker, amount, toAddress, self, payloa
     .map(([t, a]) => `${a.toLocaleString("en-US")} ${t}`)
     .join(" + ");
   return [
-    { vout: 0, sats: DUST_SATS, to: toAddress === self ? "you (new carrier)" : toAddress, carries: `${amt.toLocaleString("en-US")} ${ticker}` },
-    { vout: 1, sats: SEND_PROTOCOL_FEE_SATS, to: "protocol fee address", carries: "—" },
-    { vout: 2, sats: 0, to: "OP_RETURN", carries: payloadText || "" },
-    { vout: 3, sats: DUST_SATS, to: "you (residual carrier)", carries: residualText || "nothing (this output is always there)" },
+    { vout: 0, sats: SEND_PROTOCOL_FEE_SATS, to: "protocol fee address", carries: "—" },
+    { vout: SEND_TO_VOUT, sats: DUST_SATS, to: toAddress === self ? "you (new carrier)" : toAddress, carries: `${amt.toLocaleString("en-US")} ${ticker}` },
+    { vout: SEND_RESIDUAL_VOUT, sats: DUST_SATS, to: "you (residual carrier)", carries: residualText || "nothing (this output is always there)" },
+    { vout: 3, sats: 0, to: "OP_RETURN", carries: payloadText || "" },
     { vout: 4, sats: changeSats, to: "you (BTC change)", carries: "— never tokens" },
   ];
 }

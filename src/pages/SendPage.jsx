@@ -9,8 +9,8 @@ import FeeSelector from "../components/FeeSelector.jsx";
 import TxProgress, { ConnectPrompt } from "../components/TxProgress.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
-import { estimateSendFeeSats } from "../lib/psbt.js";
-import { buildSendPayload, DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "../lib/payloads.js";
+import { SEND_OP_RETURN_VOUT, estimateSendFeeSats } from "../lib/psbt.js";
+import { buildSendPayload, DUST_SATS, SEND_PROTOCOL_FEE_SATS, SEND_TO_VOUT } from "../lib/payloads.js";
 import { missingFeeHint } from "../lib/feechoice.js";
 import { pendingSpentOutpoints, refreshTxRecords, txRecords } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
@@ -20,16 +20,14 @@ import { readSellerOrders } from "../lib/listingRules.js";
 import { fmtInt, fmtSats, shortAddr, shortTxid, txUrl } from "../lib/format.js";
 
 const POLL_MS = 15_000;
-const SEND_TO_OUT = 0;
-const SEND_CHANGE_OUT = 3;
 
 /**
  * Send any LUCKY-20 token: to another address, or to
  * yourself — which is how a carrier is split, including a carrier that
  * holds several tickers. One SEND in the
- * §2.3 reference layout: vout0 546 sats → recipient with the amount,
- * vout1 546 → protocol fee, vout2 OP_RETURN, vout3 546 → you (the rest of
- * this ticker and every other ticker on the carriers spent), vout4 BTC
+ * §2.3 reference layout: vout0 546 sats → protocol fee, vout1 546 →
+ * recipient with the amount, vout2 546 → you (the rest of this ticker and
+ * every other ticker on the carriers spent), vout3 OP_RETURN, vout4 BTC
  * change. Form → confirm screen → sign → pending → confirmed.
  *
  * Route: #/send/<TICKER>[?utxo=<txid:vout>&to=self] — the portfolio's
@@ -141,12 +139,12 @@ export default function SendPage({ ticker, params = {} }) {
   // The OP_RETURN the confirm screen shows; an amount the payload grammar refuses (> 21,000,000) shows none.
   let payloadText = "";
   try {
-    if (amount) payloadText = new TextDecoder().decode(buildSendPayload({ ticker, amount, toOutIdx: SEND_TO_OUT, changeOutIdx: SEND_CHANGE_OUT }));
+    if (amount) payloadText = new TextDecoder().decode(buildSendPayload({ ticker, amount }));
   } catch {
     payloadText = "";
   }
 
-  const formOk = connected && indexerOk && !lagText && rcpt.state === "ok" && !!amount && !amountErr && keys.length > 0 && pickedAmount(rows, keys) >= amount && !unknownPicked && !!fee.satVb;
+  const formOk = connected && indexerOk && !lagText && rcpt.state === "ok" && !rcpt.feeAddress && !!amount && !amountErr && keys.length > 0 && pickedAmount(rows, keys) >= amount && !unknownPicked && !!fee.satVb;
   const whyNot = sendFormHint({
     connected,
     indexerOk,
@@ -210,7 +208,7 @@ export default function SendPage({ ticker, params = {} }) {
   // The review: the live form until Sign, then what was signed.
   const review = inFlight && sent ? sent : sendReviewModel({ rows, keys, ticker, amount: amount || 0, toAddress: rcpt.address, self: address, payloadText, feeRateSatVb: fee.satVb });
   const reviewSelf = review.toSelf;
-  // vout0's 546 sats leave with the tokens — unless vout0 pays yourself (a split).
+  // vout1's 546 sats leave with the tokens — unless vout1 pays yourself (a split).
   const carrierOut = toSelf ? 0 : DUST_SATS;
   const btcOut = carrierOut + SEND_PROTOCOL_FEE_SATS + (est?.feeSats ?? 0);
 
@@ -263,11 +261,11 @@ export default function SendPage({ ticker, params = {} }) {
               {rcpt.state === "invalid" && <div className="err">{rcpt.error.replace(/^./, (c) => c.toUpperCase())}.</div>}
               {toSelf && (
                 <div className="notice">
-                  This is your own address. Sending to yourself moves the {ticker} onto a new 546-sat carrier (vout0) — that is how a carrier is split; the tokens stay yours. It still costs the protocol
+                  This is your own address. Sending to yourself moves the {ticker} onto a new 546-sat carrier (vout1) — that is how a carrier is split; the tokens stay yours. It still costs the protocol
                   fee and the network fee.
                 </div>
               )}
-              {rcpt.feeAddress && <div className="err">This is the protocol fee address. Tokens sent there cannot be returned to you.</div>}
+              {rcpt.feeAddress && <div className="err">That is the protocol fee address; tokens sent there cannot be moved by you.</div>}
             </div>
 
             <label className="send-field">
@@ -362,12 +360,12 @@ export default function SendPage({ ticker, params = {} }) {
 
             <dl className="totals">
               <div>
-                <dt>{toSelf ? "New carrier (vout0, stays yours)" : "Recipient carrier (vout0, goes with the tokens)"}</dt>
-                <dd className="mono">{fmtSats(DUST_SATS)}</dd>
+                <dt>Protocol fee (vout0)</dt>
+                <dd className="mono">{fmtSats(SEND_PROTOCOL_FEE_SATS)}</dd>
               </div>
               <div>
-                <dt>Protocol fee (vout1)</dt>
-                <dd className="mono">{fmtSats(SEND_PROTOCOL_FEE_SATS)}</dd>
+                <dt>{toSelf ? "New carrier (vout1, stays yours)" : "Recipient carrier (vout1, goes with the tokens)"}</dt>
+                <dd className="mono">{fmtSats(DUST_SATS)}</dd>
               </div>
               <div>
                 <dt>Network fee{est && fee.satVb ? ` (≈ ${fmtInt(est.vsize)} vB @ ${fee.satVb} sat/vB)` : ""}</dt>
@@ -378,7 +376,7 @@ export default function SendPage({ ticker, params = {} }) {
                 <dd className="mono">{est && fee.satVb ? `≈ ${fmtSats(btcOut)}` : "—"}</dd>
               </div>
             </dl>
-            <p className="fineprint">Your residual carrier (vout3, {DUST_SATS} sats) stays yours; BTC change comes back as vout4 when it is at least {DUST_SATS} sats.</p>
+            <p className="fineprint">Your residual carrier (vout2, {DUST_SATS} sats) stays yours; BTC change comes back as vout4 when it is at least {DUST_SATS} sats.</p>
 
             {whyNot && step === "form" && !inFlight && <div className="muted">{whyNot}</div>}
             <div className="sheet-actions">
@@ -418,8 +416,8 @@ export default function SendPage({ ticker, params = {} }) {
                     <tr key={o.vout}>
                       <td className="mono">{o.vout}</td>
                       <td className="mono">{o.sats === null ? "change" : fmtInt(o.sats)}</td>
-                      <td className={o.vout === 0 && !reviewSelf ? "mono send-to" : undefined}>{o.vout === 0 && !reviewSelf ? shortAddr(o.to, 10, 8) : o.to}</td>
-                      <td className={o.vout === 2 ? "mono send-payload" : undefined}>{o.carries}</td>
+                      <td className={o.vout === SEND_TO_VOUT && !reviewSelf ? "mono send-to" : undefined}>{o.vout === SEND_TO_VOUT && !reviewSelf ? shortAddr(o.to, 10, 8) : o.to}</td>
+                      <td className={o.vout === SEND_OP_RETURN_VOUT ? "mono send-payload" : undefined}>{o.carries}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -427,7 +425,7 @@ export default function SendPage({ ticker, params = {} }) {
               {review.others.length > 0 && (
                 <div className="notice">
                   {review.others.length === 1 ? "A carrier you spend also holds" : "Carriers you spend also hold"}{" "}
-                  {review.others.flatMap((r) => r.others.map(([t, a]) => `${fmtInt(a)} ${t}`)).join(", ")} — {reviewSelf ? "they move together onto your residual carrier (vout3), separate from the " + ticker : "they stay yours, on your residual carrier (vout3); only the " + ticker + " goes to the recipient"}.
+                  {review.others.flatMap((r) => r.others.map(([t, a]) => `${fmtInt(a)} ${t}`)).join(", ")} — {reviewSelf ? "they move together onto your residual carrier (vout2), separate from the " + ticker : "they stay yours, on your residual carrier (vout2); only the " + ticker + " goes to the recipient"}.
                 </div>
               )}
               {review.listed.length > 0 && (
@@ -476,7 +474,7 @@ export default function SendPage({ ticker, params = {} }) {
                   pending: `${chain.toAddress === address ? "Split" : "Send"} broadcast. Pending confirmation — checking every 15 s.`,
                   confirmed:
                     chain.toAddress === address
-                      ? `Done. ${fmtInt(chain.amount ?? 0)} ${ticker} are on a new carrier of yours (vout0); the rest is on your residual carrier (vout3).`
+                      ? `Done. ${fmtInt(chain.amount ?? 0)} ${ticker} are on a new carrier of yours (vout1); the rest is on your residual carrier (vout2).`
                       : `Sent. ${fmtInt(chain.amount ?? 0)} ${ticker} are on ${shortAddr(chain.toAddress || "", 8, 6)}'s new carrier.`,
                 }}
               />

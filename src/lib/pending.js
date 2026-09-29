@@ -1,6 +1,6 @@
 // Client-side registry of outpoints that WILL carry tokens once a tx we just
-// broadcast confirms (MINE vout0, SEND-to-self vout0 + vout3, fill vout1 +
-// vout4).
+// broadcast confirms (MINE vout0, SEND-to-self vout1 + vout2, fill vout1 +
+// vout2).
 //
 // The §4 builder obligation excludes ≤546-sat outputs and everything the
 // indexer's /utxos/:addr reports — but the indexer only reports token

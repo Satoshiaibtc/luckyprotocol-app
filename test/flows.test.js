@@ -1,9 +1,9 @@
 // Pure-part tests for the write-flow safety nets: the indexer-lag gate
 // (src/lib/sync.js), the broadcast records (src/lib/txrecords.js), the
 // /btc-utxos seeding retry (src/lib/retry.js), wallet-vs-node error tagging
-// and the "did the failed broadcast land?" check (src/lib/wallet.js), and
-// the mock indexer's §4.1 routing (src/lib/mockRouting.js). Plain Node, no
-// framework.
+// and the "did the failed broadcast land?" check (src/lib/wallet.js), the
+// mock indexer's §4.1 routing and §7.5 settlement (src/lib/mockRouting.js),
+// and the mock's held-DEPLOY knob. Plain Node, no framework.
 import assert from "node:assert/strict";
 import { syncPauseText, syncStateOf } from "../src/lib/sync.js";
 import {
@@ -36,9 +36,8 @@ import {
 import { seedWaitFields } from "../src/lib/httpError.js";
 import { LANDED_CHECK_WAITS_MS, landedOrThrow, nodeRefused, walletError } from "../src/lib/wallet.js";
 import { friendlyError } from "../src/hooks/useWallet.js";
-import { REVEAL_REASONS, defaultOutIdx, inputSighash, isFillOf, listedScriptType, revealRejection, routeDecision, settleListingSpend } from "../src/lib/mockRouting.js";
-import { commitHashFor } from "../src/lib/payloads.js";
-import { PROJECT_FEE_ADDRESS } from "../src/lib/payloads.js";
+import { defaultOutIdx, deployerOf, inputSighash, isFillOf, listedScriptType, listingSignedInputs, routeDecision, settleListingSpend } from "../src/lib/mockRouting.js";
+import { ACTIVATION_HEIGHT, PROJECT_FEE_ADDRESS } from "../src/lib/payloads.js";
 
 const TX = (c) => c.repeat(64);
 const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
@@ -497,162 +496,222 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const out = (vout, { address = null, sats = 546, opReturn = false, script = null } = {}) => ({ vout, sats, address: opReturn ? null : address, script: opReturn ? "6a0a" : script ?? (address ? "5120aa" : "51") });
   const FEE = (vout, sats) => out(vout, { address: PROJECT_FEE_ADDRESS, sats });
   const deployed = (t) => t === "LUCKY";
+  const H = ACTIVATION_HEIGHT + 100;
   // MINE: valid needs the fee; the residual goes to vout0 either way; no vout0 → burn
   const mine = { payload: { op: "MINE", ticker: "LUCKY" }, outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true })] };
-  assert.deepEqual(routeDecision(mine, { isDeployed: deployed }), { op: "MINE", valid: true, applied: true, reason: null, yieldVout: 0, send: null, residualVout: 0 });
+  assert.deepEqual(routeDecision(mine, { isDeployed: deployed }), { op: "MINE", valid: true, applied: true, reason: null, yieldVout: 0, send: null, residualVout: 0, listedTo: [] });
   // a MINE in its ticker's DEPLOY block is invalid (deploy_same_block); its residual still goes to vout0
-  const sameBlock = routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_700, height: 969_700 });
+  const sameBlock = routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => H, height: H });
   assert.deepEqual([sameBlock.valid, sameBlock.reason, sameBlock.yieldVout, sameBlock.residualVout], [false, "deploy_same_block", null, 0]);
-  assert.equal(routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_700, height: 969_701 }).valid, true, "the block after the DEPLOY: valid");
+  assert.equal(routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => H, height: H + 1 }).valid, true, "the block after the DEPLOY: valid");
   assert.equal(routeDecision(mine, { isDeployed: () => false }).reason, "not_deployed");
   const feeless = { ...mine, outputs: [out(0, { address: ADDR }), out(1, { opReturn: true })] };
-  assert.equal(routeDecision(feeless, { isDeployed: deployed }).valid, false, "no exact 546-sat fee output → invalid");
+  assert.equal(routeDecision(feeless, { isDeployed: deployed }).reason, "fee_missing", "no exact 546-sat fee output → invalid");
   assert.equal(routeDecision(feeless, { isDeployed: deployed }).residualVout, 0, "…but its residual still goes to vout0");
   const noV0 = { ...mine, outputs: [out(0, { opReturn: true }), FEE(1, 546)] };
   assert.equal(routeDecision(noV0, { isDeployed: deployed }).residualVout, null, "vout0 an OP_RETURN → burn, no fall-back");
+  assert.equal(routeDecision(noV0, { isDeployed: deployed }).reason, "vout0_unusable");
   const addrless0 = { ...mine, outputs: [out(0), FEE(1, 546), out(2, { opReturn: true })] };
   assert.equal(routeDecision(addrless0, { isDeployed: deployed }).valid, true, "an address-less vout0 is still credited (named index)");
-  // SEND: applied needs pool ≥ AMT, a real TO_OUT and the fee
-  const send = { payload: { op: "SEND", ticker: "LUCKY", amount: 100, toOutIdx: 0, changeOutIdx: 3 }, outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true }), out(3, { address: ADDR })] };
-  assert.deepEqual(routeDecision(send, { pool: { LUCKY: 150 } }).send, { vout: 0, ticker: "LUCKY", amount: 100 });
-  assert.equal(routeDecision(send, { pool: { LUCKY: 50 } }).applied, false);
-  const sendNoFee = { ...send, outputs: [out(0, { address: ADDR }), out(1, { address: ADDR }), out(2, { opReturn: true }), out(3, { address: ADDR })] };
-  assert.equal(routeDecision(sendNoFee, { pool: { LUCKY: 150 } }).applied, false, "no fee output → not applied");
-  const badChange = { ...send, payload: { ...send.payload, changeOutIdx: 9 } };
-  assert.equal(routeDecision(badChange, { pool: { LUCKY: 150 } }).residualVout, 0, "CHANGE_OUT missing → the default output");
+
+  // SEND: fixed outputs — AMT → vout1, the rest → vout2; applied needs pool ≥ AMT, a real vout1 and the fee
+  const BOB = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+  const sendPayload = { op: "SEND", ticker: "LUCKY", amount: 100 };
+  const send = { payload: sendPayload, outputs: [FEE(0, 546), out(1, { address: BOB }), out(2, { address: ADDR }), out(3, { opReturn: true })] };
+  const applied = routeDecision(send, { pool: { LUCKY: 150 } });
+  assert.deepEqual([applied.applied, applied.send, applied.residualVout], [true, { vout: 1, ticker: "LUCKY", amount: 100 }, 2]);
+  const short = routeDecision(send, { pool: { LUCKY: 50 } });
+  assert.deepEqual([short.applied, short.send, short.residualVout], [false, null, 2], "pool < AMT: nothing to vout1, the whole pool → vout2");
+  assert.equal(routeDecision({ ...send, outputs: [out(0, { address: ADDR }), out(1, { address: BOB }), out(2, { address: ADDR }), out(3, { opReturn: true })] }, { pool: { LUCKY: 150 } }).applied, false, "no fee output → not applied");
+  assert.equal(routeDecision({ ...send, outputs: [FEE(0, 547), out(1, { address: BOB }), out(2, { address: ADDR }), out(3, { opReturn: true })] }, { pool: { LUCKY: 150 } }).applied, false, "the fee must be exact");
+  const feeAnywhere = { ...send, outputs: [out(0, { address: ADDR }), out(1, { address: BOB }), out(2, { address: ADDR }), out(3, { opReturn: true }), FEE(4, 546)] };
+  assert.equal(routeDecision(feeAnywhere, { pool: { LUCKY: 150 } }).applied, true, "the fee output may sit anywhere");
+  const v1OpRet = { ...send, outputs: [FEE(0, 546), out(1, { opReturn: true }), out(2, { address: ADDR })] };
+  assert.deepEqual([routeDecision(v1OpRet, { pool: { LUCKY: 150 } }).applied, routeDecision(v1OpRet, { pool: { LUCKY: 150 } }).residualVout], [false, 2], "vout1 an OP_RETURN → not applied");
+  const v2OpRet = { ...send, outputs: [FEE(0, 546), out(1, { address: BOB }), out(2, { opReturn: true })] };
+  const dv2 = routeDecision(v2OpRet, { pool: { LUCKY: 150 } });
+  assert.deepEqual([dv2.applied, dv2.send?.vout, dv2.residualVout], [true, 1, 0], "vout2 an OP_RETURN: AMT still → vout1, the rest → the default output — vout0, the fee output");
+  const onlyTwo = { ...send, outputs: [FEE(0, 546), out(1, { address: BOB }), out(2, { opReturn: true })].slice(0, 2) };
+  assert.equal(routeDecision(onlyTwo, { pool: { LUCKY: 150 } }).residualVout, 0, "vout2 missing → the default output");
   // default output: first non-OP_RETURN; address-less → burn (no skipping)
   assert.equal(defaultOutIdx([out(0, { opReturn: true }), out(1, { address: ADDR })]), 1);
   assert.equal(defaultOutIdx([out(0), out(1, { address: ADDR })]), null, "address-less first output → burn");
   assert.equal(routeDecision({ payload: null, outputs: [out(0), out(1, { address: ADDR })] }).residualVout, null);
-  // COMMIT (§2.1): recorded open iff vout0 is a real addressed output; no fee; routes to the default output.
-  // H binds vout0's script — SPK_A / SPK_M are the carrier scripts of spec vectors 1 and 4.
-  const SPK_A = "51200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-  const SPK_M = "0014bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-  const MALLORY = "bc1qmallory";
-  const H = commitHashFor("NEW", "ab".repeat(16), SPK_A);
-  const commitTx = { txid: TX("c"), payload: { op: "COMMIT", hash: H }, inputs: [{ txid: TX("1"), vout: 0 }], outputs: [out(0, { address: ADDR, script: SPK_A }), out(1, { opReturn: true }), out(2, { address: ADDR, sats: 9_000 })] };
-  assert.deepEqual(routeDecision(commitTx).commit, { hash: H, carrier: `${TX("c")}:0`, carrier_script: SPK_A, committer: ADDR, status: "open", invalid_reason: null });
-  assert.equal(routeDecision(commitTx).residualVout, 0, "token inputs of a COMMIT route to the default output");
-  assert.equal(routeDecision({ ...commitTx, outputs: [out(0, { opReturn: true }), out(1, { address: ADDR })] }).commit.invalid_reason, "carrier_op_return", "vout0 an OP_RETURN → recorded invalid");
-  assert.equal(routeDecision({ ...commitTx, outputs: [out(0), out(1, { opReturn: true })] }).commit.invalid_reason, "carrier_no_address", "address-less vout0 → recorded invalid");
-  assert.equal(routeDecision({ ...commitTx, outputs: [] }).commit.status, "invalid", "no vout0 → recorded invalid (carrier_missing)");
-  // several COMMITs may carry one H — a copy in Mallory's COMMIT is recorded open, with HIS carrier script.
-  const copyTx = { ...commitTx, txid: TX("e"), outputs: [out(0, { address: MALLORY, script: SPK_M }), out(1, { opReturn: true })] };
-  assert.deepEqual(routeDecision(copyTx).commit, { hash: H, carrier: `${TX("e")}:0`, carrier_script: SPK_M, committer: MALLORY, status: "open", invalid_reason: null });
-  // the carrier's value is never read — a 0-sat vout0 is a carrier.
-  assert.equal(routeDecision({ ...commitTx, outputs: [out(0, { address: ADDR, sats: 0 }), out(1, { opReturn: true })] }).commit.status, "open");
-  // REVEAL = DEPLOY|T|SALT: input 0 spends an open commit whose H matches, 1 ≤ age ≤ 2016, exact 5,460 fee, name free
-  const payloadText = `LUCKY-20|DEPLOY|NEW|${"ab".repeat(16)}`;
-  const reveal = {
-    txid: TX("d"),
-    payload: { op: "DEPLOY", ticker: "NEW", salt: "ab".repeat(16) },
-    payloadText,
-    inputs: [{ txid: TX("c"), vout: 0 }, { txid: TX("2"), vout: 1 }],
-    outputs: [out(0, { address: "bc1qother" }), FEE(1, 5_460), out(2, { opReturn: true })],
-  };
-  const open = { hash: H, carrier_script: SPK_A, height: 969_700, committer: ADDR };
-  const at = (k) => (k === `${TX("c")}:0` ? open : null);
-  const ok = routeDecision(reveal, { isDeployed: deployed, commitAt: at, height: 969_701 });
-  assert.equal(ok.applied, true, "a reveal one block after its commit applies");
-  assert.equal(ok.deployer, ADDR, "deployer = the committer (the carrier's address), not vout0's or a signer's");
-  const why = (over = {}, ctx = {}) => revealRejection({ ...reveal, ...over }, { isDeployed: deployed, commit: open, height: 969_701, ...ctx });
-  assert.equal(why(), null);
-  assert.equal(why({ payload: { op: "DEPLOY", ticker: "NEW", salt: null } }), "commit_required", "the old 3-field DEPLOY never applies");
-  assert.equal(why({}, { commit: null }), "no_commit");
-  assert.equal(why({}, { commit: { ...open, status: "invalid" } }), "commit_invalid");
-  assert.equal(routeDecision({ ...reveal, inputs: [{ txid: TX("2"), vout: 1 }, { txid: TX("c"), vout: 0 }] }, { isDeployed: deployed, commitAt: at, height: 969_701 }).reason, "no_commit", "the carrier must be input 0");
-  assert.equal(why({ payloadText: `LUCKY-20|DEPLOY|NEW|${"cd".repeat(16)}` }), "hash_mismatch");
-  assert.equal(why({}, { commit: { ...open, height: 969_599 }, height: 969_600 }), "commit_before_activation");
-  assert.equal(why({}, { height: 969_700 }), "commit_too_recent", "same block as the commit");
-  assert.equal(why({}, { height: 969_700 + 2_016 }), null, "the last block of the window");
-  assert.equal(why({}, { height: 969_700 + 2_017 }), "commit_expired");
-  assert.equal(why({ outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true })] }), "fee_missing");
-  assert.equal(why({ payload: { op: "DEPLOY", ticker: "LUCKY", salt: "ab".repeat(16) }, payloadText: `LUCKY-20|DEPLOY|LUCKY|${"ab".repeat(16)}` }, { commit: { ...open, hash: commitHashFor("LUCKY", "ab".repeat(16), SPK_A) } }), "ticker_taken");
-  // The copy: Mallory's COMMIT of the owner's H, revealed with the owner's payload through HIS carrier → hash_mismatch,
-  // even when his reveal is the only one (rule 2 comes before rule 7).
-  const copied = { ...open, carrier_script: SPK_M, committer: MALLORY };
-  const front = routeDecision({ ...reveal, inputs: [{ txid: TX("e"), vout: 0 }, { txid: TX("3"), vout: 1 }] }, { isDeployed: deployed, commitAt: (k) => (k === `${TX("e")}:0` ? copied : null), height: 969_701 });
-  assert.equal(front.applied, false);
-  assert.equal(front.reason, "hash_mismatch", "a copied H never reveals through the copier's carrier");
-  assert.equal(front.deployer, null);
-  assert.equal(front.committer, MALLORY, "the row names the carrier it spent");
-  assert.equal(why({}, { commit: { ...open, carrier_script: "" } }), "hash_mismatch", "a record without its script never matches");
-  // Spec vectors 1 and 4 through the mock's rule 2: one payload, two scripts, two hashes.
-  const V = { ...reveal, payload: { op: "DEPLOY", ticker: "LUCKY", salt: "000102030405060708090a0b0c0d0e0f" }, payloadText: "LUCKY-20|DEPLOY|LUCKY|000102030405060708090a0b0c0d0e0f" };
-  const V1 = "1ac55b4c608ed7c39eb3dbcecaf04c41222d5b3c37b6343477c9a91d4a6f33fc";
-  const V4 = "740566381d71cf04e3ce2d5ffe62c03e65b13becf27bf963cd40e385d2e2bdf4";
-  const vc = (hash, script) => ({ hash, carrier_script: script, height: 969_700, committer: ADDR });
-  assert.equal(revealRejection(V, { commit: vc(V1, SPK_A), height: 969_701 }), null, "vector 1");
-  assert.equal(revealRejection(V, { commit: vc(V4, SPK_M), height: 969_701 }), null, "vector 4");
-  assert.equal(revealRejection(V, { commit: vc(V1, SPK_M), height: 969_701 }), "hash_mismatch", "vector 1's H through vector 4's script");
-  assert.equal(REVEAL_REASONS.length, 9);
-  // §7.5: the payment is judged at the listed input's index, and only a
-  // spend signed SIGHASH_SINGLE|ANYONECANPAY (the listing's own signature) fills.
+
+  // Signature types, read as the indexer reads a block (the spent output's type decides).
   const SIG64 = "11".repeat(64); // P2TR key path, SIGHASH_DEFAULT
-  const SIG65 = "11".repeat(64) + "83"; // P2TR key path, 0x83
+  const SIG65 = (b) => "11".repeat(64) + b; // P2TR key path with a sighash byte
   const DER = (b) => "30" + "44".repeat(69) + b; // a DER signature ending with its sighash byte
   const PUB = "02" + "22".repeat(32);
-  assert.equal(inputSighash([SIG64]), 0x00, "64-byte Schnorr: default sighash");
-  assert.equal(inputSighash([SIG65]), 0x83);
-  assert.equal(inputSighash([SIG65, "50aa"]), 0x83, "an annex does not hide the key-path signature");
-  assert.equal(inputSighash([DER("83"), PUB]), 0x83, "P2WPKH: the DER signature's last byte");
-  assert.equal(inputSighash([DER("01"), PUB]), 0x01);
-  assert.equal(inputSighash([]), null);
-  assert.equal(inputSighash(["00", "11", "22"]), null, "a script-path spend is no listing signature");
-  // With the spent output's script type — as the indexer reads a block — the type decides the rule:
+  assert.equal(inputSighash([SIG64], "tr"), 0x00, "64-byte Schnorr: default sighash");
+  assert.equal(inputSighash([SIG65("83")], "tr"), 0x83);
+  assert.equal(inputSighash([SIG65("83"), "50aa"], "tr"), 0x83, "an annex does not hide the key-path signature");
+  assert.equal(inputSighash([DER("83"), PUB], "wpkh"), 0x83, "P2WPKH: the DER signature's last byte");
+  assert.equal(inputSighash([DER("01"), PUB], "wpkh"), 0x01);
+  assert.equal(inputSighash([], "tr"), null);
   const CONTROL33 = "c0" + "33".repeat(32); // a one-leaf taproot control block, 33 bytes like a key
   assert.equal(inputSighash([DER("83"), CONTROL33], "tr"), null, "P2TR [script, control block]: a script-path spend, never read as a P2WPKH signature");
   assert.equal(inputSighash([DER("83"), CONTROL33]), 0x83, "…which only the shape guess would misread");
-  assert.equal(inputSighash([SIG65], "tr"), 0x83);
-  assert.equal(inputSighash([SIG64, "50aa"], "tr"), 0x00, "annex set aside: the 64-byte default signature");
-  assert.equal(inputSighash([SIG65], "wpkh"), null, "P2WPKH needs a signature and a key");
-  assert.equal(inputSighash([DER("83"), "04" + "22".repeat(64)], "wpkh"), 0x83, "P2WPKH: any key element, the DER signature's last byte");
-  assert.equal(inputSighash(["30" + "44".repeat(73) + "83", PUB], "wpkh"), null, "a 75-byte element is no DER signature");
-  assert.equal(inputSighash([SIG65], null), null, "another script type: no listing signature");
+  assert.equal(inputSighash([SIG65("83")], null), null, "another script type: no signature type");
   assert.equal(listedScriptType("bc1p" + "q".repeat(58)), "tr");
   assert.equal(listedScriptType("bc1q" + "q".repeat(38)), "wpkh");
   assert.equal(listedScriptType("bc1q" + "q".repeat(58)), null, "a 32-byte v0 program (P2WSH) is neither");
   assert.equal(listedScriptType("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), null);
-  const order = { ticker: "LUCKY", seller: "bc1qseller", price_sats: 60_000 };
-  const fillAt1 = {
-    payload: { op: "SEND", ticker: "LUCKY", amount: 1, toOutIdx: 2, changeOutIdx: 4 },
-    outputs: [out(0, { address: ADDR, sats: 5_000 }), out(1, { address: "bc1qseller", sats: 60_000 }), out(2, { address: ADDR }), FEE(3, 546), out(4, { address: ADDR }), out(5, { opReturn: true })],
-    witnesses: [[SIG64], [SIG65]],
+
+  // DEPLOY (§2.1): fee_missing before ticker_taken; token inputs → the default output.
+  const A = ADDR; // P2TR
+  const B = BOB; // P2WPKH
+  const C = "bc1p" + "c".repeat(58); // P2TR
+  const WSH = "bc1q" + "w".repeat(58); // P2WSH-shaped: no signature type
+  const pvs = new Map();
+  const input = (n, address, sats) => {
+    const i = { txid: TX(String(n)), vout: 0 };
+    pvs.set(`${i.txid}:0`, { address, sats });
+    return i;
   };
-  const d1 = routeDecision(fillAt1, { pool: { LUCKY: 1 } });
-  assert.equal(isFillOf(fillAt1, d1, order, 1), true, "listing at input 1 (0x83) paid at vout1 → filled");
-  assert.equal(isFillOf(fillAt1, d1, order, 0), false, "judged at vout0 it would not be");
-  assert.deepEqual(settleListingSpend(fillAt1, d1, order, 1), { filled: true, buyer: ADDR, selfTrade: false, priceSats: 60_000 }, "buyer = TO_OUT of the applied SEND");
+  const prevoutOf = (k) => pvs.get(k) || null;
+  const dep = (inputs, witnesses, outputs, ticker = "NEW") => ({ payload: { op: "DEPLOY", ticker }, inputs, witnesses, outputs });
+  const depOuts = [out(0, { address: A }), FEE(1, 5_460), out(2, { opReturn: true }), out(3, { address: A, sats: 9_000 })];
+  const d0 = routeDecision(dep([input(1, A, 50_000)], [[SIG64]], depOuts), { isDeployed: deployed, prevoutOf });
+  assert.deepEqual([d0.op, d0.applied, d0.reason, d0.deployer, d0.residualVout], ["DEPLOY", true, null, A, 0]);
+  const off = (sats) => [out(0, { address: A }), FEE(1, sats), out(2, { opReturn: true })];
+  assert.equal(routeDecision(dep([input(1, A, 50_000)], [[SIG64]], off(5_459)), { isDeployed: deployed, prevoutOf }).reason, "fee_missing");
+  assert.equal(routeDecision(dep([input(1, A, 50_000)], [[SIG64]], off(5_461)), { isDeployed: deployed, prevoutOf }).reason, "fee_missing");
+  assert.equal(routeDecision(dep([input(1, A, 50_000)], [[SIG64]], off(5_459), "LUCKY"), { isDeployed: deployed, prevoutOf }).reason, "fee_missing", "fee_missing is reported before ticker_taken");
+  const taken = routeDecision(dep([input(1, A, 50_000)], [[SIG64]], depOuts, "LUCKY"), { isDeployed: deployed, prevoutOf });
+  assert.deepEqual([taken.applied, taken.reason, taken.deployer], [false, "ticker_taken", A], "an unapplied row still names its attributed deployer");
+  assert.equal(routeDecision(dep([input(1, A, 50_000)], [[SIG64]], [out(0, { opReturn: true }), out(1, { address: C }), FEE(2, 5_460)]), { isDeployed: deployed, prevoutOf }).residualVout, 1, "a DEPLOY's token inputs go to the default output");
+
+  // deployerOf: only inputs signed over the whole tx (0x00 / 0x01) count, summed per address.
+  const who = (rows) => deployerOf({ inputs: rows.map(([n, address, sats]) => input(n, address, sats)), witnesses: rows.map((r) => r[3]) }, prevoutOf);
+  assert.equal(who([[10, A, 5_000_000, [SIG65("83")]], [11, B, 20_000, [DER("01"), PUB]]]), B, "a 5,000,000-sat 0x83 input loses to a 20,000-sat 0x01 input");
+  assert.equal(who([[12, A, 10_000, [SIG64]], [13, B, 20_000, [DER("01"), PUB]], [14, A, 15_000, [SIG65("01")]]]), A, "values sum per address (A 25,000 > B 20,000)");
+  assert.equal(who([[15, C, 9_000_000, [SIG65("81")]], [16, B, 1_000, [DER("01"), PUB]]]), B, "a 9,000,000-sat 0x81 input is ignored");
+  assert.equal(who([[17, C, 9_000_000, [SIG65("02")]], [18, A, 9_000_000, [SIG65("03")]], [19, B, 700, [DER("01"), PUB]]]), B, "0x02 / 0x03 are ignored, 0x01 counts");
+  assert.equal(who([[20, C, 5_000, [SIG64]], [21, A, 5_000, [SIG64]]]), C, "a tie: the address whose first input has the lower index");
+  assert.equal(who([[22, A, 5_000, [SIG64]], [23, C, 5_000, [SIG64]]]), A);
+  assert.equal(who([[24, A, 5_000_000, [SIG65("83")]], [25, C, 5_000, ["00", "11", "22"]]]), "", "only a 0x83 input and a script-path spend: no deployer");
+  assert.equal(who([[26, WSH, 9_000_000, [DER("01"), PUB]], [27, A, 1, [SIG64]]]), A, "a P2WSH-shaped input never counts");
+  assert.equal(who([[28, A, 9_000_000, [SIG64, "aa"]]]), "", "a two-element P2TR witness without an annex is a script-path spend");
+  assert.equal(deployerOf({ inputs: [{ txid: TX("99"), vout: 0 }], witnesses: [[SIG64]] }, prevoutOf), "", "an unknown prevout never counts");
+  const noSigner = routeDecision(dep([input(29, A, 5_000_000)], [[SIG65("83")]], depOuts), { isDeployed: deployed, prevoutOf });
+  assert.deepEqual([noSigner.applied, noSigner.deployer], [true, ""], "the ticker registers with an empty deployer");
+
+  // §4 rule 6 + §7.5: inputs signed as a listing, in the reference fill layout.
+  const SELLER = "bc1p" + "s".repeat(58);
+  const order = { ticker: "LUCKY", seller: SELLER, price_sats: 60_000 };
+  const listed = input(40, SELLER, 546);
+  const buyerIn = input(41, ADDR, 100_000);
+  const fillOuts = (amt, { fee = true } = {}) =>
+    [out(0, { address: SELLER, sats: 60_000 }), out(1, { address: ADDR }), out(2, { address: ADDR }), ...(fee ? [FEE(3, 546)] : []), out(fee ? 4 : 3, { opReturn: true }), out(fee ? 5 : 4, { address: ADDR, sats: 30_000 })].map((o, i) => ({ ...o, vout: i }));
+  const fill = (amt, opts) => ({ payload: { op: "SEND", ticker: "LUCKY", amount: amt }, inputs: [listed, buyerIn], witnesses: [[SIG65("83")], [SIG64]], outputs: fillOuts(amt, opts) });
+  const L = [{ idx: 0, balances: { LUCKY: 1200 } }];
+  assert.deepEqual(listingSignedInputs(fill(1200), prevoutOf), [0], "the listing (0x83, vout0 usable) is listing-signed; the buyer's 0x00 input is not");
+  const df = routeDecision(fill(1200), { pool: {}, listed: L, prevoutOf });
+  assert.deepEqual([df.applied, df.send, df.listedTo], [true, { vout: 1, ticker: "LUCKY", amount: 1200 }, []], "an applied SEND of the ticker moves the listed tokens (to vout1)");
+  assert.deepEqual(settleListingSpend(fill(1200), df, order, 0), { filled: true, buyer: ADDR, selfTrade: false, priceSats: 60_000 }, "buyer = vout1 of the applied SEND");
+  // Without the fee output the SEND does not apply: the tokens go to vout0, the seller — a self-trade.
+  const noFee = fill(1200, { fee: false });
+  const dNoFee = routeDecision(noFee, { pool: {}, listed: L, prevoutOf });
+  assert.deepEqual([dNoFee.applied, dNoFee.listedTo], [false, [{ vout: 0, balances: { LUCKY: 1200 } }]], "fee-less fill: the listed tokens → vout[i]");
+  assert.deepEqual(settleListingSpend(noFee, dNoFee, order, 0), { filled: true, buyer: SELLER, selfTrade: true, priceSats: 60_000 }, "…recorded as the seller's own trade");
+  // No payload at all: the same.
+  const plain = { ...fill(1200), payload: null };
+  const dPlain = routeDecision(plain, { pool: {}, listed: L, prevoutOf });
+  assert.deepEqual(dPlain.listedTo, [{ vout: 0, balances: { LUCKY: 1200 } }]);
+  assert.deepEqual(settleListingSpend(plain, dPlain, order, 0), { filled: true, buyer: SELLER, selfTrade: true, priceSats: 60_000 }, "a payload-less spend of a listing: self-trade");
+  // An AMT above the listed balance does not apply: the tokens stay with the seller.
+  const dOver = routeDecision(fill(1500), { pool: {}, listed: L, prevoutOf });
+  assert.deepEqual([dOver.applied, dOver.listedTo], [false, [{ vout: 0, balances: { LUCKY: 1200 } }]], "AMT 1,500 on a 1,200 listing: tokens at vout[i]");
+  assert.equal(settleListingSpend(fill(1500), dOver, order, 0).selfTrade, true);
+  // AMT 1 applies whenever the listed output holds any of the ticker.
+  const dOne = routeDecision(fill(1), { pool: {}, listed: L, prevoutOf });
+  assert.deepEqual([dOne.applied, dOne.send, dOne.listedTo], [true, { vout: 1, ticker: "LUCKY", amount: 1 }, []], "AMT 1: applied, the rest of the listed tokens join the pool (→ vout2)");
+  assert.equal(settleListingSpend(fill(1), dOne, order, 0).buyer, ADDR);
+  // A SEND of another ticker leaves the listed tokens on vout[i]; a mixed listed input moves only the SEND's ticker.
+  const alt = { ...fill(5), payload: { op: "SEND", ticker: "ALT", amount: 5 } };
+  const dAlt = routeDecision(alt, { pool: { ALT: 10 }, listed: L, prevoutOf });
+  assert.deepEqual([dAlt.applied, dAlt.send.ticker, dAlt.listedTo], [true, "ALT", [{ vout: 0, balances: { LUCKY: 1200 } }]]);
+  assert.equal(settleListingSpend(alt, dAlt, order, 0).selfTrade, true, "a fill completed by another ticker's SEND is the seller's own trade");
+  const dMixed = routeDecision(fill(1200), { pool: {}, listed: [{ idx: 0, balances: { LUCKY: 1200, ALT: 7 } }], prevoutOf });
+  assert.deepEqual(dMixed.listedTo, [{ vout: 0, balances: { ALT: 7 } }], "the ALT balance of a mixed listed input → vout[i]");
+  // A 0x83 input without a usable paired output is an ordinary input.
+  const unpaired = { payload: null, inputs: [buyerIn, input(42, SELLER, 546)], witnesses: [[SIG64], [SIG65("83")]], outputs: [out(0, { address: ADDR }), out(1, { opReturn: true })] };
+  assert.deepEqual(listingSignedInputs(unpaired, prevoutOf), [], "vout1 is an OP_RETURN: not listing-signed");
+  assert.deepEqual(listingSignedInputs({ ...unpaired, outputs: [out(0, { address: ADDR })] }, prevoutOf), [], "no vout1 at all: not listing-signed");
+  // Other signature types are unaffected.
+  for (const w of [[SIG64], [SIG65("01")], [SIG65("81")], [SIG65("82")], [SIG65("02")], [SIG65("03")], ["00", "11", "22"]]) {
+    assert.deepEqual(listingSignedInputs({ ...fill(1200), witnesses: [w, [SIG64]] }, prevoutOf), [], `witness ${w.map((x) => x.slice(-2)).join(",")}: ordinary`);
+  }
+  // A listing at input 1 of an applied SEND: its paired output IS vout1 — recorded as the seller's own trade.
+  const at1 = {
+    payload: { op: "SEND", ticker: "LUCKY", amount: 1200 },
+    inputs: [buyerIn, listed],
+    witnesses: [[SIG64], [SIG65("83")]],
+    outputs: [FEE(0, 546), out(1, { address: SELLER, sats: 60_000 }), out(2, { address: ADDR }), out(3, { opReturn: true })],
+  };
+  assert.deepEqual(listingSignedInputs(at1, prevoutOf), [1]);
+  const d1 = routeDecision(at1, { pool: {}, listed: [{ idx: 1, balances: { LUCKY: 1200 } }], prevoutOf });
+  assert.deepEqual(d1.send, { vout: 1, ticker: "LUCKY", amount: 1200 });
+  assert.equal(isFillOf(at1, d1, order, 1), true, "listing at input 1 (0x83) paid at vout1 → filled");
+  assert.equal(isFillOf(at1, d1, order, 0), false, "judged at vout0 it would not be");
+  assert.deepEqual(settleListingSpend(at1, d1, order, 1), { filled: true, buyer: SELLER, selfTrade: true, priceSats: 60_000 }, "the recorded buyer is vout1 — the seller");
   // The same layout signed with the default sighash (a withdrawal, a split, a send): never a trade.
-  const withdrawn = { ...fillAt1, witnesses: [[SIG64], [SIG64]] };
-  assert.equal(isFillOf(withdrawn, d1, order, 1), false, "a 64-byte signature is the seller's own spend → cancelled");
-  assert.equal(isFillOf({ ...fillAt1, witnesses: [[SIG64], [DER("01"), PUB]] }, d1, order, 1), false, "SIGHASH_ALL → cancelled");
+  assert.equal(isFillOf({ ...fill(1200), witnesses: [[SIG64], [SIG64]] }, df, order, 0), false, "a 64-byte signature is the seller's own spend → cancelled");
+  assert.equal(isFillOf({ ...fill(1200), witnesses: [[SIG65("01")], [SIG64]] }, df, order, 0), false, "SIGHASH_ALL → cancelled");
   // A withdrawal priced exactly at the listing's 546-sat minimum: the self-payment is no fill.
   const cheap = { ticker: "LUCKY", seller: ADDR, price_sats: 546 };
   const toSelf = {
-    payload: { op: "SEND", ticker: "LUCKY", amount: 1, toOutIdx: 0, changeOutIdx: 3 },
-    outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true }), out(3, { address: ADDR }), out(4, { address: ADDR, sats: 90_000 })],
+    payload: { op: "SEND", ticker: "LUCKY", amount: 1 },
+    inputs: [input(43, ADDR, 546), buyerIn],
     witnesses: [[SIG64], [SIG64]],
+    outputs: [FEE(0, 546), out(1, { address: ADDR }), out(2, { address: ADDR }), out(3, { opReturn: true }), out(4, { address: ADDR, sats: 90_000 })],
   };
-  const dSelf = routeDecision(toSelf, { pool: { LUCKY: 1 } });
+  const dSelf = routeDecision(toSelf, { pool: { LUCKY: 1 }, prevoutOf });
   assert.equal(isFillOf(toSelf, dSelf, cheap, 0), false, "a withdrawal at the 546-sat price is cancelled, not a self-trade");
-  assert.equal(isFillOf(toSelf, dSelf, { ...cheap, price_sats: 50_000 }, 4), false, "a listed carrier landing at input 4 against the change output: cancelled");
-  // A 0x83 spend without the protocol fee (no SEND applies) is still a trade: the buyer is where the residual lands.
-  const noFeeFill = { ...fillAt1, outputs: fillAt1.outputs.filter((o) => o.vout !== 3).map((o, i) => ({ ...o, vout: i })) };
-  noFeeFill.payload = { op: "SEND", ticker: "LUCKY", amount: 1, toOutIdx: 2, changeOutIdx: 3 };
-  const dNoFee = routeDecision(noFeeFill, { pool: { LUCKY: 1 } });
-  assert.equal(dNoFee.applied, false, "no fee output → the SEND does not apply");
-  assert.deepEqual(settleListingSpend(noFeeFill, dNoFee, order, 1), { filled: true, buyer: ADDR, selfTrade: false, priceSats: 60_000 }, "…the tokens still land on the residual output: a trade");
-  // No payload at all: default routing → the lowest non-OP_RETURN output.
-  const plain = { payload: null, outputs: [out(0, { address: "bc1qseller", sats: 60_000 }), out(1, { address: ADDR })], witnesses: [[SIG65], [SIG64]] };
-  assert.deepEqual(settleListingSpend(plain, routeDecision(plain), order, 0), { filled: true, buyer: "bc1qseller", selfTrade: true, priceSats: 60_000 }, "tokens back on the seller's own output: a self-trade");
-  const plain2 = { payload: null, outputs: [out(0, { address: ADDR }), out(1, { address: "bc1qseller", sats: 60_000 })], witnesses: [[SIG64], [SIG65]] };
-  assert.deepEqual(settleListingSpend(plain2, routeDecision(plain2), order, 1), { filled: true, buyer: ADDR, selfTrade: false, priceSats: 60_000 }, "listing at input 1, tokens to vout0");
-  const burn = { payload: null, outputs: [out(0, { address: null, sats: 1_000 }), out(1, { address: "bc1qseller", sats: 60_000 })], witnesses: [[SIG64], [SIG65]] };
-  assert.deepEqual(settleListingSpend(burn, routeDecision(burn), order, 1), { filled: true, buyer: null, selfTrade: false, priceSats: 60_000 }, "burned tokens: a fill with no buyer");
-  const short = { ...fillAt1, outputs: fillAt1.outputs.map((o) => (o.vout === 1 ? { ...o, sats: 59_999 } : o)) };
-  assert.equal(isFillOf(short, d1, order, 1), false, "paying less than the price is no fill");
-  console.log("mock routing: fee checks, MINE vout0 rule, default-output burn, §2.1 commit-reveal rules + carrier-bound H + committer attribution, §7.5 index all as the spec says");
+  const shortPay = { ...fill(1200), outputs: fill(1200).outputs.map((o) => (o.vout === 0 ? { ...o, sats: 59_999 } : o)) };
+  assert.equal(isFillOf(shortPay, df, order, 0), false, "paying less than the price is no fill");
+  console.log("mock routing: MINE vout0 rule, SEND vout1 / vout2 with the default-output fall-back, DEPLOY fee_missing → ticker_taken, whole-tx deployer attribution, §4 rule 6 listing-signed inputs and §7.5 buyers");
+}
+
+// ---- the mock's holdDeploy knob: a DEPLOY that misses blocks while the chain goes on ----------------
+{
+  const store = new Map();
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    writable: true,
+    value: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
+  });
+  const { MOCK_WALLET, mockGet, mockSignPsbt, simulateBroadcast } = await import("../src/lib/mock.js");
+  const { buildDeployPsbt, extractRawTxHex } = await import("../src/lib/psbt.js");
+  const CONFIRM_AFTER_MS = 20_000;
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    const address = MOCK_WALLET.address;
+    const btcRows = (await mockGet(`/btc-utxos/${address}`)).utxos.filter((u) => u.confirmed);
+    const tokenOutpoints = (await mockGet(`/utxos/${address}`)).utxos.map(({ txid, vout }) => ({ txid, vout }));
+    const built = buildDeployPsbt({ address, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows, tokenOutpoints, feeRateSatVb: 2, ticker: "HELD", selectionOrder: "largest" });
+    const raw = extractRawTxHex(mockSignPsbt(built.psbtHex, { toSignInputs: built.inputIndexes.map((index) => ({ index, address })) }));
+    store.set("lp.mock.holdDeploy", "2");
+    const sentTip = (await mockGet("/health")).tip_height;
+    const txid = simulateBroadcast(raw);
+    assert.equal(store.has("lp.mock.holdDeploy"), false, "the knob is used up by one DEPLOY");
+    assert.equal((await mockGet(`/tx-status/${txid}`)).confirmed, false);
+    now += CONFIRM_AFTER_MS;
+    assert.ok((await mockGet("/health")).tip_height > sentTip, "one block later the tip has passed the DEPLOY's broadcast tip");
+    assert.equal((await mockGet(`/tx-status/${txid}`)).confirmed, false, "…while the DEPLOY still waits");
+    now += 2 * CONFIRM_AFTER_MS;
+    const st = await mockGet(`/tx-status/${txid}`);
+    assert.equal(st.confirmed, true, "three blocks later it has confirmed");
+    assert.equal(st.block_height, sentTip + 3, "at the held height");
+    const row = await mockGet("/tokens/HELD");
+    assert.deepEqual([row.deploy_txid, row.deployer, row.deploy_block], [txid, address, sentTip + 3], "registered to the wallet (whole-tx-signed deployer)");
+  } finally {
+    Date.now = realNow;
+  }
+  console.log("mock holdDeploy: the chain goes on while a held DEPLOY waits N blocks, then it confirms at the held height");
 }
 
 console.log("flows: all checks passed");

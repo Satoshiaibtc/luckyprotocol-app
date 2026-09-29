@@ -6,8 +6,7 @@ import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { pubECDSA, pubSchnorr } from "@scure/btc-signer/utils.js";
-import { COMMIT_CARRIER_LISTING_TEXT, COMMIT_CARRIER_PLAIN_TEXT, LISTING_VERSIONS, SEQUENCE_DISABLE_FLAG, WITHDRAW_FIRST_TEXT, commitCarrierProblem, commitExpiredWaitText, listingSequenceOk, listingShapeProblems, relistDecision } from "../src/lib/listingRules.js";
-import { FINAL_DEPTH } from "../src/lib/finality.js";
+import { LISTING_VERSIONS, SEQUENCE_DISABLE_FLAG, WITHDRAW_FIRST_TEXT, listingSequenceOk, listingShapeProblems, relistDecision } from "../src/lib/listingRules.js";
 import { LISTING_SIGHASH, buildListingPsbt, parseListing, verifyListing } from "../src/lib/swap.js";
 import { RAISE_PRICE_TEXT, listingRefusalText } from "../src/lib/market.js";
 import { orderHttpError } from "../src/lib/indexer.js";
@@ -88,35 +87,6 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
   console.log("listing rules: same / lower replaces, higher → Withdraw first (plain words, and the book's 409 maps to them)");
 }
 
-// ---- the first output of an open reservation is never listed ------------------------------------------------
-{
-  const open = { txid: TX("c"), status: "open", height: 969_700, expires_at_height: 971_716 };
-  assert.equal(commitCarrierProblem(0, open), COMMIT_CARRIER_PLAIN_TEXT);
-  assert.match(COMMIT_CARRIER_PLAIN_TEXT, /publish that reserved ticker with you named as its creator/);
-  assert.equal(commitCarrierProblem(1, open), null, "only vout 0 is the reserved output");
-  assert.equal(commitCarrierProblem(0, null), null, "not a recorded reservation (a MINE carrier, a SEND output…)");
-  for (const status of ["revealed", "invalid"]) assert.equal(commitCarrierProblem(0, { ...open, status }), null, status);
-  // `open` is the indexer's own view of the window: never overruled by a height here.
-  assert.equal(commitCarrierProblem(0, open, 971_716), COMMIT_CARRIER_PLAIN_TEXT, "open is refused whatever the height");
-  assert.equal(commitCarrierProblem(0, open, 971_715), COMMIT_CARRIER_PLAIN_TEXT);
-  assert.equal(commitCarrierProblem(0, { ...open, spent_txid: TX("d") }), null, "a spent carrier is not this reservation's any more");
-  // expired: refused until its last reveal block (E) has FINAL_DEPTH confirmations — the book's rule.
-  const expired = { ...open, status: "expired" };
-  const E = expired.expires_at_height;
-  for (const at of [E, E + 1, E + FINAL_DEPTH - 2]) {
-    const why = commitCarrierProblem(0, expired, at);
-    assert.ok(why && /has just expired/.test(why) && /Nothing needs to be sent/.test(why), `indexed ${at - E} blocks after E: still refused, and says to wait`);
-  }
-  assert.match(commitCarrierProblem(0, expired, E + FINAL_DEPTH - 2), /about 1 more block/);
-  assert.equal(commitCarrierProblem(0, expired, E + FINAL_DEPTH - 1), null, "E has FINAL_DEPTH confirmations: listable");
-  assert.ok(commitCarrierProblem(0, expired), "unknown height: refused (the book decides after the wait)");
-  assert.match(commitExpiredWaitText(E, E), new RegExp(`from block ${(E + FINAL_DEPTH - 1).toLocaleString("en-US")}`));
-  // the book's exact refusal maps to the same plain words
-  const e = orderHttpError("/orders", 409, JSON.stringify({ error: COMMIT_CARRIER_LISTING_TEXT }));
-  assert.equal(listingRefusalText(e), COMMIT_CARRIER_PLAIN_TEXT);
-  console.log("listing rules: the first output of an open reservation (COMMIT) is refused, in plain words; the book's 409 maps to them");
-}
-
 // ---- the indexer's own carrier amount must be > 0 -------------------------------------------------------
 {
   const order = { id: `${TX("a")}:1`, ticker: "LUCKY", amount: 300 };
@@ -191,7 +161,7 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
   assert.equal(partial.verdict, "unverified", "the same comparison as mempool.space: amount not independently verified");
   assert.match(partial.notes[0], /completed the BLOK supply is credited only what was left/);
   const normal = await check(open.items.find((o) => o.id !== cap.id && o.seller !== MOCK_WALLET.address));
-  assert.equal(normal.verdict, "agree", "an ordinary split carrier (SEND TO_OUT) is verified");
+  assert.equal(normal.verdict, "agree", "an ordinary split carrier (SEND vout1) is verified");
   const lying = await check({ ...cap, amount: 1100 });
   assert.equal(lying.verdict, "disagree");
   console.log("mock order book: higher re-listing → 409 withdraw first; same / lower replace; the seeded partial-credit ask is unverified, a split carrier agrees");

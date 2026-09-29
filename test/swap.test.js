@@ -8,10 +8,14 @@
 //   * buildFillPsbt appends only §4-clean buyer inputs + the §7.2 outputs
 //   * buyer signs inputs 1..n, finalizeFill finalizes input0 from the
 //     seller's signature and extracts a raw tx
-//   * output0 is byte-identical to the listing, OP_RETURN payload is
-//     LUCKY-20|SEND|<T>|<AMT>|1|4, vout1 (token slot) and vout4 (residual
-//     slot) are ALWAYS 546-sat outputs, vout5 BTC change is optional and
-//     folds into the fee when sub-dust, inputs − outputs == feeSats
+//   * output0 is byte-identical to the listing; vout1 (token carrier) and
+//     vout2 (residual carrier) are ALWAYS 546-sat outputs to the buyer,
+//     vout3 pays exactly 546 sats to the protocol fee address, vout4 is
+//     the OP_RETURN {"p":"lucky-20","op":"send","tick":"<T>","amt":"<AMT>"},
+//     vout5 BTC change is optional and folds into the fee when sub-dust,
+//     inputs − outputs == feeSats
+//   * the fill's AMT is the listed amount only after a second-source
+//     "agree", else 1 (fillSendAmount)
 import assert from "node:assert/strict";
 import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
@@ -26,10 +30,13 @@ import {
   estimateFillCost,
   checkFillLayout,
   LISTING_SIGHASH,
-  FILL_TO_OUT,
-  FILL_CHANGE_OUT,
+  FILL_TO_VOUT,
+  FILL_RESIDUAL_VOUT,
+  FILL_FEE_VOUT,
+  FILL_OP_RETURN_VOUT,
   FILL_BTC_CHANGE_VOUT,
   FILL_FIXED_SATS,
+  fillSendAmount,
 } from "../src/lib/swap.js";
 import { PROJECT_FEE_ADDRESS, buildMinePayload, buildSendPayload, payloadToString } from "../src/lib/payloads.js";
 import { assertSingleOpReturn, decodeOpReturnPush, expectPsbtPayload, makeOpReturnScript } from "../src/lib/psbt.js";
@@ -54,10 +61,18 @@ const addrOf = (script) => {
 const parse = (psbtHex) => btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownOutputs: true });
 
 assert.equal(LISTING_SIGHASH, btc.SigHash.SINGLE_ANYONECANPAY, "0x83 == SigHash.SINGLE_ANYONECANPAY");
-assert.equal(FILL_TO_OUT, 1);
-assert.equal(FILL_CHANGE_OUT, 4);
+assert.equal(FILL_TO_VOUT, 1);
+assert.equal(FILL_RESIDUAL_VOUT, 2);
+assert.equal(FILL_FEE_VOUT, 3);
+assert.equal(FILL_OP_RETURN_VOUT, 4);
 assert.equal(FILL_BTC_CHANGE_VOUT, 5);
-assert.equal(FILL_FIXED_SATS, 546 * 3, "token output + protocol fee + residual output");
+assert.equal(FILL_FIXED_SATS, 546 * 3, "token output + residual output + protocol fee");
+
+// ---- the fill's AMT (§7.2): the listed amount only when the second source confirmed it ----------
+assert.equal(fillSendAmount("agree", 1200), 1200);
+for (const verdict of ["unverified", "unreachable", "disagree", undefined, null, "AGREE"]) {
+  assert.equal(fillSendAmount(verdict, 1200), 1, `${verdict}: AMT 1`);
+}
 
 /** Assert the §7.2 fill layout on a PSBT / tx: 5 outputs (change folded) or 6. */
 function checkFillOutputs(label, tx, fill, { seller, buyer, price, payload }) {
@@ -66,14 +81,14 @@ function checkFillOutputs(label, tx, fill, { seller, buyer, price, payload }) {
   assert.equal(addrOf(o(0).script), seller, `${label}: vout0 → seller`);
   assert.equal(o(0).amount, BigInt(price), `${label}: vout0 untouched`);
   assert.equal(addrOf(o(1).script), buyer, `${label}: vout1 → buyer`);
-  assert.equal(o(1).amount, 546n, `${label}: vout1 token slot is exactly 546`);
-  assert.equal(addrOf(o(2).script), PROJECT_FEE_ADDRESS, `${label}: vout2 → fee`);
-  assert.equal(o(2).amount, 546n, `${label}: vout2 exact protocol fee`);
-  assert.equal(o(3).script[0], 0x6a, `${label}: vout3 OP_RETURN`);
-  assert.equal(payloadToString(o(3).script.slice(2)), payload, `${label}: payload unchanged (|1|4)`);
-  assert.equal(addrOf(o(4).script), buyer, `${label}: vout4 residual slot → buyer`);
-  assert.equal(o(4).amount, 546n, `${label}: vout4 residual slot is exactly 546 (always present)`);
-  assert.equal(fill.residualVout, 4);
+  assert.equal(o(1).amount, 546n, `${label}: vout1 token carrier is exactly 546`);
+  assert.equal(addrOf(o(2).script), buyer, `${label}: vout2 residual carrier → buyer`);
+  assert.equal(o(2).amount, 546n, `${label}: vout2 residual carrier is exactly 546 (always present)`);
+  assert.equal(addrOf(o(3).script), PROJECT_FEE_ADDRESS, `${label}: vout3 → fee`);
+  assert.equal(o(3).amount, 546n, `${label}: vout3 exact protocol fee`);
+  assert.equal(o(4).script[0], 0x6a, `${label}: vout4 OP_RETURN`);
+  assert.equal(payloadToString(o(4).script.slice(2)), payload, `${label}: payload bytes`);
+  assert.equal(fill.residualVout, 2);
   if (tx.outputsLength === 6) {
     assert.equal(fill.changeOmitted, false, `${label}: changeOmitted false with 6 outputs`);
     assert.equal(fill.changeVout, 5);
@@ -209,7 +224,7 @@ function runScenario(label, sellerType, buyerType) {
     assert.match(r.checks.find((c) => c.id === "output").detail, /price must be ≥ carrier value/);
     assert.equal(r.checks.find((c) => c.id === "carrier").ok, true, "carrier check itself still agrees with the indexer");
     assert.throws(
-      () => buildFillPsbt({ listingPsbtHex: under, order: fatOrder, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: 5_000_000 }], tokenOutpoints: [], feeRateSatVb: 8 }),
+      () => buildFillPsbt({ sendAmount: 700, listingPsbtHex: under, order: fatOrder, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: 5_000_000 }], tokenOutpoints: [], feeRateSatVb: 8 }),
       /failed verification/,
       `${label}: fill refuses the under-priced listing`,
     );
@@ -249,7 +264,7 @@ function runScenario(label, sellerType, buyerType) {
   // Decimal rates: integer satoshis, and the fee is never below
   // ceil(vsize) × rate — the node charges for whole vbytes.
   for (const feeRateSatVb of [1, 1.01, 1.25, 2.5, 3, 10]) {
-    const fractional = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb });
+    const fractional = buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb });
     assert.equal(fractional.feeRateSatVb, feeRateSatVb);
     assert.ok(Number.isInteger(fractional.feeSats));
     assert.ok(Number.isInteger(fractional.estimatedVsize));
@@ -264,6 +279,7 @@ function runScenario(label, sellerType, buyerType) {
   const fill = buildFillPsbt({
     listingPsbtHex: signedListing,
     order,
+    sendAmount: fillSendAmount("agree", order.amount),
     address: buyer.address,
     pubkeyHex: buyer.pubkeyHex,
     utxos,
@@ -292,9 +308,9 @@ function runScenario(label, sellerType, buyerType) {
     }
     assert.equal(tx.inputsLength, 1 + fill.inputIndexes.length);
     // §7.2 layout: 6 outputs here — the 30,000 / 90,000-sat inputs leave real change
-    checkFillOutputs(label, tx, fill, { seller: seller.address, buyer: buyer.address, price: 60_000, payload: "LUCKY-20|SEND|LUCKY|1200|1|4" });
+    checkFillOutputs(label, tx, fill, { seller: seller.address, buyer: buyer.address, price: 60_000, payload: '{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"1200"}' });
     assert.equal(tx.outputsLength, 6, "vout5 BTC change present when ≥ dust");
-    assert.ok(payloadToString(tx.getOutput(3).script.slice(2)).endsWith("|1|4"), "TO_OUT=1, CHANGE_OUT=4 (distinct — equal indices do not parse)");
+    assert.equal(fill.sendAmount, 1200, "the confirmed amount is the AMT");
   }
 
   // finalizeFill must refuse an unsigned buyer input
@@ -318,12 +334,15 @@ function runScenario(label, sellerType, buyerType) {
   assert.equal(d.outputs[0].address, seller.address);
   assert.equal(d.outputs[0].sats, 60_000);
   assert.equal(d.outputs[1].address, buyer.address);
-  assert.equal(d.outputs[3].address, null);
-  assert.deepEqual(d.payload, { op: "SEND", ticker: "LUCKY", amount: 1200, toOutIdx: 1, changeOutIdx: 4 });
-  assert.equal(d.payloadText, "LUCKY-20|SEND|LUCKY|1200|1|4");
-  assert.equal(d.outputs[1].sats, 546, "raw tx vout1 token slot = 546");
-  assert.equal(d.outputs[4].address, buyer.address, "raw tx vout4 residual slot → buyer");
-  assert.equal(d.outputs[4].sats, 546, "raw tx vout4 residual slot = 546");
+  assert.equal(d.outputs[4].address, null);
+  assert.deepEqual(d.payload, { op: "SEND", ticker: "LUCKY", amount: 1200 });
+  assert.equal(d.payloadText, '{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"1200"}');
+  assert.equal(d.payloadVout, 4);
+  assert.equal(d.outputs[1].sats, 546, "raw tx vout1 token carrier = 546");
+  assert.equal(d.outputs[2].address, buyer.address, "raw tx vout2 residual carrier → buyer");
+  assert.equal(d.outputs[2].sats, 546, "raw tx vout2 residual carrier = 546");
+  assert.equal(d.outputs[3].address, PROJECT_FEE_ADDRESS, "raw tx vout3 → fee address");
+  assert.equal(d.outputs[3].sats, 546, "raw tx vout3 = the exact SEND fee");
   assert.equal(d.outputs[5].address, buyer.address, "raw tx vout5 BTC change → buyer");
   assert.ok(d.outputs[5].sats >= 546, "raw tx vout5 ≥ dust");
   const fin = parse(signedFill);
@@ -333,7 +352,7 @@ function runScenario(label, sellerType, buyerType) {
   assert.equal(inSum, 1 + fill.inputIndexes.length);
   const outSum = d.outputs.reduce((s, o) => s + o.sats, 0);
   assert.equal(546 + utxosSelectedSum(fill, utxos) - outSum, fill.feeSats, `${label}: raw tx fee matches`);
-  assert.equal(outSum, 60_000 + 3 * 546 + fill.changeSats, `${label}: outputs = price + 3 slots + change`);
+  assert.equal(outSum, 60_000 + 3 * 546 + fill.changeSats, `${label}: outputs = price + 3 × 546 + change`);
 
   // finalizeFill is idempotent on an already-finalized input0
   assert.equal(finalizeFill(hex.encode(fin.toPSBT())), rawHex);
@@ -344,35 +363,45 @@ function runScenario(label, sellerType, buyerType) {
   {
     const mine = makeOpReturnScript(buildMinePayload("LUCKY"));
     const tampered = parse(signedFill);
-    tampered.updateOutput(3, { script: mine }, true);
+    tampered.updateOutput(4, { script: mine }, true);
     assert.throws(() => finalizeFill(hex.encode(tampered.toPSBT())), /OP_RETURN is MINE, expected SEND/, `${label}: MINE riding on the listing is refused`);
-    // The withdrawn AVATAR op (§8) is no LUCKY-20 payload at all.
+    // An avatar op (§8) is no LUCKY-20 payload at all.
     const avatar = parse(signedFill);
-    avatar.updateOutput(3, { script: makeOpReturnScript(new TextEncoder().encode("LUCKY-20|AVATAR|LUCKY")) }, true);
-    assert.throws(() => finalizeFill(hex.encode(avatar.toPSBT())), /does not parse as a LUCKY-20 payload/, `${label}: a withdrawn AVATAR payload is refused as unparseable`);
+    avatar.updateOutput(4, { script: makeOpReturnScript(new TextEncoder().encode('{"p":"lucky-20","op":"avatar","tick":"LUCKY"}')) }, true);
+    assert.throws(() => finalizeFill(hex.encode(avatar.toPSBT())), /does not parse as a LUCKY-20 payload/, `${label}: an avatar payload is refused as unparseable`);
     const wrongTicker = parse(signedFill);
-    wrongTicker.updateOutput(3, { script: makeOpReturnScript(buildSendPayload({ ticker: "OTHER", amount: 1200, toOutIdx: 1, changeOutIdx: 4 })) }, true);
+    wrongTicker.updateOutput(4, { script: makeOpReturnScript(buildSendPayload({ ticker: "OTHER", amount: 1200 })) }, true);
     assert.throws(() => finalizeFill(hex.encode(wrongTicker.toPSBT()), { op: "SEND", ticker: "LUCKY" }), /names ticker OTHER/, `${label}: wrong ticker refused`);
+    const spaced = parse(signedFill);
+    spaced.updateOutput(4, { script: makeOpReturnScript(new TextEncoder().encode('{"p": "lucky-20","op":"send","tick":"LUCKY","amt":"1200"}')) }, true);
+    assert.throws(() => finalizeFill(hex.encode(spaced.toPSBT())), /does not parse as a LUCKY-20 payload/, `${label}: a spaced JSON push is not a payload`);
     const noPayload = parse(signedFill);
-    noPayload.updateOutput(3, { script: new Uint8Array([0x6a, 0x04, 0x74, 0x65, 0x73, 0x74]) }, true);
+    noPayload.updateOutput(4, { script: new Uint8Array([0x6a, 0x04, 0x74, 0x65, 0x73, 0x74]) }, true);
     assert.throws(() => finalizeFill(hex.encode(noPayload.toPSBT())), /does not parse as a LUCKY-20 payload/, `${label}: non-protocol OP_RETURN refused`);
+    // the fee output is part of the sale: without it the listed tokens stay with the seller
+    const feeElsewhere = parse(signedFill);
+    feeElsewhere.updateOutput(3, { script: buyer.script }, true);
+    assert.throws(() => finalizeFill(hex.encode(feeElsewhere.toPSBT())), /vout3 is not exactly 546 sats to the protocol fee address/, `${label}: the fee paid to someone else is refused`);
+    const feeOff = parse(signedFill);
+    feeOff.updateOutput(3, { amount: 547n }, true);
+    assert.throws(() => finalizeFill(hex.encode(feeOff.toPSBT())), /vout3 is not exactly 546 sats to the protocol fee address/, `${label}: a 547-sat fee is refused`);
     // the sign-time guard sees the same PSBT the wallet would
-    assert.deepEqual(expectPsbtPayload(fill.psbtHex, { op: "SEND", ticker: "LUCKY", amount: 1200 }), { op: "SEND", ticker: "LUCKY", amount: 1200, toOutIdx: 1, changeOutIdx: 4 });
+    assert.deepEqual(expectPsbtPayload(fill.psbtHex, { op: "SEND", ticker: "LUCKY", amount: 1200 }), { op: "SEND", ticker: "LUCKY", amount: 1200 });
     assert.throws(() => expectPsbtPayload(fill.psbtHex, { op: "SEND", amount: 1199 }), /moves 1200 tokens, expected 1199/);
     assert.throws(() => expectPsbtPayload(fill.psbtHex, { op: null }), /plain payment must not carry an OP_RETURN/);
   }
 
   // Buyer with only dust / token UTXOs cannot fill
   assert.throws(
-    () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: utxos.slice(0, 2), tokenOutpoints, feeRateSatVb: 8 }),
+    () => buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: utxos.slice(0, 2), tokenOutpoints, feeRateSatVb: 8 }),
     /no spendable BTC/,
   );
   // on a non-asset-safe list the fee-input floor applies to the buyer's inputs too
   {
-    const floored = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, minInputSats: 50_000 });
+    const floored = buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, minInputSats: 50_000 });
     assert.deepEqual(floored.inputs, [{ txid: T(5), vout: 2, sats: 90_000 }], `${label}: only the 90,000-sat output clears a 50,000-sat floor`);
     assert.throws(
-      () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, minInputSats: 100_000 }),
+      () => buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, minInputSats: 100_000 }),
       /no asset-safe UTXO list/,
     );
   }
@@ -382,7 +411,7 @@ function runScenario(label, sellerType, buyerType) {
   {
     const many = [...Array.from({ length: 60 }, (_, i) => ({ txid: T(10 + i), vout: 0, sats: 800 })), { txid: T(90), vout: 0, sats: 2_000_000 }];
     for (const rate of [2, 5, 20]) {
-      const f = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: many, tokenOutpoints: [], feeRateSatVb: rate });
+      const f = buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: many, tokenOutpoints: [], feeRateSatVb: rate });
       assert.deepEqual(f.inputs.map((u) => u.sats), [2_000_000], `${label} @ ${rate} sat/vB: one buyer input`);
       const q = estimateFillCost({ order, address: buyer.address, feeRateSatVb: rate });
       assert.equal(f.totalSats, q.totalSats, `${label} @ ${rate} sat/vB: the built total is the quoted total`);
@@ -390,51 +419,67 @@ function runScenario(label, sellerType, buyerType) {
   }
   // Fee-rate safety cap applies to fills too
   assert.throws(
-    () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 5_000 }),
+    () => buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 5_000 }),
     /safety cap/,
   );
-  // Sub-dust BTC change folds into the fee; the 546-sat residual slot (vout4) stays
+  // Sub-dust BTC change folds into the fee; the 546-sat residual carrier (vout2) stays
   {
     // Learn the single-buyer-input fee from a generous build, then fund the
-    // buyer with exactly price + 3 slots + network fee − carrier + 100:
+    // buyer with exactly price + 3 × 546 + network fee − carrier + 100:
     // change would be 100 sats < 546 → folded, 5 outputs.
-    const one = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: 5_000_000 }], tokenOutpoints: [], feeRateSatVb: 8 });
+    const one = buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: 5_000_000 }], tokenOutpoints: [], feeRateSatVb: 8 });
     assert.equal(one.inputIndexes.length, 1);
     const tight = [{ txid: T(8), vout: 0, sats: 60_000 + 3 * 546 - 546 + one.feeSats + 100 }];
-    const folded = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: tight, tokenOutpoints: [], feeRateSatVb: 8 });
+    const folded = buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: tight, tokenOutpoints: [], feeRateSatVb: 8 });
     const ftx = parse(folded.psbtHex);
-    checkFillOutputs(`${label} folded`, ftx, folded, { seller: seller.address, buyer: buyer.address, price: 60_000, payload: "LUCKY-20|SEND|LUCKY|1200|1|4" });
-    assert.equal(ftx.outputsLength, 5, `${label}: sub-dust change folded — vout4 residual slot still present`);
+    checkFillOutputs(`${label} folded`, ftx, folded, { seller: seller.address, buyer: buyer.address, price: 60_000, payload: '{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"1200"}' });
+    assert.equal(ftx.outputsLength, 5, `${label}: sub-dust change folded — the vout2 residual carrier still present`);
     assert.equal(folded.changeOmitted, true);
     assert.equal(folded.totalSats, 60_000 + 3 * 546 + folded.feeSats);
     assert.ok(folded.feeSats >= one.feeSats && folded.feeSats <= one.feeSats + 200, `${label}: folded fee absorbs the remainder`);
     // …and with the dust headroom present it builds with vout5 == 546 + 100.
-    const ok = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: tight[0].sats + 546 }], tokenOutpoints: [], feeRateSatVb: 8 });
+    const ok = buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: tight[0].sats + 546 }], tokenOutpoints: [], feeRateSatVb: 8 });
     assert.equal(ok.changeSats, 646, `${label}: change accounted exactly`);
     assert.equal(ok.changeVout, 5);
     assert.equal(parse(ok.psbtHex).outputsLength, 6);
-    // a buyer who cannot even cover the three slots is refused
+    // a buyer who cannot even cover the three 546-sat outputs is refused
     assert.throws(
-      () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: 60_000 }], tokenOutpoints: [], feeRateSatVb: 8 }),
+      () => buildFillPsbt({ sendAmount: 1200, listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: T(8), vout: 0, sats: 60_000 }], tokenOutpoints: [], feeRateSatVb: 8 }),
       /insufficient funds/,
-      `${label}: cannot fund the slots`,
+      `${label}: cannot fund the fixed outputs`,
     );
-    // finalizeFill refuses a fill whose residual slot was tampered to a non-546 value
+    // finalizeFill refuses a fill whose token or residual carrier was tampered to a non-546 value
     {
       const bad = parse(signedFill);
-      bad.updateOutput(4, { amount: 1_000n }, true);
-      assert.throws(() => finalizeFill(hex.encode(bad.toPSBT())), /vout4 \(residual carrier\) is 1000 sats/, `${label}: tampered residual slot refused`);
+      bad.updateOutput(2, { amount: 1_000n }, true);
+      assert.throws(() => finalizeFill(hex.encode(bad.toPSBT())), /vout2 \(residual carrier\) is 1000 sats/, `${label}: tampered residual carrier refused`);
       const badSlot = parse(signedFill);
       badSlot.updateOutput(1, { amount: 600n }, true);
-      assert.throws(() => finalizeFill(hex.encode(badSlot.toPSBT())), /vout1 \(token carrier\) is 600 sats/, `${label}: tampered token slot refused`);
+      assert.throws(() => finalizeFill(hex.encode(badSlot.toPSBT())), /vout1 \(token carrier\) is 600 sats/, `${label}: tampered token carrier refused`);
     }
+  }
+  // The AMT: 1 when the amount is not confirmed; never 0, above the listing, or missing.
+  {
+    const one = buildFillPsbt({ sendAmount: fillSendAmount("unverified", order.amount), listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8 });
+    assert.equal(one.sendAmount, 1);
+    const otx = parse(one.psbtHex);
+    assert.equal(payloadToString(otx.getOutput(4).script.slice(2)), '{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"1"}', `${label}: AMT 1 on the wire`);
+    checkFillOutputs(`${label} amt 1`, otx, one, { seller: seller.address, buyer: buyer.address, price: 60_000, payload: '{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"1"}' });
+    assert.deepEqual(expectPsbtPayload(one.psbtHex, { op: "SEND", ticker: "LUCKY", amount: one.sendAmount }), { op: "SEND", ticker: "LUCKY", amount: 1 }, "its own guard passes");
+    const q1 = estimateFillCost({ order, address: buyer.address, feeRateSatVb: 8, sendAmount: 1 });
+    assert.ok(q1.vsize <= est.vsize, "a shorter AMT is never a bigger transaction");
+    const base = { listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8 };
+    assert.throws(() => buildFillPsbt({ ...base, sendAmount: 0 }), /from 1 to the listed 1,200/);
+    assert.throws(() => buildFillPsbt({ ...base, sendAmount: 1201 }), /from 1 to the listed 1,200/);
+    assert.throws(() => buildFillPsbt({ ...base, sendAmount: 1.5 }), /whole number/);
+    assert.throws(() => buildFillPsbt(base), /whole number from 1/, "sendAmount is required");
   }
   // A tampered listing is refused before any input is added
   {
     const tx = parse(signedListing);
     tx.updateOutput(0, { amount: 1_000n }, true);
     assert.throws(
-      () => buildFillPsbt({ listingPsbtHex: hex.encode(tx.toPSBT()), order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8 }),
+      () => buildFillPsbt({ sendAmount: 1200, listingPsbtHex: hex.encode(tx.toPSBT()), order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8 }),
       /failed verification/,
     );
   }
@@ -488,14 +533,14 @@ runScenario("wpkh-seller/tr-buyer", "wpkh", "tr");
         outputs: scripts.map((script, i) => ({ amount: BigInt(546 + i), script })),
       }),
     );
-  const send = enc2("LUCKY-20|SEND|LUCKY|100|0|3");
+  const send = enc2('{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"100"}');
   const memo = enc2("hello");
   // single OP_RETURN, direct push
   {
     const d = decodeRawTx(raw([pay.script, opret(send)]));
     assert.equal(d.opReturnCount, 1);
     assert.equal(d.payloadVout, 1);
-    assert.deepEqual(d.payload, { op: "SEND", ticker: "LUCKY", amount: 100, toOutIdx: 0, changeOutIdx: 3 });
+    assert.deepEqual(d.payload, { op: "SEND", ticker: "LUCKY", amount: 100 });
     assert.equal(d.outputs[0].address, pay.address);
     assert.equal(d.outputs[1].address, null);
   }
@@ -528,6 +573,7 @@ runScenario("wpkh-seller/tr-buyer", "wpkh", "tr");
   assert.equal(decodeRawTx(raw([new Uint8Array([...opret(send), 0x01, 0x00])])).payload, null, "second push → no payload");
   assert.equal(decodeRawTx(raw([new Uint8Array([0x6a])])).payload, null, "bare OP_RETURN → no payload");
   assert.equal(decodeRawTx(raw([new Uint8Array([0x6a, 0x4c])])).payload, null, "truncated PUSHDATA1 → no payload");
+  assert.equal(decodeRawTx(raw([opret(enc2("LUCKY-20|SEND|LUCKY|100|0|3"))])).payload, null, "a `|`-separated push → no payload");
   // broadcast guard: two OP_RETURN outputs are refused before any relay sees them
   assert.equal(assertSingleOpReturn(raw([pay.script, opret(send)])), 1);
   assert.equal(assertSingleOpReturn(raw([pay.script])), 0, "a plain payment passes");

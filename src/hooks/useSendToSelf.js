@@ -5,7 +5,8 @@ import * as wallet from "../lib/wallet.js";
 import { droppedMessage, useTxStatus } from "./useTxStatus.js";
 import { friendlyError } from "./useWallet.js";
 import { useSeedWait } from "./useSeedWait.js";
-import { buildSendPsbt, buildSpeedUpPsbt, estimateSendFeeSats, expectPsbtPayload, minFeeInputSats, MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
+import { buildSendPsbt, buildSpeedUpPsbt, estimateSendFeeSats, expectPsbtPayload, minFeeInputSats, MAX_FEE_RATE_SAT_VB, RBF_SEQUENCE } from "../lib/psbt.js";
+import { PROTOCOL_LOCKTIME } from "../lib/payloads.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
 import { cancelFeeRate } from "../lib/market.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
@@ -27,11 +28,11 @@ const VERSION_POLL_MS = 15_000;
 
 /**
  * The on-chain SEND shared by the Sell fold, the portfolio and the Send
- * page (§2.3 reference layout — vout0 recipient, vout1 fee, vout2
- * OP_RETURN, vout3 your residual slot, vout4 BTC change):
+ * page (§2.3 reference layout — vout0 protocol fee, vout1 recipient,
+ * vout2 your residual carrier, vout3 OP_RETURN, vout4 BTC change):
  *
  *   split   — move `amount` of `ticker` off a carrier onto a fresh 546-sat
- *             vout0 of your own (the residual stays on vout3), so part of it
+ *             vout1 of your own (the residual stays on vout2), so part of it
  *             can be listed — or a multi-ticker carrier's ticker moved onto
  *             its own carrier
  *   cancel  — spend a LISTED carrier back to yourself: the only real cancel
@@ -197,8 +198,11 @@ export function useSendToSelf({ onSettled } = {}) {
           minInputSats: minFeeInputSats(utxoRes.assetSafe), // 10,000-sat floor on non-asset-safe lists
         });
         setChain({ phase: "signing", kind, ticker, amount, toAddress: to, order, rule, feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, inputs: built.inputs, assetSafe: utxoRes.assetSafe });
-        // Sign-time guard: exactly one OP_RETURN and it is a SEND of this ticker/amount.
-        expectPsbtPayload(built.psbtHex, { op: "SEND", ticker, amount });
+        // Sign-time guard: exactly one OP_RETURN and it is a SEND of this
+        // ticker / amount, the protocol lock time, replace-by-fee on every
+        // input, and the reference layout — the fee at vout0, `to` at vout1,
+        // yourself at vout2.
+        expectPsbtPayload(built.psbtHex, { op: "SEND", ticker, amount, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self: address, to } });
         const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
         setChain((c) => ({ ...c, phase: "broadcasting" }));
         let txid;
@@ -213,8 +217,8 @@ export function useSendToSelf({ onSettled } = {}) {
           }
           throw e;
         }
-        // Your token outputs of this tx: vout3 (the residual carrier) always,
-        // vout0 too when it pays yourself; vout4, when present, is plain BTC.
+        // Your token outputs of this tx: vout2 (the residual carrier) always,
+        // vout1 too when it pays yourself; vout4, when present, is plain BTC.
         addPendingTokenOutpoints(sendPendingOutpoints(txid, { toSelf: to === address }), address);
         // The unsigned PSBT and its change output stay with the flow: a Speed up rebuilds from them.
         setChain((c) => ({ ...c, phase: "pending", txid, psbt: built.psbtHex, changeVout: built.changeVout ?? null }));
@@ -259,8 +263,8 @@ export function useSendToSelf({ onSettled } = {}) {
         const st = await indexer.txStatus(c.txid);
         if (st && st.confirmed) throw new Error("It has just confirmed — no need to speed it up.");
         const q = buildSpeedUpPsbt({ psbtHex: c.psbt, changeVout: c.changeVout, feeRateSatVb: rate, incrementalRelayFee });
-        // The same guard as the first signature: one OP_RETURN, a SEND of this ticker / amount.
-        expectPsbtPayload(q.psbtHex, { op: "SEND", ticker: c.ticker, amount: c.amount });
+        // The same guard as the first signature.
+        expectPsbtPayload(q.psbtHex, { op: "SEND", ticker: c.ticker, amount: c.amount, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self: address, to: c.toAddress || address } });
         setChain((x) => ({ ...x, speeding: "signing" }));
         // A replacement: the inputs of every version it replaces may be spent
         // again — an earlier one whose faster copy was never confirmed as

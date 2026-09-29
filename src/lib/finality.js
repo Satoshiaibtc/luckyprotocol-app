@@ -4,7 +4,7 @@
 // Bitcoin can replace its newest blocks (a chain reorganization). LUCKY-20
 // state follows the chain Bitcoin keeps, so a result read from a block
 // that is only a few blocks deep can still change: a MINE that confirms
-// again in another block is credited from THAT block's hash, a publish can
+// again in another block is credited from THAT block's hash, a DEPLOY can
 // land after someone else's, a fill or a withdrawal can go back to the
 // mempool. The app therefore shows every such result as provisional until
 // its block has FINAL_DEPTH confirmations, keeps checking it until then,

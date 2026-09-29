@@ -49,7 +49,6 @@ import { mockGet, mockPostText, mockPostJson } from "./mock.js";
 import { seedWaitFields, serverErrorText } from "./httpError.js";
 import { RECENT_BLOCKS_LIMIT, blockStats } from "./blocks.js";
 import { DAYS_DEFAULT, DAYS_MAX, DIGITS_DEFAULT, DIGITS_MAX } from "./digits.js";
-import { MAX_COMMIT_AGE, MIN_COMMIT_AGE } from "./payloads.js";
 import { MARKET_OPEN_DELAY } from "./finality.js";
 
 export const DEFAULT_INDEXER_URL = "http://127.0.0.1:8765";
@@ -390,7 +389,7 @@ function _sanitizeTradeRow(t) {
   const amount = _safeInt(t.amount, _MAX_TOKEN_AMT);
   const price = _safeInt(t.price_sats, _MAX_SATS);
   const seller = _safeAddr(t.seller);
-  // `buyer` is null on the wire when vout[TO_OUT] has no address form
+  // `buyer` is null on the wire when vout1 has no address form
   // (§7.5) — the fill still happened and still counts, so the row stays.
   const buyer = _safeAddr(t.buyer);
   // A fill pays ≥ the ask and an ask is ≥ 546 sats (§7.1 / §7.4): a
@@ -767,8 +766,12 @@ export async function health(signal) {
     node_peers: _safeInt(env && env.node_peers, 1e6),
     // header time of the tip block (unix s), or null
     tip_time: _safeTime(env && env.tip_time),
-    // a full rebuild / cold scan is running: every answer is incomplete
-    rebuilding: !!(env && env.rebuilding),
+    // a full rebuild / cold scan is running: every answer is incomplete.
+    // The flag is `state_rebuilding`; an answer without it (an indexer that
+    // predates it, or one not on these rules) counts as rebuilding, so
+    // writes pause. The key `rebuilding` is always true, for builds that
+    // pause every write on it.
+    rebuilding: !(env && env.state_rebuilding === false),
     final_depth: _safeInt(env && env.final_depth, 1_000),
     // false while the order book cannot save listings (a new one is refused
     // meanwhile); absent = it can
@@ -957,65 +960,6 @@ export async function token(ticker, signal) {
   }
   const clean = _sanitizeTokenRow(row);
   if (!clean) throw new Error(`the indexer returned an unreadable registry row for ${ticker}`);
-  return clean;
-}
-
-// CommitView (§2.1, commit-reveal deploy). `hash` is the COMMIT's H;
-// `carrier` the outpoint a REVEAL must spend as input 0 (always
-// `<txid>:0`); `committer` its address — the deployer if the reveal
-// applies (null on an invalid commit). The window heights are derived here
-// when the server omits them (reveal_from = height + MIN_COMMIT_AGE,
-// expires_at = height + MAX_COMMIT_AGE). Once the carrier is spent,
-// `spent_txid` / `spent_height` name the spend and, when it was a DEPLOY
-// with the carrier as input 0, `reveal_applied` / `reveal_reason` say
-// whether it registered the ticker and, if not, the first §2.1 rule it failed.
-const _COMMIT_STATUS = new Set(["open", "revealed", "expired", "invalid"]);
-function _sanitizeCommit(c, txid) {
-  if (!c || typeof c !== "object") return null;
-  const id = String(c.txid || "").toLowerCase();
-  if (!_TXID_RE.test(id) || id !== String(txid).toLowerCase()) return null;
-  const height = _safeInt(c.height, 1e9);
-  const status = _COMMIT_STATUS.has(c.status) ? c.status : null;
-  if (height === null || !status) return null;
-  const hash = /^[0-9a-f]{64}$/.test(String(c.hash || "")) ? String(c.hash) : null;
-  const carrier = _ORDER_ID_RE.test(String(c.carrier || "")) ? String(c.carrier).toLowerCase() : `${id}:0`;
-  const reason = (v) => (typeof v === "string" && /^[a-z_]{1,40}$/.test(v) ? v : null);
-  return {
-    txid: id,
-    height,
-    tx_index: _safeInt(c.tx_index, 1e7),
-    hash,
-    carrier,
-    committer: _safeAddr(c.committer),
-    status,
-    reveal_from_height: _safeInt(c.reveal_from_height, 1e9) ?? height + MIN_COMMIT_AGE,
-    expires_at_height: _safeInt(c.expires_at_height, 1e9) ?? height + MAX_COMMIT_AGE,
-    invalid_reason: reason(c.invalid_reason),
-    spent_txid: _safeTxidOrNull(c.spent_txid),
-    spent_height: _safeInt(c.spent_height, 1e9),
-    // true / false only when the spend was a DEPLOY with this carrier as input 0
-    reveal_applied: typeof c.reveal_applied === "boolean" ? c.reveal_applied : null,
-    reveal_reason: reason(c.reveal_reason),
-  };
-}
-
-/**
- * GET /commits/:txid → the recorded COMMIT `{ txid, height, hash, carrier,
- * committer, status: "open" | "revealed" | "expired" | "invalid",
- * reveal_from_height, expires_at_height }`, or null on 404 (not recorded —
- * unconfirmed, not indexed yet, or pruned after expiry). A 200 that fails
- * sanitization throws: "unknown", never "not recorded".
- */
-export async function commit(txid, signal) {
-  let row;
-  try {
-    row = await _httpGet(`/commits/${encodeURIComponent(String(txid).toLowerCase())}`, signal);
-  } catch (e) {
-    if (_is404(e)) return null;
-    throw e;
-  }
-  const clean = _sanitizeCommit(row, txid);
-  if (!clean) throw new Error(`the indexer returned an unreadable reservation record for tx ${String(txid).slice(0, 12)}…`);
   return clean;
 }
 
@@ -1395,7 +1339,6 @@ export {
   _sanitizePrice,
   _sanitizeDigits,
   _sanitizeDigitsByDays,
-  _sanitizeCommit,
   _sanitizeMineRow,
   _sanitizeTxStatus,
 };

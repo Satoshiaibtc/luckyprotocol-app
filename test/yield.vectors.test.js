@@ -67,16 +67,20 @@ for (const v of vectors) {
 }
 
 // The indexer's copy of the vectors is the canonical one: byte-identical
-// when LP_INDEXER_DIR names a local indexer checkout (skipped otherwise).
+// when LP_INDEXER_DIR names a local indexer checkout. Skipped only when the
+// variable is unset; a set variable whose file is missing fails.
 {
-  let canon = null;
-  try {
-    if (process.env.LP_INDEXER_DIR) canon = readFileSync(join(process.env.LP_INDEXER_DIR, "tests", "yield_vectors.json"));
-  } catch {
-    /* reported below */
-  }
-  if (!canon) console.log("yield vectors: LP_INDEXER_DIR not set — byte-identity check skipped");
-  if (canon) {
+  const dir = process.env.LP_INDEXER_DIR;
+  if (!dir) {
+    console.log("yield vectors: LP_INDEXER_DIR not set — byte-identity check skipped");
+  } else {
+    const p = join(dir, "tests", "yield_vectors.json");
+    let canon;
+    try {
+      canon = readFileSync(p);
+    } catch (e) {
+      assert.fail(`LP_INDEXER_DIR is set but ${p} cannot be read: ${e.message}`);
+    }
     assert.ok(readFileSync(join(here, "../src/lib/yield_vectors.json")).equals(canon), "src/lib/yield_vectors.json must be byte-identical to the indexer's copy");
     console.log("yield vectors: byte-identical to the indexer's");
   }

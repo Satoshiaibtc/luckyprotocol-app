@@ -5497,7 +5497,7 @@ button.wallet-addr:focus-visible {
   letter-spacing: -0.2px;
 }
 
-/* ---- create: the two deploy steps (reserve → publish, §2.1) ------------------------------------ */
+/* ---- create: the pending DEPLOY and its Speed up (§2.1) ------------------------------------------ */
 
 .cr-steps {
   display: grid;

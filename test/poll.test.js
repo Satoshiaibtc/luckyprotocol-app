@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { createPoller, pageHidden, startPolling } from "../src/lib/poller.js";
 import * as indexer from "../src/lib/indexer.js";
 import { isAbortError } from "../src/lib/retry.js";
+import { syncStateOf } from "../src/lib/sync.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -240,6 +241,35 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     globalThis.fetch = realFetch;
   }
   console.log("poll: a body that stalls after its headers ends in the timeout; the poll is not frozen");
+}
+
+// ---- the rebuild flag is read fail-closed ----------------------------------------------------------------
+// Only an answer with `state_rebuilding: false` unpauses writes: an indexer
+// that does not send the flag (one that predates it, or one not on these
+// rules) reads as rebuilding, and nothing that depends on its state is
+// offered.
+{
+  const realFetch = globalThis.fetch;
+  let body = null;
+  globalThis.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => body });
+  try {
+    const at = { indexed_height: 1, tip_height: 1 };
+    body = { ...at, rebuilding: false };
+    const without = await indexer.health();
+    assert.equal(without.rebuilding, true, "no state_rebuilding: rebuilding");
+    assert.equal(syncStateOf(without).synced, false, "…and not synced, so writes pause");
+    body = { ...at, rebuilding: true, state_rebuilding: false };
+    const ready = await indexer.health();
+    assert.equal(ready.rebuilding, false, "state_rebuilding false: not rebuilding");
+    assert.equal(syncStateOf(ready).synced, true);
+    body = { ...at, rebuilding: true, state_rebuilding: true };
+    assert.equal((await indexer.health()).rebuilding, true, "state_rebuilding true: rebuilding");
+    body = { ...at, state_rebuilding: "false" };
+    assert.equal((await indexer.health()).rebuilding, true, "a flag that is not a boolean false counts as rebuilding");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  console.log("poll: /health without state_rebuilding reads as rebuilding (writes pause)");
 }
 
 assert.equal(pageHidden(), false, "no document outside a browser: never hidden");

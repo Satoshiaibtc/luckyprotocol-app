@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** §1 row name → payloads.js export (FINAL_DEPTH is re-exported there from finality.js). */
 export const SPEC_CONSTANTS = [
-  "PROTOCOL_PREFIX",
+  "PROTOCOL_ID",
   "ACTIVATION_HEIGHT",
   "REQUIRED_TOKEN_SUPPLY",
   "DUST_SATS",
@@ -24,9 +24,8 @@ export const SPEC_CONSTANTS = [
   "DEPLOY_PROTOCOL_FEE_SATS",
   "MINE_PROTOCOL_FEE_SATS",
   "SEND_PROTOCOL_FEE_SATS",
-  "MAX_OUT_IDX",
-  "MIN_COMMIT_AGE",
-  "MAX_COMMIT_AGE",
+  "SEND_TO_VOUT",
+  "SEND_RESIDUAL_VOUT",
   "FINAL_DEPTH",
 ];
 

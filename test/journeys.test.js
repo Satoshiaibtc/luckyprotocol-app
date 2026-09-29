@@ -33,7 +33,7 @@ const ADDR = MOCK_WALLET.address;
 // ---- one activation wording, "1 block", the gate one block early -----
 {
   assert.deepEqual(activationState(null), { locked: true, unknown: true, blocksLeft: null, active: false, blocksToActivation: null }, "unknown tip fails closed");
-  // Reserve and Mine unlock at tip ACTIVATION_HEIGHT − 1 (969,599) —
+  // Create and Mine unlock at tip ACTIVATION_HEIGHT − 1 (969,599) —
   // every tx the app builds has nLockTime 969,599, so none can confirm before 969,600.
   assert.equal(UNLOCK_HEIGHT, ACTIVATION_HEIGHT - 1);
   assert.equal(UNLOCK_HEIGHT, PROTOCOL_LOCKTIME, "the gate opens exactly where the lock time allows the next block");
@@ -50,13 +50,14 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(blocksEtaText(144), "about 24 hours");
   assert.equal(countdownText(1), "1 block from now (about 10 minutes)");
   assert.match(activationNotice(ACTIVATION_HEIGHT - 2, "Mining"), /Mining opens when block #969,599 is mined — 1 block from now \(about 10 minutes\)\./);
-  assert.ok(!/1 blocks/.test(activationNotice(ACTIVATION_HEIGHT - 2, "Reserving a ticker")));
+  assert.ok(!/1 blocks/.test(activationNotice(ACTIVATION_HEIGHT - 2, "Creating a ticker")));
+  assert.match(activationNotice(ACTIVATION_HEIGHT - 2, "Creating a ticker"), /^LUCKY-20 starts at block #[\d,]+\. Creating a ticker opens when block #[\d,]+ is mined/);
   assert.match(activationNotice(ACTIVATION_HEIGHT - 2, "Mining"), /lock time, so none can be confirmed before block #969,600/);
-  assert.match(activationNotice(null, "Reserving a ticker"), /has not reported the chain tip yet/);
+  assert.match(activationNotice(null, "Creating a ticker"), /has not reported the chain tip yet/);
   assert.equal(activationNotice(ACTIVATION_HEIGHT - 1, "Mining"), null, "no lock notice at 969,599");
   assert.equal(activationNotice(ACTIVATION_HEIGHT, "Mining"), null);
-  assert.match(activationBannerText(ACTIVATION_HEIGHT - 463), /^LUCKY-20 starts at block #969,600\. Reserve and Mine open at block #969,599, 462 blocks from now \(about 3 days\);/);
-  assert.match(activationBannerText(ACTIVATION_HEIGHT - 1), /^LUCKY-20 starts with the next block, #969,600\. Reserve and Mine are open/, "at 969,599 the banner says the gate is open");
+  assert.match(activationBannerText(ACTIVATION_HEIGHT - 463), /^LUCKY-20 starts at block #969,600\. Create and Mine open at block #969,599, 462 blocks from now \(about 3 days\);/);
+  assert.match(activationBannerText(ACTIVATION_HEIGHT - 1), /^LUCKY-20 starts with the next block, #969,600\. Create and Mine are open/, "at 969,599 the banner says the gate is open");
   assert.equal(activationBannerText(null), null, "no banner while the tip is unknown");
   assert.equal(activationBannerText(ACTIVATION_HEIGHT), null, "no banner once active");
   assert.equal(activationBannerText(ACTIVATION_HEIGHT + 5), null, "no banner after activation");

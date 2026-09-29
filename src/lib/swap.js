@@ -7,6 +7,12 @@
 // that turn the tx into a valid SEND (§7.2) without touching the seller's
 // signature. Nobody custodies anything; settlement is the Bitcoin network.
 //
+// The fill is a SEND whose 546-sat fee output is part of the sale: the
+// listed input is signed 0x83, so its tokens move only through an applied
+// SEND of their ticker; without the fee output (or with any other payload,
+// or none) the seller is paid the price and keeps the tokens, on the
+// payment output (§4 rule 6, §7.5).
+//
 //   buildListingPsbt  — seller side, unsigned 1-in/1-out PSBT (§7.1)
 //   verifyListing     — buyer side, §7.2 checks 1, 2, 4, 5 (3 is a live read)
 //   buildFillPsbt     — buyer side, listing + inputs 1..n + SEND outputs (§7.2)
@@ -24,6 +30,8 @@ import {
   DUST_SATS,
   PROJECT_FEE_ADDRESS,
   SEND_PROTOCOL_FEE_SATS,
+  SEND_RESIDUAL_VOUT,
+  SEND_TO_VOUT,
   REQUIRED_TOKEN_SUPPLY,
   TICKER_RE,
   buildSendPayload,
@@ -61,18 +69,34 @@ export function maxPriceSats(amount) {
   return Math.min(MAX_PRICE_SATS, a * MAX_UNIT_PRICE_SATS);
 }
 /**
- * Fill layout (§7.2): vout1 = buyer token slot (TO_OUT, 546),
- * vout4 = buyer residual slot (CHANGE_OUT, 546 — ALWAYS present), vout5 =
- * buyer BTC change (optional, folded into the fee when < 546). TO_OUT and
- * CHANGE_OUT MUST differ: equal indices do not parse (§2.3), the tx would
- * be a plain spend and default routing would hand the seller's tokens to
- * vout0 — i.e. back to the seller, with the buyer's price gone.
+ * Fill layout (§7.2): vout0 = the seller's price output (from the listing),
+ * vout1 = the buyer's token carrier (546, receives AMT), vout2 = the buyer's
+ * residual carrier (546 — ALWAYS present), vout3 = the exact 546-sat
+ * protocol fee, vout4 = the OP_RETURN, vout5 = the buyer's BTC change
+ * (optional, folded into the fee when < 546). The listing stays at input 0:
+ * SIGHASH_SINGLE pairs it with vout0, and at input 1 or 2 its payment would
+ * take the place of one of the SEND's own outputs.
  */
-export const FILL_TO_OUT = 1;
-export const FILL_CHANGE_OUT = 4;
+export const FILL_TO_VOUT = SEND_TO_VOUT;
+export const FILL_RESIDUAL_VOUT = SEND_RESIDUAL_VOUT;
+export const FILL_FEE_VOUT = 3;
+export const FILL_OP_RETURN_VOUT = 4;
 export const FILL_BTC_CHANGE_VOUT = 5;
-/** Sats a fill adds on top of the price and the network fee: token output + protocol fee + residual output. */
-export const FILL_FIXED_SATS = DUST_SATS + SEND_PROTOCOL_FEE_SATS + DUST_SATS;
+/** Sats a fill adds on top of the price and the network fee: token output + residual output + protocol fee. */
+export const FILL_FIXED_SATS = DUST_SATS + DUST_SATS + SEND_PROTOCOL_FEE_SATS;
+
+/**
+ * The fill's AMT for a second-source `verdict` (§7.2 "The fill's AMT"): the
+ * listing's `amount` only when the second source confirmed it ("agree"),
+ * else 1. A fill whose AMT exceeds the listed output's real balance does
+ * not apply, and the listed tokens then stay with the seller (§4 rule 6);
+ * 1 applies whenever the output holds any of the ticker, and every token
+ * on it still reaches the buyer (1 on vout1, the rest on vout2). Only an
+ * amount the second source confirmed is sent as is.
+ */
+export function fillSendAmount(verdict, amount) {
+  return verdict === "agree" ? amount : 1;
+}
 
 const TXID_RE = /^[0-9a-f]{64}$/i;
 
@@ -408,18 +432,19 @@ function fillVsize({ sellerType, buyerType, buyerInputCount, outputAddresses, op
 
 /**
  * Display-only preview of a fill's cost before any UTXO is fetched: one
- * buyer input, the three 546-sat slots and a change output. Clamps the
- * rate instead of throwing.
+ * buyer input, the three 546-sat outputs and a change output. Clamps the
+ * rate instead of throwing. `sendAmount` is the fill's AMT (fillSendAmount;
+ * the listed amount by default — a few vbytes of difference, display only).
  */
-export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 }) {
+export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1, sendAmount = order.amount }) {
   const buyerType = decodeAddress(address).type;
   const sellerType = order.seller && order.seller.startsWith("bc1p") ? "tr" : "wpkh";
-  const payload = buildSendPayload({ ticker: order.ticker, amount: order.amount, toOutIdx: FILL_TO_OUT, changeOutIdx: FILL_CHANGE_OUT });
+  const payload = buildSendPayload({ ticker: order.ticker, amount: sendAmount });
   const vsize = fillVsize({
     sellerType,
     buyerType,
     buyerInputCount: inputCount,
-    outputAddresses: [order.seller || address, address, PROJECT_FEE_ADDRESS, address, address],
+    outputAddresses: [order.seller || address, address, address, PROJECT_FEE_ADDRESS, address],
     opReturnScriptLen: makeOpReturnScript(payload).length,
   });
   const rate = Math.min(1_000, Math.max(1, Number(feeRateSatVb) || 1));
@@ -440,24 +465,36 @@ export function estimateFillCost({ order, address, feeRateSatVb, inputCount = 1 
   };
 }
 
+/** The scriptPubKey of PROJECT_FEE_ADDRESS (the fill's fee output must pay exactly it). */
+let feeScript = null;
+function projectFeeScript() {
+  if (!feeScript) feeScript = decodeAddress(PROJECT_FEE_ADDRESS).script;
+  return feeScript;
+}
+
 /**
  * Structural check of a fill's outputs (shared by buildFillPsbt's self-check
- * and finalizeFill's broadcast guard): vout[TO_OUT] and vout[CHANGE_OUT]
- * are 546-sat address outputs (never OP_RETURN), the OP_RETURN sits at
- * vout3, and the output count is 5 (no BTC change) or 6 (with it). Throws
- * with a reason; returns { outputCount, hasChange }.
+ * and finalizeFill's broadcast guard): vout1 and vout2 are 546-sat address
+ * outputs (never OP_RETURN), vout3 pays exactly 546 sats to
+ * PROJECT_FEE_ADDRESS (without it the SEND does not apply and the listed
+ * tokens stay with the seller), the OP_RETURN sits at vout4, and the output
+ * count is 5 (no BTC change) or 6 (with it, ≥ 546). Throws with a reason;
+ * returns { outputCount, hasChange }.
  */
 export function checkFillLayout(tx) {
   const n = tx.outputsLength;
   if (n !== 5 && n !== 6) throw new Error(`fill has ${n} outputs — expected 5 (no BTC change) or 6`);
   const scripts = outputScripts(tx);
-  if (!isOpReturnScript(scripts[3])) throw new Error("fill: vout3 is not the OP_RETURN output");
-  for (const [vout, what] of [[FILL_TO_OUT, "token carrier"], [FILL_CHANGE_OUT, "residual carrier"]]) {
+  for (const [vout, what] of [[FILL_TO_VOUT, "token carrier"], [FILL_RESIDUAL_VOUT, "residual carrier"]]) {
     const o = tx.getOutput(vout);
     if (isOpReturnScript(o.script)) throw new Error(`fill: vout${vout} (${what}) must not be an OP_RETURN`);
     if (o.amount !== BigInt(DUST_SATS)) throw new Error(`fill: vout${vout} (${what}) is ${o.amount} sats — a token carrier is exactly ${DUST_SATS}`);
   }
-  if (tx.getOutput(2).amount !== BigInt(SEND_PROTOCOL_FEE_SATS)) throw new Error("fill: vout2 is not the exact protocol fee");
+  const fee = tx.getOutput(FILL_FEE_VOUT);
+  if (!equalBytes(fee.script, projectFeeScript()) || fee.amount !== BigInt(SEND_PROTOCOL_FEE_SATS)) {
+    throw new Error(`fill: vout${FILL_FEE_VOUT} is not exactly ${SEND_PROTOCOL_FEE_SATS} sats to the protocol fee address`);
+  }
+  if (!isOpReturnScript(scripts[FILL_OP_RETURN_VOUT])) throw new Error(`fill: vout${FILL_OP_RETURN_VOUT} is not the OP_RETURN output`);
   if (n === 6 && tx.getOutput(FILL_BTC_CHANGE_VOUT).amount < BigInt(DUST_SATS)) throw new Error("fill: vout5 BTC change is sub-dust");
   return { outputCount: n, hasChange: n === 6 };
 }
@@ -467,31 +504,39 @@ export function checkFillLayout(tx) {
  * §7.2 SEND layout:
  *
  *   vout0  price_sats → seller        (from the listing — untouched)
- *   vout1  546        → buyer         (token slot; TO_OUT = 1)
- *   vout2  546        → PROJECT_FEE_ADDRESS
- *   vout3  OP_RETURN  LUCKY-20|SEND|<T>|<AMT>|1|4
- *   vout4  546        → buyer         (residual slot; CHANGE_OUT = 4 —
- *                                      ALWAYS present, even when nothing
- *                                      is left over)
+ *   vout1  546        → buyer         (token carrier; receives AMT)
+ *   vout2  546        → buyer         (residual carrier — ALWAYS present,
+ *                                      even when nothing is left over)
+ *   vout3  546        → PROJECT_FEE_ADDRESS (the SEND fee — required: without
+ *                                      it the listed tokens stay with the seller)
+ *   vout4  OP_RETURN  {"p":"lucky-20","op":"send","tick":"<T>","amt":"<AMT>"}
  *   vout5  BTC change → buyer         (optional; folded into the fee when
  *                                      < 546, exactly like a MINE's change)
+ *
+ * `sendAmount` is the fill's AMT (fillSendAmount): an integer from 1 to
+ * `order.amount` — the listed amount only when the second source confirmed
+ * it, else 1 (an AMT above the listed output's real balance would not apply
+ * and would leave the tokens with the seller).
  *
  * Buyer inputs are filtered by the §4 builder obligation (≤546 sats and
  * every indexer-reported token outpoint are excluded). This is not just
  * hygiene: under per-ticker routing a token-bearing buyer input would have
- * its tokens routed together with the seller's residual into vout4 — not
+ * its tokens routed together with the seller's residual into vout2 — not
  * destroyed, but moved without the buyer asking — and an inscribed sat
  * would land in the seller's price output.
  *
- * @returns {{ psbtHex, inputIndexes: number[] (buyer's only), feeSats, totalSats, priceSats, changeSats, changeOmitted, changeVout, residualVout }}
+ * @returns {{ psbtHex, inputIndexes: number[] (buyer's only), feeSats, totalSats, priceSats, changeSats, changeOmitted, changeVout, residualVout, sendAmount }}
  */
-export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, minInputSats = 0 }) {
+export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, minInputSats = 0, sendAmount }) {
   const v = verifyListing({ psbtHex: listingPsbtHex, order });
   if (!v.ok) {
     const bad = v.checks.filter((c) => !c.ok).map((c) => `${c.label}: ${c.detail}`).join("; ");
     throw new Error(`listing failed verification — ${bad}`);
   }
   if (!TICKER_RE.test(String(order.ticker || ""))) throw new Error("order has an invalid ticker");
+  if (!Number.isInteger(sendAmount) || sendAmount < 1 || sendAmount > Number(order.amount)) {
+    throw new Error(`the fill's amount must be a whole number from 1 to the listed ${Number(order.amount).toLocaleString("en-US")} (got ${sendAmount})`);
+  }
 
   const { type: buyerType, script: buyerScript } = decodeAddress(address);
   const tapInternalKey = buyerType === "tr" ? xOnlyFromCompressedHex(pubkeyHex) : null;
@@ -512,13 +557,13 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   if (spendable.length === 0) throw noSpendableError(address, minInputSats);
   const satVb = checkedFeeRate(feeRateSatVb);
 
-  const payload = buildSendPayload({ ticker: order.ticker, amount: order.amount, toOutIdx: FILL_TO_OUT, changeOutIdx: FILL_CHANGE_OUT });
+  const payload = buildSendPayload({ ticker: order.ticker, amount: sendAmount });
   const opReturnScript = makeOpReturnScript(payload);
-  // Fixed layout: price + token slot + fee + residual slot. The residual slot
-  // (vout4) is a 546-sat carrier the payload commits, so it is always in the
+  // Fixed layout: price + token carrier + residual carrier + fee. The
+  // residual carrier (vout2) is always there, so it is always in the
   // estimate; vout5 (BTC change) is only there when `withChange`.
   const fixedOutValue = priceSats + FILL_FIXED_SATS;
-  const fixedAddresses = [sellerAddress || address, address, PROJECT_FEE_ADDRESS, address];
+  const fixedAddresses = [sellerAddress || address, address, address, PROJECT_FEE_ADDRESS];
 
   const attempt = (withChange) => {
     const outputAddresses = withChange ? fixedAddresses.concat([address]) : fixedAddresses;
@@ -559,16 +604,16 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
     if (tapInternalKey) input.tapInternalKey = tapInternalKey;
     inputIndexes.push(tx.addInput(input));
   }
-  tx.addOutputAddress(address, BigInt(DUST_SATS), NETWORK);                          // vout1 token slot
-  tx.addOutputAddress(PROJECT_FEE_ADDRESS, BigInt(SEND_PROTOCOL_FEE_SATS), NETWORK); // vout2 fee
-  tx.addOutput({ script: opReturnScript, amount: 0n });                             // vout3 OP_RETURN
-  tx.addOutputAddress(address, BigInt(DUST_SATS), NETWORK);                          // vout4 residual slot — always
+  tx.addOutputAddress(address, BigInt(DUST_SATS), NETWORK);                          // vout1 token carrier (AMT)
+  tx.addOutputAddress(address, BigInt(DUST_SATS), NETWORK);                          // vout2 residual carrier — always
+  tx.addOutputAddress(PROJECT_FEE_ADDRESS, BigInt(SEND_PROTOCOL_FEE_SATS), NETWORK); // vout3 fee
+  tx.addOutput({ script: opReturnScript, amount: 0n });                             // vout4 OP_RETURN
   if (!changeOmitted) tx.addOutputAddress(address, BigInt(change), NETWORK);        // vout5 BTC change — optional
 
   // Self-check before handing the PSBT to the wallet: exactly one OP_RETURN,
-  // it is the SEND of this order, and the slots are laid out as
-  // the payload's indices say.
-  checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), { op: "SEND", ticker: order.ticker, amount: order.amount });
+  // it is the SEND of this order with this AMT, and the outputs are laid out
+  // as §7.2 says.
+  checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), { op: "SEND", ticker: order.ticker, amount: sendAmount });
   checkFillLayout(tx);
 
   return {
@@ -584,7 +629,8 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
     changeSats: changeOmitted ? 0 : change,
     changeOmitted,
     changeVout: changeOmitted ? null : FILL_BTC_CHANGE_VOUT,
-    residualVout: FILL_CHANGE_OUT,
+    residualVout: FILL_RESIDUAL_VOUT,
+    sendAmount,
     estimatedVsize: Math.ceil(sel.vsize),
     feeRateSatVb: satVb,
     seller: sellerAddress,
@@ -606,7 +652,7 @@ export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
   // Broadcast-time guard: the tx we are about to extract must be
   // a single-OP_RETURN SEND — never a MINE / DEPLOY riding on the
   // seller's bearer signature, never a second OP_RETURN a wallet injected —
-  // laid out with 546-sat token / residual slots at the payload's indices.
+  // laid out as §7.2 says, the fee output included (checkFillLayout).
   checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), expect);
   if (!expect || expect.op === "SEND") checkFillLayout(tx);
   const in0 = tx.getInput(0);
@@ -670,7 +716,9 @@ export function decodeRawTx(rawHex) {
     address: isOpReturnScript(o.script) ? null : scriptAddress(o.script),
   }));
   // Witness stack per input (hex elements; empty for a non-segwit tx) — the
-  // mock indexer reads only its signature SHAPE for deployer attribution (§2.1).
+  // mock indexer reads its signature type from it (src/lib/sighash.js) for
+  // deployer attribution (§2.1), the listing-signed rule (§4 rule 6) and
+  // order settlement (§7.5).
   const witnesses = parsed.inputs.map((_, i) => (parsed.witnesses && parsed.witnesses[i] ? parsed.witnesses[i].map((w) => hex.encode(w)) : []));
   return { txid: tx.id, inputs, outputs, witnesses, payload, payloadText, payloadVout, opReturnCount };
 }

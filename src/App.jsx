@@ -36,7 +36,7 @@ const LAGGING_POLL_MS = 5_000;
  * every page — the board's "anyone can mine it", an empty
  * Market or Activity — reads differently when nothing can be created or
  * mined for another few days. At tip ACTIVATION_HEIGHT − 1 it says that
- * Reserve and Mine are already open. Hidden while the tip is
+ * Create and Mine are already open. Hidden while the tip is
  * unknown (the gates still fail closed and each action says so) and from
  * activation on.
  */

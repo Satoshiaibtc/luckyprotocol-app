@@ -10,25 +10,22 @@
 // whether this DEPLOY was the first to confirm — so the "✓ yours" banner
 // waits for that verdict instead of being printed on raw confirmation.
 //
-// A deploy is two transactions (commit-reveal, §2.1): step 1 "reserve"
-// (the COMMIT — the ticker stays hidden) and step 2 "publish" (the REVEAL,
-// a DEPLOY with a salt). Both steps log here.
+// A deploy is one transaction (§2.1) whose OP_RETURN names the ticker.
+// While it waits for a block it can be sped up (a replacement with a
+// higher fee); every version it had is the same DEPLOY.
 
 import { fmtInt, shortTxid } from "./format.js";
-import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS } from "./payloads.js";
+import { DEPLOY_PROTOCOL_FEE_SATS } from "./payloads.js";
 import { FINAL_DEPTH } from "./finality.js";
 import { formatTime } from "./minerlog.js";
 
 export { walletLine, feeQuoteLine, tipLine, signLine, broadcastingLine, acceptedLine, blockFoundLine, errorLine } from "./minerlog.js";
 
-/** LED labels of the two-step deploy: reserve, its confirmation, publish, the registry's verdict. */
-export const DEPLOY_PHASES = ["Reserve", "Confirm", "Publish", "Registered"];
+/** LED labels of a deploy: the signature, the broadcast, the confirming block, the registry's verdict. */
+export const DEPLOY_PHASES = ["Sign", "Broadcast", "Confirm", "Registered"];
 
-/** LED labels for a single-transaction flow (kept for callers of the old grammar). */
-export const PLAIN_PHASES = ["Build", "Sign", "Broadcast", "Confirm"];
-
-/** Phases of a single-transaction flow during which the page is working. */
-export const PLAIN_BUSY = new Set(["building", "signing", "broadcasting", "pending"]);
+/** Phases of the Create flow during which the page is working on a click (build → sign → broadcast). */
+export const DEPLOY_BUSY = new Set(["building", "signing", "broadcasting"]);
 
 const line = ({ key, kind, text, tier = null, yours = false, ts = Date.now(), ...rest }) => ({
   key,
@@ -111,7 +108,7 @@ export function createdFinalLine(ticker, height, txid, at = Date.now()) {
 
 /**
  * A chain reorganization changed a created name that was not final yet
- * (settlingVerdict): another publish holds it now, or ours left its block —
+ * (settlingVerdict): another DEPLOY holds it now, or ours left its block —
  * or it is ours again. One line per change: `change` (the note's count of
  * changes) keeps a second flip to the same verdict from reading as a repeat.
  */
@@ -119,18 +116,18 @@ export function createdReorgLine(ticker, verdict, txid, otherTxid = null, at = D
   const key = `cr:reorg:${txid}:${verdict}:${otherTxid || ""}:${change}`;
   if (verdict === "changed-taken") {
     const other = otherTxid ? ` (tx ${short(otherTxid)})` : "";
-    return line({ key, kind: "err", text: `chain reorganization  ${ticker} is now registered to another publish${other}  ·  still checking until final`, ts: at });
+    return line({ key, kind: "err", text: `chain reorganization  ${ticker} is now registered to another DEPLOY${other}  ·  still checking until final`, ts: at });
   }
   if (verdict === "changed-missing") {
-    return line({ key, kind: "err", text: `chain reorganization  your publish of ${ticker} left its block  ·  still checking — it usually confirms again`, ts: at });
+    return line({ key, kind: "err", text: `chain reorganization  your DEPLOY of ${ticker} left its block  ·  still checking — it usually confirms again`, ts: at });
   }
-  return line({ key, kind: "sys", text: `${ticker} is registered to your publish again  ·  still provisional`, ts: at });
+  return line({ key, kind: "sys", text: `${ticker} is registered to your DEPLOY again  ·  still provisional`, ts: at });
 }
 
 /**
- * `COMMIT a3f9c…21e left block #970,110 (chain reorganization) · waiting for it to confirm again` [err]
- * — a confirmed step the indexer no longer shows in that block. Its callers
- * emit it once per event, so the key carries the second: a step that leaves
+ * `DEPLOY a3f9c…21e left block #970,110 (chain reorganization) · waiting for it to confirm again` [err]
+ * — a confirmed DEPLOY the indexer no longer shows in that block. Its callers
+ * emit it once per event, so the key carries the second: a DEPLOY that leaves
  * the same height a second time (a reorganization back and forth) is logged again.
  */
 export function stepLeftBlockLine(what, txid, height, at = Date.now()) {
@@ -182,98 +179,68 @@ export function deployResumedLine(ticker, txid, broadcastAt, { at = Date.now() }
  * The state the Create page opens in for `address`: the newest DEPLOY this
  * browser broadcast that has not been settled by the registry yet (see
  * src/lib/txrecords.js) resumes as "pending" — the tx-status poll then
- * moves it on to confirmed and the registry's verdict.
+ * moves it on to confirmed and the registry's verdict. `versions` = the
+ * record's txid, then the versions it replaced (Speed up), newest first;
+ * `psbt` / `changeVout` are what a further Speed up rebuilds from (null
+ * when the record has none: no Speed up then).
  * `records` = txRecords(address). Returns null when there is nothing to resume.
  */
 export function resumeDeployState(records) {
   const rec = [...(records || [])].reverse().find((r) => r.kind === "deploy" && r.ticker);
   if (!rec) return null;
-  return { phase: "pending", ticker: rec.ticker, txid: rec.txid, broadcastAt: rec.at, startedAt: rec.at, resumed: true };
+  const replaced = Array.isArray(rec.replaces) ? [...rec.replaces].reverse() : [];
+  const versions = [rec.txid, ...replaced].filter((t, i, all) => typeof t === "string" && all.indexOf(t) === i);
+  return {
+    phase: "pending",
+    ticker: rec.ticker,
+    txid: rec.txid,
+    versions,
+    psbt: typeof rec.psbt === "string" && rec.psbt ? rec.psbt : null,
+    changeVout: Number.isInteger(rec.changeVout) ? rec.changeVout : null,
+    broadcastAt: rec.at,
+    startedAt: rec.at,
+    resumed: true,
+  };
 }
 
-// ---- two-step deploy: reserve (COMMIT) → publish (REVEAL) ---------------------------------------
+// ---- Speed up, missed block, unseen, found, dropped, taken while pending ---------------------------
 
-/** `step 1/2 reserve  COMMIT (ticker hidden)  inputs 1  vsize 246 vB  fee 738 sats @ 3 sat/vB` */
-export function reserveBuildLine(flow, at = Date.now()) {
-  return line({
-    key: `cr:build:commit:${flow.startedAt ?? secondBucket(at)}`,
-    kind: "act",
-    text: `step 1/2 reserve  COMMIT (ticker hidden)${txDetail(flow)}`,
-    ts: at,
-  });
-}
-
-/** `mempool  COMMIT awaiting block #970,102  tx a3f9c…21e` */
-export function reserveMempoolLine(nextHeight, txid, at = Date.now()) {
-  const h = Number.isInteger(nextHeight) ? ` #${fmtInt(nextHeight)}` : "";
-  return line({ key: `cr:mempool:${txid}`, kind: "act", text: `mempool  COMMIT awaiting block${h}  tx ${short(txid)}`, ts: at });
-}
-
-/** `COMMIT confirmed  block 970,102  ·  publish from block #970,103, by block #972,118` */
-export function reserveConfirmedLine(height, window, txid, at = Date.now()) {
-  const w = window ? `  ·  publish from block #${fmtInt(window.revealFrom)}, by block #${fmtInt(window.expiresAt)}` : "";
-  // keyed by height too: a COMMIT that confirms again in a new block after a reorganization is logged again
-  return line({ key: `cr:confirmed:${txid ?? ""}:${height}`, kind: "ok", text: `COMMIT confirmed  block ${fmtInt(height)}${w}`, ts: at });
-}
-
-/** `indexer: reservation recorded · step 2 (publish) is open` */
-export function reserveRecordedLine(txid, at = Date.now()) {
-  return line({ key: `cr:recorded:${txid}`, kind: "sys", text: "indexer: reservation recorded · step 2 (publish) is open", ts: at });
-}
-
-/** `step 2/2 publish  DEPLOY LUCKY  protocol fee 5,460 sats  inputs 2  vsize 318 vB  fee 757 sats @ 2.38 sat/vB` */
-export function publishBuildLine(flow, ticker, at = Date.now()) {
-  return line({
-    key: `cr:build:reveal:${flow.startedAt ?? secondBucket(at)}`,
-    kind: "act",
-    text: `step 2/2 publish  DEPLOY ${ticker}  protocol fee ${fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats${txDetail(flow)}`,
-    ts: at,
-  });
-}
-
-/** `speed up COMMIT  fee 738 → 1,476 sats @ 6 sat/vB  new tx b1c2d…9f0` */
+/** `speed up DEPLOY  fee 738 → 1,476 sats @ 6 sat/vB  new tx b1c2d…9f0` */
 export function speedUpLine(what, { oldFeeSats, feeSats, feeRateSatVb, txid }, at = Date.now()) {
   const from = Number.isFinite(oldFeeSats) ? `${fmtInt(oldFeeSats)} → ` : "";
   const rate = feeRateSatVb ? ` @ ${feeRateSatVb} sat/vB` : "";
   return line({ key: `cr:speedup:${txid}`, kind: "act", text: `speed up ${what}  fee ${from}${fmtInt(feeSats)} sats${rate}  new tx ${short(txid)}`, ts: at });
 }
 
-/** `indexer: LUCKY was registered by another deploy first` [err] — the reservation can no longer claim it. */
-export function takenBeforePublishLine(ticker, key, at = Date.now()) {
-  return line({ key: `cr:taken:${key ?? ticker}`, kind: "err", text: `indexer: ${ticker} was registered by another deploy first`, ts: at });
+/**
+ * `DEPLOY a3f9c…21e missed block #970,103  ·  NEW is visible in the mempool — speed it up` [err]
+ * — a block came without the pending DEPLOY. One line per missed height.
+ */
+export function missedBlockLine(ticker, txid, height, at = Date.now()) {
+  const block = Number.isInteger(height) ? `block #${fmtInt(height)}` : "a block";
+  return line({ key: `cr:missed:${txid}:${height ?? ""}`, kind: "err", text: `DEPLOY ${short(txid)} missed ${block}  ·  ${ticker} is visible in the mempool — speed it up`, ts: at });
 }
 
-/** `reservation expired  block #972,118 passed without a publish` [err] */
-export function reservationExpiredLine(expiresAt, txid, at = Date.now()) {
-  return line({ key: `cr:expired:${txid ?? expiresAt}`, kind: "err", text: `reservation expired  block #${fmtInt(expiresAt)} passed without a publish`, ts: at });
-}
-
-/** `reservation for LUCKY abandoned · the 546-sat output stays in your wallet` */
-export function abandonedLine(ticker, key, at = Date.now()) {
-  return line({ key: `cr:abandon:${key ?? secondBucket(at)}`, kind: "sys", text: `reservation for ${ticker} abandoned · the ${fmtInt(DUST_SATS)}-sat output stays in your wallet`, ts: at });
-}
-
-/** `resumed reservation LUCKY  step 1 tx a3f9c…21e` — a stored reservation picked up again after a reload or a return to the page. */
-export function reservationResumedLine(ticker, step, txid, at = Date.now()) {
-  return line({ key: `cr:resumed:${txid}`, kind: "sys", text: `resumed reservation ${ticker}  step ${step} tx ${short(txid)}`, ts: at });
-}
-
-/** `COMMIT a3f9c…21e left the mempool without confirming` [err] */
+/** `DEPLOY a3f9c…21e left the mempool without confirming` [err] */
 export function stepDroppedLine(what, txid, at = Date.now()) {
   return line({ key: `cr:dropped:${txid}`, kind: "err", text: `${what} ${short(txid)} left the mempool without confirming`, ts: at });
 }
 
 /**
- * `COMMIT a3f9c…21e not seen by the indexer's node for a few minutes · still checking (it may confirm)` —
- * the step is NOT given up: the reservation code stays saved and the page keeps looking for it and for
- * the versions it replaced.
+ * `DEPLOY a3f9c…21e not seen by the indexer's node for a few minutes · still checking (it may confirm)` —
+ * the DEPLOY is NOT given up: the page keeps looking for it and for the versions it replaced.
  */
 export function stepUnseenLine(what, txid, at = Date.now()) {
   return line({ key: `cr:unseen:${txid}`, kind: "sys", text: `${what} ${short(txid)} not seen by the indexer's node for a few minutes · still checking (it may confirm)`, ts: at });
 }
 
-/** `COMMIT a3f9c…21e found  confirmed in block #970,110` / `…found in the mempool` — an earlier or unseen version turned up. */
+/** `DEPLOY a3f9c…21e found  confirmed in block #970,110` / `…found in the mempool` — an earlier or unseen version turned up. */
 export function stepFoundLine(what, txid, height = null, at = Date.now()) {
   const where = Number.isInteger(height) ? `confirmed in block #${fmtInt(height)}` : "in the mempool";
   return line({ key: `cr:found:${txid}:${Number.isInteger(height) ? height : "mempool"}`, kind: "ok", text: `${what} ${short(txid)} found  ${where}`, ts: at });
+}
+
+/** `indexer: NEW was registered by another DEPLOY while yours was waiting` [err] */
+export function takenWhilePendingLine(ticker, key, at = Date.now()) {
+  return line({ key: `cr:taken-pending:${key ?? ticker}`, kind: "err", text: `indexer: ${ticker} was registered by another DEPLOY while yours was waiting`, ts: at });
 }

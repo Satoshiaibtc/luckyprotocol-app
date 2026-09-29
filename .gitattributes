@@ -1,0 +1,2 @@
+# Files compared byte for byte with the indexer's copies: always LF.
+src/lib/*.json text eol=lf

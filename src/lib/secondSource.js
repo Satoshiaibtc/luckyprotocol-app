@@ -22,13 +22,28 @@
 // positive multiple of 100 below the tier, which the second source cannot
 // confirm ("unverified"); a full tier in a block after
 // the cap block is a disagreement (§3 credits 0 there). A SEND carrier is
-// either TO_OUT (AMT of the SEND's own ticker must equal `amount`) or the
-// residual slot (§2.3 / §4.1: CHANGE_OUT, or the default output when
-// CHANGE_OUT is unusable), which receives the residual of EVERY ticker the
+// either vout1 (AMT of the SEND's own ticker must equal `amount`) or vout2,
+// the residual output (§2.3 / §4.1; the default output when vout2 is
+// missing or an OP_RETURN), which receives the residual of EVERY ticker the
 // inputs carried — so a residual of another ticker than the SEND's is a
-// normal carrier too — whose balance depends on the inputs: only the slot
+// normal carrier too — whose balance depends on the inputs: only the index
 // is checked ("unverified"). Any other vout, opcode, or no LUCKY-20 payload
-// at all is a disagreement, and so is a listing of 0 tokens.
+// at all is a disagreement, and so is a listing of 0 tokens. So is an
+// output that received a listing's tokens because the spend was not an
+// applied SEND of its ticker (§4 rule 6): it is not a MINE or SEND token
+// output.
+//
+// A MINE's vout0 or a SEND's vout1 whose creating tx has no output paying
+// exactly 546 sats to the protocol fee address is a disagreement: that MINE
+// credited nothing, and that SEND moved nothing to vout1. When input 1 of a
+// creating SEND is signed as a listing (0x83), its vout1 may hold that
+// listing's tokens instead of AMT, so the amount is not confirmed
+// ("unverified").
+//
+// What the second source still cannot see: whether a MINE was valid for
+// other reasons (its ticker's DEPLOY block is registry state) and whether a
+// SEND's pool held AMT (token state). A creating SEND whose pool was short
+// left vout1 empty; that case is left to the indexer (§7.6).
 //
 // Verdicts: "agree" (proceed), "unverified" (the outpoint agrees, but the
 // second source cannot confirm the TOKEN AMOUNT on it — mempool.space sees
@@ -47,7 +62,9 @@
 // injectable fetch for tests.
 
 import { hex } from "@scure/base";
-import { protocolPayloadOfScripts } from "./psbt.js";
+import { MINE_PROTOCOL_FEE_SATS, PROJECT_FEE_ADDRESS, SEND_PROTOCOL_FEE_SATS, SEND_RESIDUAL_VOUT, SEND_TO_VOUT } from "./payloads.js";
+import { decodeAddress, protocolPayloadOfScripts } from "./psbt.js";
+import { LISTING_SIGHASH_BYTE, inputSighash, scriptTypeOfHex } from "./sighash.js";
 import { mineYield } from "./yield.js";
 
 export const SECOND_SOURCE_ORIGIN = "https://mempool.space";
@@ -152,13 +169,28 @@ export function compareSecondSource(listing, { outspend, tx }) {
 
 const isOpReturnVout = (v) => String((v && v.scriptpubkey) || "").toLowerCase().startsWith("6a");
 
+let feeSpkHex = null;
+/** Does the explorer's `vouts` list hold an output of exactly `sats` to PROJECT_FEE_ADDRESS (compared by script)? */
+function paysProtocolFee(vouts, sats) {
+  if (!feeSpkHex) feeSpkHex = hex.encode(decodeAddress(PROJECT_FEE_ADDRESS).script);
+  return vouts.some((v) => String((v && v.scriptpubkey) || "").toLowerCase() === feeSpkHex && Number(v.value) === sats);
+}
+
+/** Is input `i` of the explorer's tx JSON signed as a listing (0x83, read like the indexer: §2, §4 rule 6)? */
+function inputIsListingSigned(tx, i) {
+  const vin = Array.isArray(tx?.vin) ? tx.vin[i] : null;
+  if (!vin || !Array.isArray(vin.witness)) return false;
+  return inputSighash(vin.witness, scriptTypeOfHex(vin.prevout?.scriptpubkey)) === LISTING_SIGHASH_BYTE;
+}
+
 /**
  * What the creating tx's OP_RETURN says about `amount` of `ticker` on
  * `vout` → `{ reasons, notes }`: a reason = a disagreement (the rules can
  * never put that amount there); a note = the second source cannot confirm
  * the amount (it depends on something mempool.space does not see). Both
  * empty = the payload alone proves the amount. `tx` is the explorer's tx
- * JSON (`vout[]`, `status.block_hash` / `status.block_height`);
+ * JSON (`vout[]`, `vin[].witness|prevout`, `status.block_hash` /
+ * `status.block_height`);
  * `capHeight` is the block that completed the ticker's supply according
  * to the indexer (`minted_out_height`), or null when unknown.
  */
@@ -180,11 +212,13 @@ export function carrierAmountCheck({ vout, ticker, amount, capHeight = null }, t
     reasons.push(`the creating tx is a ${p.op}, which credits no token output`);
     return done();
   }
+  // The residual output (§2.3 / §4.1): vout2, or the default output (lowest
+  // non-OP_RETURN) when vout2 is missing or an OP_RETURN.
+  const residualUsable = !!vouts[SEND_RESIDUAL_VOUT] && !isOpReturnVout(vouts[SEND_RESIDUAL_VOUT]);
+  const residualSlot = residualUsable ? SEND_RESIDUAL_VOUT : vouts.findIndex((v) => !isOpReturnVout(v));
   if (p.op === "SEND") {
     // §4.1: the residual of every ticker in the inputs lands on the residual
-    // slot, whatever ticker the SEND names — checked before the ticker.
-    const changeUsable = !!vouts[p.changeOutIdx] && !isOpReturnVout(vouts[p.changeOutIdx]);
-    const residualSlot = changeUsable ? p.changeOutIdx : vouts.findIndex((v) => !isOpReturnVout(v));
+    // output, whatever ticker the SEND names — checked before the ticker.
     if (p.ticker !== ticker) {
       if (vout === residualSlot) {
         notes.push(`vout ${vout} is the residual output of a SEND of ${p.ticker}: it holds whatever ${ticker} the transaction's inputs carried, and ${SECOND_SOURCE_NAME} cannot see token balances`);
@@ -200,6 +234,10 @@ export function carrierAmountCheck({ vout, ticker, amount, capHeight = null }, t
 
   if (p.op === "MINE") {
     if (vout !== 0) reasons.push(`a MINE credits vout 0, the listing is vout ${vout}`);
+    else if (!paysProtocolFee(vouts, MINE_PROTOCOL_FEE_SATS)) {
+      reasons.push(`the creating MINE has no ${MINE_PROTOCOL_FEE_SATS}-sat fee output, so it credited nothing to vout ${vout}`);
+      return done();
+    }
     const hash = tx.status && typeof tx.status.block_hash === "string" ? tx.status.block_hash : null;
     const height = tx.status && Number.isInteger(tx.status.block_height) ? tx.status.block_height : null;
     const cap = Number.isInteger(capHeight) && capHeight > 0 ? capHeight : null;
@@ -236,24 +274,30 @@ export function carrierAmountCheck({ vout, ticker, amount, capHeight = null }, t
   }
 
   if (p.op === "SEND") {
-    // The residual slot (§2.3 / §4.1): CHANGE_OUT, or the default output
-    // (lowest non-OP_RETURN) when CHANGE_OUT is missing or an OP_RETURN.
-    const changeUsable = !!vouts[p.changeOutIdx] && !isOpReturnVout(vouts[p.changeOutIdx]);
-    const residualSlot = changeUsable ? p.changeOutIdx : vouts.findIndex((v) => !isOpReturnVout(v));
-    if (vout === p.toOutIdx) {
-      if (p.amount === amount) return done();
-      if (vout === residualSlot && amount > p.amount) {
-        notes.push(`the SEND moves ${p.amount} ${ticker} to vout ${vout} and its residual lands there too (CHANGE_OUT is unusable) — ${SECOND_SOURCE_NAME} cannot see how much the residual was`);
+    if (vout === SEND_TO_VOUT) {
+      const feePaid = paysProtocolFee(vouts, SEND_PROTOCOL_FEE_SATS);
+      if (feePaid && p.amount === amount) {
+        if (inputIsListingSigned(tx, SEND_TO_VOUT)) {
+          notes.push(`input 1 of the creating tx is signed as a listing, so vout 1 may hold that listing's tokens rather than the amount the SEND names`);
+        }
+        return done();
+      }
+      if (vout === residualSlot && (!feePaid || amount > p.amount)) {
+        notes.push(`the SEND's residual lands on vout ${vout} too (vout2 is unusable) — ${SECOND_SOURCE_NAME} cannot see how much the residual was`);
+        return done();
+      }
+      if (!feePaid) {
+        reasons.push(`the creating SEND has no ${SEND_PROTOCOL_FEE_SATS}-sat fee output, so it credited nothing to vout ${vout}`);
         return done();
       }
       reasons.push(`the SEND's OP_RETURN moves ${p.amount} ${ticker} to vout ${vout}, the listing says ${amount}`);
       return done();
     }
     if (vout === residualSlot) {
-      notes.push(`vout ${vout} is the SEND's residual output (CHANGE_OUT): it holds whatever the transaction's inputs carried beyond the amount sent (all of it if the SEND did not apply), and ${SECOND_SOURCE_NAME} cannot see token balances`);
+      notes.push(`vout ${vout} is the SEND's residual output (vout2): it holds whatever the transaction's inputs carried beyond the amount sent (all of it if the SEND did not apply), and ${SECOND_SOURCE_NAME} cannot see token balances`);
       return done();
     }
-    reasons.push(`the SEND's OP_RETURN routes ${ticker} to vout ${p.toOutIdx} and the residual to vout ${p.changeOutIdx} — vout ${vout} carries no tokens`);
+    reasons.push(`the SEND's OP_RETURN routes ${ticker} to vout ${SEND_TO_VOUT} and the residual to vout ${residualSlot} — vout ${vout} carries no tokens`);
     return done();
   }
   return done();
@@ -261,14 +305,15 @@ export function carrierAmountCheck({ vout, ticker, amount, capHeight = null }, t
 
 /**
  * Would a buyer's second-source check refuse this carrier because of where
- * it came from — a plain transfer with no LUCKY-20 payload, a COMMIT or
- * DEPLOY output, a MINE output holding more than its yield, a SEND output
- * that is neither TO_OUT nor the residual slot? `result` is what
+ * it came from — a plain transfer with no LUCKY-20 payload, a DEPLOY
+ * output, a listing's payment output, a MINE output holding more than its
+ * yield, a SEND output that is neither vout1 nor the residual output, the
+ * output of a MINE or SEND without its fee? `result` is what
  * checkSecondSource answered for the seller's own carrier. True only for a
  * "disagree" on the creating transaction; an unreachable source or a
  * mismatch of value / script / spent state says nothing about the origin.
  */
-const ORIGIN_REASON_RE = /no LUCKY-20 OP_RETURN|the creating tx is a|shows a SEND of|OP_RETURN for|a MINE credits vout|credits 0 there|yields \d|less than its tier|OP_RETURN moves|OP_RETURN routes/;
+const ORIGIN_REASON_RE = /no LUCKY-20 OP_RETURN|the creating tx is a|shows a SEND of|OP_RETURN for|a MINE credits vout|credits 0 there|yields \d|less than its tier|OP_RETURN moves|OP_RETURN routes|has no 546-sat fee output/;
 export function originRefused(result) {
   if (!result || result.verdict !== "disagree") return false;
   return (result.reasons || []).some((r) => ORIGIN_REASON_RE.test(String(r)));
@@ -276,7 +321,7 @@ export function originRefused(result) {
 
 /** The sell form's words for a carrier a buyer's check would refuse (originRefused). */
 export const ORIGIN_REFUSED_TEXT =
-  "Buyers cannot confirm where this UTXO's tokens came from: it was not created as a MINE's or a SEND's token output (a plain transfer, a reservation or publish output, or a mine that also received other tokens). A buyer's check refuses such a listing, so it would never sell. Move the tokens to a fresh carrier with a send to yourself first, then list that carrier once it confirms.";
+  "Buyers cannot confirm where this UTXO's tokens came from: it was not created as a MINE's or a SEND's token output (a plain transfer, a DEPLOY's output, a listing's payment output, the output of a MINE or SEND without its fee, or a mine that also received other tokens). A buyer's check refuses such a listing, so it would never sell. Move the tokens to a fresh carrier with a send to yourself first, then list that carrier once it confirms.";
 
 /**
  * The sell form's view of the origin check for the selected carrier

@@ -14,7 +14,7 @@ import { DUST_SATS, SEND_PROTOCOL_FEE_SATS } from "./payloads.js";
 import { MAX_FEE_RATE_SAT_VB } from "./psbt.js";
 import { estimateFillCost } from "./swap.js";
 import { FINAL_DEPTH } from "./finality.js";
-import { COMMIT_CARRIER_PLAIN_TEXT, SELLER_CAP_RE, listingCapText } from "./listingRules.js";
+import { SELLER_CAP_RE, listingCapText } from "./listingRules.js";
 
 export const WINDOWS = [
   { id: "24h", label: "24h" },
@@ -571,8 +571,6 @@ export function listingRefusalText(e) {
   if (/pending spend|spent or pending/i.test(msg)) return "A transaction spending this UTXO is already in the mempool — the order book refuses a new listing for it until that confirms or drops.";
   // The book keeps the cheapest live signed listing of an outpoint.
   if (/withdraw first/i.test(msg)) return RAISE_PRICE_TEXT;
-  // The first output of an open reservation (COMMIT) is never listed.
-  if (/reserves a ticker|open commit/i.test(msg)) return COMMIT_CARRIER_PLAIN_TEXT;
   // The listed outpoint does not hold exactly the listing's tokens (a UTXO
   // with several tickers, or a stale view): the book names the balances.
   if (/^outpoint (carries|balances are) \{/.test(msg)) {

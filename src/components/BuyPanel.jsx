@@ -9,7 +9,7 @@ import { useModalFocus } from "../hooks/useModalFocus.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { useSeedWait } from "../hooks/useSeedWait.js";
 import { seedWaitNote } from "../lib/retry.js";
-import { buildFillPsbt, finalizeFill, parseListing, verifyListing } from "../lib/swap.js";
+import { buildFillPsbt, fillSendAmount, finalizeFill, parseListing, verifyListing } from "../lib/swap.js";
 import { expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
 import { filledLineText, fillOutcome, fillOutcomeText, fillQuote, fmtChangePct, signTimeOrderProblem, slowFillWarning } from "../lib/market.js";
@@ -288,8 +288,11 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
  * Build (never sign) the fill of verified order `full` for `addr` at `rate`
  * from the wallet's current UTXOs — the dry run and the real build share it.
  * `signal` stops the reads (and the wait for the indexer's scan of the wallet).
+ * `sendAmount` is the SEND's AMT (fillSendAmount): the listed amount only when
+ * the second source confirmed it, else 1 — every token the output holds
+ * still reaches the buyer (1 on vout1, the rest on vout2).
  */
-async function buildFill(full, addr, pubkeyHex, rate, onWait, signal) {
+async function buildFill(full, addr, pubkeyHex, rate, onWait, signal, sendAmount) {
   const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { onWait, signal }), indexer.tokenUtxos(addr, signal)]);
   let built;
   try {
@@ -302,6 +305,7 @@ async function buildFill(full, addr, pubkeyHex, rate, onWait, signal) {
       tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), addr),
       feeRateSatVb: rate,
       minInputSats: minFeeInputSats(utxoRes.assetSafe), // an inscribed sat on a small output would go to the seller
+      sendAmount,
     });
   } catch (e) {
     // Not enough (confirmed) BTC: say why in plain words.
@@ -443,6 +447,9 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
   const allOk = checks.every((c) => c.state === "ok");
   const anyFail = checks.some((c) => c.state === "fail");
   const secondOk = secondSourceAllowsSigning(second.state, { unreachableAck: ack, unverifiedAck: amountAck });
+  // The fill's AMT follows the second source's verdict (fillSendAmount).
+  const secondState = second.state;
+  const sendAmount = full ? fillSendAmount(secondState, full.amount) : null;
   const quote = fillQuote({ order, address: w.address || order.seller, feeRateSatVb: fee.satVb });
 
   // The quote assumes ONE buyer input. Once the listing
@@ -471,7 +478,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
     };
     (async () => {
       try {
-        const built = await buildFill(full, walletAddress, walletPubkey, rate, onWait, ctrl.signal);
+        const built = await buildFill(full, walletAddress, walletPubkey, rate, onWait, ctrl.signal, fillSendAmount(secondState, full.amount));
         if (alive) setDry({ rate, totalSats: built.totalSats, feeSats: built.feeSats, inputCount: built.inputs.length });
       } catch (e) {
         if (!alive) return;
@@ -485,7 +492,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
       ctrl.abort();
       if (dryCtrl.current === ctrl) dryCtrl.current = null;
     };
-  }, [connected, full, fee.satVb, walletAddress, walletPubkey]);
+  }, [connected, full, fee.satVb, walletAddress, walletPubkey, secondState]);
   const exact = dry && !dry.loading && !dry.error && dry.rate === fee.satVb ? dry : null;
   const feeSats = flow.feeSats ?? exact?.feeSats ?? quote?.feeSats ?? null;
   const totalSats = flow.totalSats ?? exact?.totalSats ?? quote?.totalSats ?? null;
@@ -536,7 +543,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
       // The indexer may be scanning this address first (first use, or again
       // after a chain reorganization): say so while the build waits.
       const onWait = (info) => setFlow((f) => (f.phase === "building" ? { ...f, waitNote: seedWaitNote(info) } : f));
-      const built = await buildFill(full, addr, pubkeyHex, rate, onWait, signal);
+      const built = await buildFill(full, addr, pubkeyHex, rate, onWait, signal, fillSendAmount(second.state, full.amount));
       seedWait.done(signal);
       // Never open the wallet for more than the sheet showed: a build that
       // costs more (the UTXO set changed since the dry run) stops here and
@@ -552,16 +559,17 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
         return;
       }
       setFlow({ phase: "signing", feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, totalSats: built.totalSats, inputs: built.inputs, assetSafe: built.assetSafe, detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"} from your wallet` });
-      // Sign-time guard: a fill is a SEND of exactly this order — never
-      // sign a PSBT whose OP_RETURN says anything else.
-      expectPsbtPayload(built.psbtHex, { op: "SEND", ticker: full.ticker, amount: full.amount });
+      // Sign-time guard: a fill is a SEND of this order's ticker and the
+      // amount it was built with — never sign a PSBT whose OP_RETURN says
+      // anything else.
+      expectPsbtPayload(built.psbtHex, { op: "SEND", ticker: full.ticker, amount: built.sendAmount });
       // Buyer signs ONLY inputs 1..n; input0 keeps the seller's 0x83 signature.
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: addr, autoFinalized: true });
       signedPsbt = built.psbtHex;
       setFlow((f) => ({ ...f, phase: "broadcasting" }));
       // Broadcast-time guard, same shape as the sign-time one: the extracted
       // tx is a SEND of exactly this ticker / amount, nothing else.
-      const raw = finalizeFill(signed, { op: "SEND", ticker: full.ticker, amount: full.amount });
+      const raw = finalizeFill(signed, { op: "SEND", ticker: full.ticker, amount: built.sendAmount });
       let txid;
       try {
         relayed = true;
@@ -570,8 +578,8 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
         if (wallet.isConflictError(e)) throw new Error(RACE_MESSAGE);
         throw e;
       }
-      // vout1 = the token carrier, vout4 = the residual carrier; vout5, when present, is plain BTC.
-      addPendingTokenOutpoints([{ txid, vout: 1 }, { txid, vout: 4 }], addr);
+      // vout1 = the token carrier, vout2 = the residual carrier; vout5, when present, is plain BTC.
+      addPendingTokenOutpoints([{ txid, vout: 1 }, { txid, vout: 2 }], addr);
       setFlow((f) => ({ ...f, phase: "pending", txid }));
     } catch (e) {
       if (signedPsbt && !relayed) wallet.releaseInputs(signedPsbt);
@@ -706,12 +714,12 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
             <dd className="mono">{fmtSats(quote?.tokenCarrierSats ?? 546)}</dd>
           </div>
           <div>
-            <dt>Protocol fee (vout2)</dt>
-            <dd className="mono">{fmtSats(quote?.protocolFeeSats ?? 546)}</dd>
+            <dt>Your residual carrier (vout2, always present)</dt>
+            <dd className="mono">{fmtSats(quote?.residualCarrierSats ?? 546)}</dd>
           </div>
           <div>
-            <dt>Your residual carrier (vout4, always present)</dt>
-            <dd className="mono">{fmtSats(quote?.residualCarrierSats ?? 546)}</dd>
+            <dt>Protocol fee (vout3)</dt>
+            <dd className="mono">{fmtSats(quote?.protocolFeeSats ?? 546)}</dd>
           </div>
           <div>
             <dt>
@@ -748,8 +756,14 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
           </div>
         </dl>
         <div className="fineprint">
-          The listed UTXO&apos;s own {fmtSats(carrierIn)} is an input of your transaction, so it comes back to you with your change. Of what leaves your wallet, 2 × 546 sats land on your own new token carriers (vout1 and vout4), so your wallet may show a smaller amount.
+          The listed UTXO&apos;s own {fmtSats(carrierIn)} is an input of your transaction, so it comes back to you with your change. Of what leaves your wallet, 2 × 546 sats land on your own new token carriers (vout1 and vout2), so your wallet may show a smaller amount.
         </div>
+        {sendAmount === 1 && order.amount > 1 && (
+          <div className="fineprint">
+            The amount on this listing is not independently confirmed, so this purchase sends 1 {order.ticker} to your token carrier (vout1) and the rest of the listed output to your
+            residual carrier (vout2). You receive every token the output really holds.
+          </div>
+        )}
         {slowNote && <div className="notice">{slowNote}</div>}
         {dry?.loading && dry.waitNote && (flow.phase === "idle" || flow.phase === "error") && <div className="fineprint">{dry.waitNote}</div>}
         {dry?.error && flow.phase === "idle" && <div className="fineprint">Exact total not available yet ({dry.error}) — it is computed again when you press Sign, and nothing is signed above the total shown.</div>}

@@ -99,8 +99,9 @@ export function normalizeTxRecord(r, now = Date.now()) {
     confirmedAt: confirmed ? stamp(r.confirmedAt) : null,
     // the page that shows its result has shown it; kept only to guard its inputs until final
     done: r.done === true,
-    // A MINE's unsigned PSBT and BTC change output (what a Speed up rebuilds
-    // from after a reload), and the txids of the versions it replaced.
+    // A DEPLOY's or MINE's unsigned PSBT and BTC change output (what a Speed
+    // up rebuilds from after a reload), and the txids of the versions it
+    // replaced.
     psbt: typeof r.psbt === "string" && r.psbt.length > 0 && r.psbt.length <= TXREC_PSBT_MAX && r.psbt.length % 2 === 0 && HEX_RE.test(r.psbt.toLowerCase()) ? r.psbt.toLowerCase() : null,
     changeVout: Number.isInteger(r.changeVout) && r.changeVout >= 0 && r.changeVout < 1_000 ? r.changeVout : null,
     replaces: Array.isArray(r.replaces) ? [...new Set(r.replaces.map((t) => String(t).toLowerCase()).filter((t) => TXID_RE.test(t) && t !== txid))].slice(-20) : [],

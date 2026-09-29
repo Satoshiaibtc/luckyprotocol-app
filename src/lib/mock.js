@@ -10,9 +10,11 @@
 // It is also a tiny indexer: a broadcast raw tx is decoded, its inputs are
 // marked spent, and on confirmation its OP_RETURN payload is applied with
 // the §2 / §4.1 rules in src/lib/mockRouting.js — the fee checks, the MINE
-// validity rule, the burn when the default output is missing or
-// address-less, the §2.1 deployer attribution (as far as the mock knows the
-// prevouts) — open orders whose outpoint was spent are settled per §7.5
+// validity rule, a SEND's fixed outputs (AMT to vout1, the rest to vout2),
+// the burn when the default output is missing or address-less, the §2.1
+// deployer attribution and the §4 rule 6 routing of inputs signed as a
+// listing (as far as the mock knows the prevouts) — open orders whose
+// outpoint was spent are settled per §7.5
 // (a fill is a spend signed with the listing's SIGHASH_SINGLE|ANYONECANPAY
 // signature that pays the seller at the listed input's own index; any
 // other spend cancels), and fills append a TradeView. A listing whose time
@@ -44,16 +46,15 @@ import * as btc from "@scure/btc-signer";
 import { pubECDSA, pubSchnorr } from "@scure/btc-signer/utils.js";
 import { EXPECTED_YIELD, bucketOfYield, mineYield } from "./yield.js";
 import { DAYS_MAX, DIGITS_DEFAULT, DIGITS_MAX } from "./digits.js";
-import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, buildMinePayload, buildSendPayload } from "./payloads.js";
+import { REQUIRED_TOKEN_SUPPLY, DUST_SATS, PROJECT_FEE_ADDRESS, SEND_RESIDUAL_VOUT, SEND_TO_VOUT, buildMinePayload, buildSendPayload } from "./payloads.js";
 import { buildListingPsbt, parseListing, decodeRawTx, sellerPartialSig, LISTING_SIGHASH } from "./swap.js";
 import { aggregateDaily } from "./activity.js";
 import { makeOpReturnScript } from "./psbt.js";
 import { compareSecondSource } from "./secondSource.js";
-import { isOpReturnOut, routeDecision, settleListingSpend } from "./mockRouting.js";
-import { MAX_COMMIT_AGE, MIN_COMMIT_AGE } from "./payloads.js";
+import { isOpReturnOut, listingSignedInputs, routeDecision, settleListingSpend } from "./mockRouting.js";
 import { seedWaitFields, serverErrorText } from "./httpError.js";
 import { FINAL_DEPTH, MARKET_OPEN_DELAY, confirmationsAt } from "./finality.js";
-import { COMMIT_CARRIER_LISTING_TEXT, MAX_OPEN_LISTINGS_PER_ADDRESS, WITHDRAW_FIRST_TEXT, sellerCapError } from "./listingRules.js";
+import { MAX_OPEN_LISTINGS_PER_ADDRESS, WITHDRAW_FIRST_TEXT, sellerCapError } from "./listingRules.js";
 
 const BASE_TIP = 970_100;
 const CONFIRM_AFTER_MS = 20_000;
@@ -393,14 +394,14 @@ function world() {
         const seller = identity(`seller:${s.ticker}:${j}`, j % 3 === 1 ? "wpkh" : "tr");
         const amount = randInt(`ask-amt:${s.ticker}:${j}`, 10, 250) * 10;
         const price_sats = Math.max(DUST_SATS, Math.round(unit * amount));
-        const utxo = { txid: fakeTxid(`listed:${s.ticker}:${j}`), vout: 0, sats: DUST_SATS };
+        const utxo = { txid: fakeTxid(`listed:${s.ticker}:${j}`), vout: SEND_TO_VOUT, sats: DUST_SATS };
         knownUtxos.set(key(utxo), {
           ...utxo,
           address: seller.address,
           balances: { [s.ticker]: amount },
           confirmed: true,
           block_height: BASE_TIP - 20 - j * 3,
-          // the creating tx the mock second source re-parses: a split (SEND to self), carrier = TO_OUT
+          // the creating tx the mock second source re-parses: a split (SEND to self), carrier = vout1
           origin: { op: "SEND", amount },
         });
         const created_at = LOAD_TS - randInt(`ask-age:${s.ticker}:${j}`, 600, 3 * 86400);
@@ -448,7 +449,7 @@ function world() {
   });
 
   const history = seededHistory(traderPool, tokens);
-  W = { tokens, trades, orders, floors: new Map(), knownUtxos, feed, history, sim: new Map(), simMines: [], simSends: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set(), commits: new Map(), commitByCarrier: new Map(), replaying: false };
+  W = { tokens, trades, orders, floors: new Map(), knownUtxos, feed, history, sim: new Map(), simMines: [], simSends: [], spent: new Set(), created: new Map(), simOrder: 0, seededAddrs: new Set(), replaying: false };
 
   // The simulated wallet's own `filling` listing: its 1,921-BLOK carrier
   // (seeded UTXO #5; BLOK is the one minted-out token, so the one the wallet
@@ -473,10 +474,11 @@ function world() {
 // ---- simulated broadcasts survive a reload (this tab only) -----------------------------------
 //
 // The mock world is rebuilt on every page load, but a flow that spans a
-// reload — a reservation between its two steps, a pending MINE — needs the
-// txs it broadcast to still exist. Every accepted broadcast is appended to
-// sessionStorage ("lp.mock.simlog": raw hex + broadcast time) and replayed,
-// in order and with its original time, when the world is built again.
+// reload — a pending DEPLOY, a pending MINE — needs the txs it broadcast
+// to still exist. Every accepted broadcast is appended to sessionStorage
+// ("lp.mock.simlog": raw hex + broadcast time + its block, and the held
+// blocks of a held DEPLOY) and replayed, in order and with its original
+// time, when the world is built again.
 
 const SIM_LOG_KEY = "lp.mock.simlog";
 
@@ -490,11 +492,11 @@ function readSimLog() {
   }
 }
 
-function appendSimLog(raw, at, height) {
+function appendSimLog(raw, at, height, hold = null) {
   try {
     if (typeof sessionStorage === "undefined") return;
     const list = readSimLog();
-    list.push({ raw, at, height });
+    list.push({ raw, at, height, ...(Number.isInteger(hold) ? { hold } : {}) });
     sessionStorage.setItem(SIM_LOG_KEY, JSON.stringify(list.slice(-200)));
   } catch {
     /* no storage — the simulated chain simply resets on reload */
@@ -507,7 +509,7 @@ function replaySimLog() {
   try {
     for (const e of readSimLog()) {
       try {
-        simulateBroadcast(e.raw, { at: e.at, height: Number.isInteger(e.height) ? e.height : null });
+        simulateBroadcast(e.raw, { at: e.at, height: Number.isInteger(e.height) ? e.height : null, hold: Number.isInteger(e.hold) ? e.hold : null });
       } catch {
         /* a logged tx that no longer applies is skipped */
       }
@@ -588,14 +590,22 @@ function holdersFor(t) {
 
 // ---- simulated chain --------------------------------------------------------------------------
 
-/** Has the simulated tx `e` confirmed by `now` (ms; a replayed broadcast passes its own time)? */
+/**
+ * Has the simulated tx `e` confirmed by `now` (ms; a replayed broadcast
+ * passes its own time)? A DEPLOY held by the `lp.mock.holdDeploy` knob
+ * (`e.hold` blocks) confirms `e.hold` blocks later than any other tx.
+ */
 function simConfirmed(e, now = Date.now()) {
-  return now - e.at >= CONFIRM_AFTER_MS;
+  const held = Number.isInteger(e.hold) ? e.hold : 0;
+  return now - e.at >= (held + 1) * CONFIRM_AFTER_MS;
 }
 /**
  * The simulated tip: the highest confirmed simulated block, grown by one
  * block per CONFIRM_AFTER_MS after each confirmation (MOCK_TRAILING_BLOCKS
  * at most) — but never past a block a still-pending simulated tx is due in.
+ * A held DEPLOY does not hold the chain back: while it waits the tip grows
+ * one block per CONFIRM_AFTER_MS from the block it was sent at, up to the
+ * block before its own.
  */
 function tipHeight(now = Date.now()) {
   const w = world();
@@ -603,6 +613,10 @@ function tipHeight(now = Date.now()) {
   let cap = Infinity;
   for (const e of w.sim.values()) {
     if (!simConfirmed(e, now)) {
+      if (Number.isInteger(e.hold)) {
+        tip = Math.max(tip, e.height - e.hold - 1 + Math.min(e.hold, Math.floor((now - e.at) / CONFIRM_AFTER_MS)));
+        continue;
+      }
       cap = Math.min(cap, e.height - 1);
       continue;
     }
@@ -704,9 +718,10 @@ function evictSim(txid) {
  * double-spend, a non-final lock time, or a replacement that does not pay
  * more. A conflicting UNCONFIRMED simulated tx is replaced when the new one
  * pays a higher fee (BIP125 as modern nodes apply it — full RBF), which is
- * what "Speed up" relies on. `at` is only set when replaying the log.
+ * what "Speed up" relies on. `at` is only set when replaying the log, and
+ * `hold` then (the blocks a held DEPLOY waits, mockHoldDeploy).
  */
-export function simulateBroadcast(rawHex, { at = null, height: loggedHeight = null } = {}) {
+export function simulateBroadcast(rawHex, { at = null, height: loggedHeight = null, hold: loggedHold = null } = {}) {
   const w = world();
   let d;
   try {
@@ -748,10 +763,16 @@ export function simulateBroadcast(rawHex, { at = null, height: loggedHeight = nu
   }
   // Its block: the next one after everything simulated so far (a replay
   // keeps the height it was first given, so its block hash — and a MINE's
-  // yield — stay the same across a reload).
+  // yield — stay the same across a reload). A DEPLOY sent while the
+  // `lp.mock.holdDeploy` knob is set (never a replacement) misses that many
+  // blocks first: the knob is used up, and the DEPLOY confirms N blocks
+  // later while the chain goes on.
   w.simOrder += 1;
-  const height = Number.isInteger(loggedHeight) ? loggedHeight : Math.max(BASE_TIP + w.simOrder, tipHeight() + 1, ...[...w.sim.values()].map((e) => e.height));
-  if (!w.replaying) appendSimLog(rawHex, Date.now(), height);
+  let hold = Number.isInteger(loggedHold) && loggedHold > 0 ? loggedHold : null;
+  if (!w.replaying && at === null && !conflicts.size && d.payload && d.payload.op === "DEPLOY") hold = takeHoldDeploy();
+  const nextHeight = Math.max(BASE_TIP + w.simOrder, tipHeight() + 1, ...[...w.sim.values()].map((e) => e.height));
+  const height = Number.isInteger(loggedHeight) ? loggedHeight : hold ? tipHeight() + hold + 1 : nextHeight;
+  if (!w.replaying) appendSimLog(rawHex, Date.now(), height, hold);
   for (const i of d.inputs) w.spent.add(key(i));
   // §7.3: the live indexer marks a listing `filling` for ANY mempool spend
   // of its outpoint — a buyer's fill or the seller's own withdrawal alike —
@@ -771,20 +792,40 @@ export function simulateBroadcast(rawHex, { at = null, height: loggedHeight = nu
     if (isOpReturnOut(o)) continue;
     w.created.set(`${d.txid}:${o.vout}`, { txid: d.txid, vout: o.vout, sats: o.sats, address: o.address || null, balances: {}, confirmed: false, block_height: null });
   }
-  w.sim.set(d.txid, { at: at ?? Date.now(), height, decoded: d, applied: false });
+  w.sim.set(d.txid, { at: at ?? Date.now(), height, decoded: d, applied: false, ...(hold ? { hold } : {}) });
   return d.txid;
 }
 
 /**
- * Dev knob for the "taken before publish" path of the Create page:
+ * Dev knob for the "taken" paths of the Create page:
  * `sessionStorage["lp.mock.takeTicker"] = "NAME"` registers NAME to another
- * deployer at the current tip (this tab only), as if someone else's publish
- * had confirmed first.
+ * deployer at the current tip (this tab only), as if someone else's DEPLOY
+ * had confirmed first; with a DEPLOY of NAME pending it shows the "taken
+ * while yours was waiting" screen.
  */
 function mockTakeTicker() {
   try {
     const t = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("lp.mock.takeTicker") : null;
     return t && /^[A-Z0-9]{1,8}$/.test(t) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Dev knob for a DEPLOY that misses blocks: `sessionStorage["lp.mock.holdDeploy"]
+ * = "N"` (N from 1 to 6, this tab only) makes the next DEPLOY broadcast
+ * wait N blocks before it confirms while the simulated chain goes on — the
+ * missed-block notice and Speed up can then be checked. Used up by that
+ * DEPLOY (the key is removed); a Speed up of it is not held.
+ */
+function takeHoldDeploy() {
+  try {
+    if (typeof sessionStorage === "undefined") return null;
+    const n = Number(sessionStorage.getItem("lp.mock.holdDeploy"));
+    if (!Number.isInteger(n) || n < 1 || n > 6) return null;
+    sessionStorage.removeItem("lp.mock.holdDeploy");
+    return n;
   } catch {
     return null;
   }
@@ -829,11 +870,18 @@ function applyTx(txid, e) {
     const c = w.created.get(`${txid}:${o.vout}`);
     if (c) { c.confirmed = true; c.block_height = height; }
   }
-  // Gather the per-ticker input pool (§4.1).
+  // Gather the per-ticker input pool (§4.1) — the inputs signed as a
+  // listing kept apart (§4 rule 6).
+  const listedIdx = new Set(listingSignedInputs(d, prevoutOf));
   const pool = {};
-  for (const i of d.inputs) {
+  const listed = [];
+  for (const [idx, i] of d.inputs.entries()) {
     const u = lookupUtxo(key(i));
     if (!u) continue;
+    if (listedIdx.has(idx)) {
+      listed.push({ idx, balances: { ...(u.balances || {}) } });
+      continue;
+    }
     for (const [t, a] of Object.entries(u.balances || {})) pool[t] = (pool[t] || 0) + a;
   }
   const credit = (vout, ticker, amt) => {
@@ -844,30 +892,22 @@ function applyTx(txid, e) {
   };
 
   const p = d.payload;
-  // §2.1: the OPEN recorded COMMIT whose carrier an input spends (a REVEAL's input 0).
-  const commitAt = (k) => {
-    const c = w.commitByCarrier.get(k);
-    return c && (c.status === "open" || c.status === "invalid") && !c.spent_txid ? c : null;
-  };
-  const dec = routeDecision(d, { pool, isDeployed: (t) => w.tokens.has(t), deployBlockOf: (t) => w.tokens.get(t)?.deploy_block ?? null, commitAt, height });
-  // Spending a COMMIT carrier consumes that commit, whether or not this tx
-  // is a REVEAL that applies (§2.1) — after the decision, which needed it open.
-  for (const [idx, i] of d.inputs.entries()) {
-    const c = w.commitByCarrier.get(key(i));
-    if (!c || c.spent_txid) continue;
-    c.spent_txid = txid;
-    c.spent_height = height;
-    if (c.status === "open") c.status = height > c.height + MAX_COMMIT_AGE ? "expired" : "revealed";
-    if (idx === 0 && d.payload && d.payload.op === "DEPLOY") {
-      c.reveal_applied = dec.applied;
-      c.reveal_reason = dec.applied ? null : dec.reason;
-    }
-  }
-  // A SEND's AMT first, then the whole residual pool (every ticker) to the
-  // decided vout — or nowhere: a null residualVout burns it (§4.1).
+  const dec = routeDecision(d, {
+    pool,
+    listed,
+    isDeployed: (t) => w.tokens.has(t),
+    deployBlockOf: (t) => w.tokens.get(t)?.deploy_block ?? null,
+    height,
+    prevoutOf,
+  });
+  // A SEND's AMT first — an applied SEND's pool includes the listed inputs'
+  // balance of its ticker, which moves with it — then the whole residual
+  // pool (every ticker) to the decided vout, or nowhere: a null
+  // residualVout burns it (§4.1).
   if (dec.send) {
+    const joined = listed.reduce((s, x) => s + (Number(x.balances[dec.send.ticker]) || 0), 0);
     credit(dec.send.vout, dec.send.ticker, dec.send.amount);
-    pool[dec.send.ticker] = (pool[dec.send.ticker] || 0) - dec.send.amount;
+    pool[dec.send.ticker] = (pool[dec.send.ticker] || 0) + joined - dec.send.amount;
   }
   const routeRest = () => {
     if (dec.residualVout === null) return;
@@ -903,43 +943,21 @@ function applyTx(txid, e) {
       reason: valid ? null : dec.reason,
     });
   } else if (p && p.op === "SEND") {
-    const to = d.outputs[p.toOutIdx];
+    const to = d.outputs[SEND_TO_VOUT];
     // Every parsed SEND is a ledger row; a non-applied one keeps the requested amount and applied:false.
     w.simSends.push({ txid, block_height: height, block_hash: hash, block_time: time, ticker: p.ticker, amount: p.amount, applied: sendApplied, sender: senderOf(d), to: to && to.address ? to.address : null });
-    // Per-ticker routing: the residual of this ticker AND every other ticker
-    // in the pool go to CHANGE_OUT; an unusable CHANGE_OUT falls back to the
-    // default output (routeDecision).
+    // Per-ticker routing: the rest of this ticker AND every other ticker in
+    // the pool go to vout2; an unusable vout2 falls back to the default
+    // output (routeDecision).
     routeRest();
-  } else if (p && p.op === "COMMIT") {
-    // §2.1: record the commit — open, or invalid when vout0 is unusable —
-    // with vout0's script, which H binds (rule 2 of the REVEAL). Not served.
-    const c = {
-      txid,
-      height,
-      tx_index: 1,
-      hash: p.hash,
-      carrier: `${txid}:0`,
-      carrier_script: dec.commit.carrier_script,
-      committer: dec.commit.committer,
-      status: dec.commit.status,
-      invalid_reason: dec.commit.invalid_reason,
-      spent_txid: null,
-      spent_height: null,
-      reveal_applied: null,
-      reveal_reason: null,
-    };
-    w.commits.set(txid, c);
-    w.commitByCarrier.set(c.carrier, c);
-    routeRest(); // COMMIT routes nothing → the default output (the carrier)
   } else if (p && p.op === "DEPLOY") {
-    if (!dec.applied) w.refusedReveals = [...(w.refusedReveals || []), { txid, ticker: p.ticker, reason: dec.reason, height }];
     if (dec.applied) {
       w.tokens.set(p.ticker, {
         ticker: p.ticker,
         supply: REQUIRED_TOKEN_SUPPLY,
         minted: 0,
         minted_out_height: null,
-        // §2.1: the committer — the address of the COMMIT carrier input 0 spends.
+        // §2.1: the largest whole-tx-signed contributor ("" when none).
         deployer: dec.deployer,
         deploy_txid: txid,
         deploy_block: height,
@@ -951,7 +969,12 @@ function applyTx(txid, e) {
     }
     routeRest(); // DEPLOY routes nothing → the default output
   } else {
-    routeRest(); // not a protocol tx (incl. the withdrawn AVATAR op, §8) → the default output, burning when it is address-less
+    routeRest(); // not a protocol tx (incl. an `avatar` op, §8) → the default output, burning when it is address-less
+  }
+  // §4 rule 6: what an input signed as a listing did not move with an
+  // applied SEND of its ticker goes to the output its signature covers.
+  for (const { vout, balances } of dec.listedTo) {
+    for (const [t, a] of Object.entries(balances)) credit(vout, t, a);
   }
 
   // §7.5 order settlement for every spent outpoint: a live order (it may be
@@ -1258,7 +1281,7 @@ function mockOffBook() {
 function seedMyOffBook(floorUnit) {
   if (!mockOffBook()) return;
   const w = W;
-  const utxo = { txid: fakeTxid("my-offbook:0"), vout: 0, sats: DUST_SATS };
+  const utxo = { txid: fakeTxid("my-offbook:0"), vout: SEND_TO_VOUT, sats: DUST_SATS };
   const amount = 400;
   w.knownUtxos.set(key(utxo), { ...utxo, address: MOCK_WALLET.address, balances: { BLOK: amount }, confirmed: true, block_height: BASE_TIP - 3_000, origin: { op: "SEND", amount } });
   const created = LOAD_TS - 29 * 86400;
@@ -1271,9 +1294,9 @@ function seedMyListings(floorUnit) {
   if (!n) return;
   const w = W;
   for (let i = 0; i < n + 2; i++) {
-    const utxo = { txid: fakeTxid(`my-listed:${i}`), vout: 0, sats: DUST_SATS };
+    const utxo = { txid: fakeTxid(`my-listed:${i}`), vout: SEND_TO_VOUT, sats: DUST_SATS };
     const amount = 100 + i * 10;
-    // the creating tx the mock second source re-parses: a split (SEND to self), carrier = TO_OUT
+    // the creating tx the mock second source re-parses: a split (SEND to self), carrier = vout1
     w.knownUtxos.set(key(utxo), { ...utxo, address: MOCK_WALLET.address, balances: { BLOK: amount }, confirmed: true, block_height: BASE_TIP - 40 - i, origin: { op: "SEND", amount } });
     if (i >= n) continue; // the last two carriers stay unlisted: the new listings to try at the cap
     const price_sats = Math.max(DUST_SATS, Math.round(floorUnit * (1.02 + i * 0.01) * amount));
@@ -1299,7 +1322,9 @@ function mockHealthTip() {
 /**
  * Dev knob for the node-health warnings: `sessionStorage["lp.mock.health"]
  * = '{"node_peers":0,"stalled":true}'` (any of node_peers, stalled,
- * rebuilding, tip_time, persist_ok) overrides those /health fields in THIS tab.
+ * rebuilding, tip_time, persist_ok) overrides those /health fields in THIS
+ * tab. `rebuilding` sets `state_rebuilding`, the key that carries the
+ * rebuild flag (`rebuilding` itself is always true).
  */
 function mockHealthOverride() {
   try {
@@ -1307,7 +1332,8 @@ function mockHealthOverride() {
     const o = raw ? JSON.parse(raw) : null;
     if (!o || typeof o !== "object") return {};
     const out = {};
-    for (const k of ["node_peers", "stalled", "rebuilding", "tip_time", "persist_ok"]) if (k in o) out[k] = o[k];
+    for (const k of ["node_peers", "stalled", "tip_time", "persist_ok"]) if (k in o) out[k] = o[k];
+    if ("rebuilding" in o) out.state_rebuilding = o.rebuilding;
     return out;
   } catch {
     return {};
@@ -1378,8 +1404,8 @@ function mockExtraBtcUtxos(addr) {
   }
   if (!Number.isInteger(n) || n <= 0) return [];
   const count = Math.min(5000, n);
-  const salt = [...String(addr)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(8, "0");
-  return Array.from({ length: count }, (_, i) => ({ txid: `${salt}${i.toString(16).padStart(56, "0")}`, vout: 0, sats: DUST_SATS, confirmed: true, block_height: BASE_TIP - 10 }));
+  const prefix = [...String(addr)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(8, "0");
+  return Array.from({ length: count }, (_, i) => ({ txid: `${prefix}${i.toString(16).padStart(56, "0")}`, vout: 0, sats: DUST_SATS, confirmed: true, block_height: BASE_TIP - 10 }));
 }
 
 /** The live transport's error for a 503 / 429 with a JSON body (indexer.js `_httpGet`). */
@@ -1554,8 +1580,8 @@ function activityItems() {
     if (!w.simSends.some((s) => s.txid === x.txid)) {
       // The fill's SEND row as the live indexer attributes it: `from` is the
       // largest input contributor — the buyer, who funds price + fees (the
-      // seller's input is the 546-sat carrier) — and `to` is vout[TO_OUT],
-      // also the buyer.
+      // seller's input is the 546-sat carrier) — and `to` is vout1, also
+      // the buyer.
       items.push(item({ kind: "send", txid: x.txid, block_height: x.block_height, block_time: x.block_time, ticker: x.ticker, amount: x.amount, from: x.buyer, sender: x.buyer, to: x.buyer }));
     }
   }
@@ -1577,34 +1603,39 @@ function scriptHexOf(address) {
 
 /**
  * The creating tx of a mock outpoint as mempool.space's `/api/tx/<txid>`
- * would serialise it (`vout[].scriptpubkey|value`, `status.block_hash|
- * block_height`) — the real tx for a simulated broadcast, a synthesized
- * reference layout for a seeded carrier (`origin`: a SEND whose TO_OUT is
- * the carrier, or a MINE credited on vout0). Null for an unknown outpoint.
+ * would serialise it (`vout[].scriptpubkey|value`, `vin[].witness|prevout`,
+ * `status.block_hash|block_height`) — the real tx for a simulated
+ * broadcast, a synthesized reference layout for a seeded carrier: a MINE
+ * credited on vout0 (`origin.op` "MINE"); a SEND in the §2.3 reference
+ * layout whose vout1 (AMT) or vout2 (the residual) is the carrier; any
+ * other vout a plain transfer with no LUCKY-20 payload (the second source
+ * refuses it). Null for an unknown outpoint.
  */
 function explorerTxOf(txid, vout, u) {
   const w = world();
   const e = w.sim.get(txid);
   if (e) {
     const status = simConfirmed(e) ? { confirmed: true, block_height: e.height, block_hash: blockHashAt(e.height) } : { confirmed: false };
-    return { txid, vout: e.decoded.outputs.map((o) => ({ scriptpubkey: o.script, value: o.sats })), status };
+    const vin = e.decoded.inputs.map((i, k) => {
+      const pv = prevoutOf(key(i));
+      return { txid: i.txid, vout: i.vout, witness: e.decoded.witnesses[k] || [], prevout: pv ? { scriptpubkey: scriptHexOf(pv.address) || "", value: pv.sats } : null };
+    });
+    return { txid, vin, vout: e.decoded.outputs.map((o) => ({ scriptpubkey: o.script, value: o.sats })), status };
   }
   if (!u) return null;
   const carrier = { scriptpubkey: scriptHexOf(u.address) || "", value: u.sats };
+  const dust = { scriptpubkey: carrier.scriptpubkey, value: DUST_SATS };
   const fee = { scriptpubkey: scriptHexOf(PROJECT_FEE_ADDRESS), value: DUST_SATS };
   const opret = (payload) => ({ scriptpubkey: hex.encode(makeOpReturnScript(payload)), value: 0 });
   const status = { confirmed: true, block_height: u.block_height, block_hash: blockHashAt(u.block_height) };
   const [ticker, amount] = Object.entries(u.balances || {})[0] || ["", 0];
   if (u.origin?.op === "MINE") return { txid, vout: [carrier, fee, opret(buildMinePayload(ticker))], status };
-  // A SEND with the carrier at TO_OUT; the other slots in reference order
-  // (fee, OP_RETURN, residual slot) on the free indices.
-  const outs = new Array(Math.max(vout + 1, 4)).fill(null);
-  outs[vout] = carrier;
-  const [feeIdx, opIdx, changeIdx, ...rest] = [...outs.keys()].filter((i) => i !== vout);
-  outs[feeIdx] = fee;
-  outs[changeIdx] = { scriptpubkey: carrier.scriptpubkey, value: DUST_SATS };
-  outs[opIdx] = opret(buildSendPayload({ ticker, amount: u.origin?.amount ?? amount, toOutIdx: vout, changeOutIdx: changeIdx }));
-  for (const i of rest) outs[i] = { scriptpubkey: carrier.scriptpubkey, value: DUST_SATS };
+  const send = (amt) => opret(buildSendPayload({ ticker, amount: Math.max(1, Number(amt) || 1) }));
+  // A SEND: vout0 fee, vout1 AMT, vout2 the residual, vout3 the OP_RETURN.
+  if (vout === SEND_TO_VOUT) return { txid, vout: [fee, carrier, dust, send(u.origin?.amount ?? amount)], status };
+  if (vout === SEND_RESIDUAL_VOUT) return { txid, vout: [fee, dust, carrier, send(1)], status };
+  // Anything else: a plain transfer, no OP_RETURN.
+  const outs = Array.from({ length: vout + 1 }, (_, i) => (i === vout ? carrier : dust));
   return { txid, vout: outs, status };
 }
 
@@ -1709,7 +1740,10 @@ export async function mockGet(path) {
       last_poll_at: Math.floor(Date.now() / 1000) - 5,
       node_peers: 8,
       tip_time: blockTimeAt(tip),
-      rebuilding: false,
+      // always true: a build that reads this key pauses every write; the
+      // rebuild flag is `state_rebuilding`
+      rebuilding: true,
+      state_rebuilding: false,
       final_depth: FINAL_DEPTH,
       persist_ok: true,
       stalled: false,
@@ -1813,29 +1847,6 @@ export async function mockGet(path) {
     if (kind !== "all") all = all.filter((it) => it.kind === kind);
     if (addr) all = all.filter((it) => PARTY_KEYS.some((k) => it[k] === addr));
     return page(all, q, 50);
-  }
-  if ((m = p.match(/^\/commits\/([^/]+)$/))) {
-    // §2.1: the recorded COMMIT; 404 until it confirms (and for a txid that is not one).
-    const txid = decodeURIComponent(m[1]).toLowerCase();
-    const c = w.commits.get(txid);
-    if (!c) throw notFound(p);
-    const expired = c.status === "open" && tipHeight() >= c.height + MAX_COMMIT_AGE;
-    return {
-      txid: c.txid,
-      height: c.height,
-      tx_index: c.tx_index,
-      hash: c.hash,
-      carrier: c.carrier,
-      committer: c.committer,
-      status: expired ? "expired" : c.status,
-      reveal_from_height: c.height + MIN_COMMIT_AGE,
-      expires_at_height: c.height + MAX_COMMIT_AGE,
-      invalid_reason: c.invalid_reason,
-      spent_txid: c.spent_txid,
-      spent_height: c.spent_height,
-      reveal_applied: c.reveal_applied,
-      reveal_reason: c.reveal_reason,
-    };
   }
   if (p === "/price") {
     return { usd_per_btc: USD_PER_BTC, as_of: now(), source: "mock" };
@@ -2131,16 +2142,11 @@ export async function mockPostJson(path, body) {
   const L = listingFacts(psbt, amount, price_sats);
   const outpoint = `${L.input0.txid}:${L.input0.vout}`;
   if (L.input0.address) ensureSeeded(L.input0.address);
-  // 2. The book's state: no spend of it in flight, not a reservation's
-  //    carrier, no cheaper signed listing of it, and a confirmed token UTXO
-  //    carrying exactly this listing's tokens, held by the PSBT's script.
+  // 2. The book's state: no spend of it in flight, no cheaper signed
+  //    listing of it, and a confirmed token UTXO carrying exactly this
+  //    listing's tokens, held by the PSBT's script.
   const existing = w.orders.get(outpoint);
   if (existing && existing.status === "filling") throw bad(`outpoint has a pending spend in the mempool (${existing.pending_spend_txid || "unknown txid"})`, 409);
-  // §7.4: the carrier of an open COMMIT is never listed — nor, after it
-  // expired, until its last reveal block has FINAL_DEPTH confirmations at
-  // the indexed height (the book's own rule).
-  const reserving = L.input0.vout === 0 ? w.commits.get(String(L.input0.txid).toLowerCase()) : null;
-  if (reserving && reserving.status === "open" && !reserving.spent_txid && indexedHeight() < reserving.height + MAX_COMMIT_AGE + FINAL_DEPTH - 1) throw bad(COMMIT_CARRIER_LISTING_TEXT, 409);
   // §7.4: the book keeps the CHEAPEST live signed listing of an
   // outpoint — the cheaper PSBT stays fillable on-chain whatever the book
   // shows, live or remembered as the outpoint's listing floor after it

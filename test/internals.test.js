@@ -33,6 +33,8 @@ const DENY = [
   [/\bowner decision\b/, "dated decision"],
   [/\b(usertx|visit|market|portfolio|mine|consensus|wallet|trading|rvs|web|api)-\d+\b/, "finding id"],
   [/\bG\d{1,2}\b(?=[\s),.:;])/, "finding id"],
+  [/\bD\d{1,2}\b(?=[\s),.:;])/, "decision id"],
+  [/\bScreen [A-E]\b/, "design screen"],
   [/\.\.\/\.\.\/[A-Za-z0-9_-]+\//, "path into another checkout"],
   [/\b[\w-]+\.rs\b/, "private source file"],
 ];

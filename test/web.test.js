@@ -127,7 +127,7 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   const here = dirname(fileURLToPath(import.meta.url));
   assert.ok(!existsSync(join(here, "../public/PROTOCOL.md")), "public/ carries no spec file");
   const redirects = readFileSync(join(here, "../public/_redirects"), "utf8");
-  assert.ok(redirects.split("\n").includes("/PROTOCOL.md https://luckyprotocol.gitbook.io/luckyprotocol 301"), "the old spec path goes to the whitepaper");
+  assert.ok(redirects.split(/\r?\n/).includes("/PROTOCOL.md https://luckyprotocol.gitbook.io/luckyprotocol 301"), "the old spec path goes to the whitepaper");
   console.log("spec file: not served; /PROTOCOL.md redirects to the whitepaper");
 }
 
@@ -149,8 +149,10 @@ if (SPEC) {
   assert.equal(parsed.ACTIVATION_HEIGHT, 969_600);
   assert.ok(!("SNAPSHOT_VERSION" in parsed), "the indexer's internal state-schema number is not a protocol constant and is not in the spec");
   // A stale copy is caught by the constant it changed.
-  const stale = served.replace(/\| `MAX_COMMIT_AGE` \| [\d_]+ \|/, "| `MAX_COMMIT_AGE` | 144 |");
-  assert.deepEqual(specConstantMismatches(stale, payloads), [`MAX_COMMIT_AGE: spec 144, code ${payloads.MAX_COMMIT_AGE}`]);
+  const stale = served.replace(/\| `SEND_PROTOCOL_FEE_SATS` \| [\d_]+ \|/, "| `SEND_PROTOCOL_FEE_SATS` | 600 |");
+  assert.deepEqual(specConstantMismatches(stale, payloads), [`SEND_PROTOCOL_FEE_SATS: spec 600, code ${payloads.SEND_PROTOCOL_FEE_SATS}`]);
+  assert.deepEqual(specConstantMismatches(served.replace(/\| `SEND_TO_VOUT` \| 1 \|/, "| `SEND_TO_VOUT` | 0 |"), payloads), ["SEND_TO_VOUT: spec 0, code 1"], "the fixed SEND outputs are §1 constants too");
+  assert.equal(parsed.PROTOCOL_ID, "lucky-20", "the wire id is a §1 constant");
   assert.deepEqual(specConstantMismatches(served, { ...payloads, DEPLOY_PROTOCOL_FEE_SATS: 546 }), ["DEPLOY_PROTOCOL_FEE_SATS: spec 5460, code 546"]);
   assert.equal(payloads.FINAL_DEPTH, 6, "the finality depth is checked like every §1 constant");
   assert.deepEqual(specConstantMismatches(served, { ...payloads, FINAL_DEPTH: 3 }), ["FINAL_DEPTH: spec 6, code 3"]);

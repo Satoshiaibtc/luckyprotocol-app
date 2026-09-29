@@ -1,4 +1,4 @@
-// Unsigned PSBT construction for LuckyProtocol COMMIT / REVEAL / MINE / SEND
+// Unsigned PSBT construction for LUCKY-20 DEPLOY / MINE / SEND
 // (spec §2 + §4 + §6).
 //
 // The web app holds no keys. This module selects BTC inputs, lays out the
@@ -10,47 +10,36 @@
 // the lock time is only enforced when some input's sequence is below
 // 0xffffffff, and 0xfffffffd also signals replace-by-fee, which "Speed up"
 // (buildSpeedUpPsbt) relies on. Such a tx can only confirm in block
-// 969,600 (ACTIVATION_HEIGHT) or later. The one exception is a REVEAL's
-// input 0 (the COMMIT carrier): nSequence = REVEAL_CARRIER_SEQUENCE (1), a
-// BIP68 relative lock of one block, so the REVEAL can never confirm in its
-// COMMIT's block — not even after a chain reorganization.
+// 969,600 (ACTIVATION_HEIGHT) or later.
 //
-// COMMIT layout (§2.1, step 1 of a deploy — names no ticker):
-//                       vout0 546 → self (the COMMIT CARRIER; the REVEAL spends it as input 0)
-//                       vout1 OP_RETURN  LUCKY-20|COMMIT|<H>          (exactly 80 bytes)
-//                       vout2 change → self (omitted if < dust; folded into fee)
-//                       H = SHA-256(REVEAL payload ‖ vout0's scriptPubKey), so H
-//                       only works for a carrier paying this address.
-//
-// REVEAL layout (§2.1, step 2 — a DEPLOY with a salt):
-//                       input 0 = the COMMIT carrier (commit_txid:0, nSequence 1), then fee inputs
-//                       vout0 546 → self (deployer proof)
+// DEPLOY layout (§2.1): vout0 546 → self (deployer proof)
 //                       vout1 5,460 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  LUCKY-20|DEPLOY|<TICKER>|<SALT>
+//                       vout2 OP_RETURN  {"p":"lucky-20","op":"deploy","tick":"<TICKER>"}
 //                       vout3 change → self (omitted if < dust; folded into fee)
 //
-// MINE layout (§2.2):   vout0 546 → self (yield slot)
+// MINE layout (§2.2):   vout0 546 → self (yield output)
 //                       vout1 546 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  LUCKY-20|MINE|<TICKER>
+//                       vout2 OP_RETURN  {"p":"lucky-20","op":"mine","tick":"<TICKER>"}
 //                       vout3 change → self (omitted if < dust; folded into fee)
 //
 // SEND layout (§2.3 — token carriers are ALWAYS 546-sat outputs):
-//                       vout0 546 → recipient          (TO_OUT = 0)
-//                       vout1 546 → PROJECT_FEE_ADDRESS
-//                       vout2 OP_RETURN  LUCKY-20|SEND|<TICKER>|<AMT>|0|3
-//                       vout3 546 → self               (CHANGE_OUT = 3: the residual
-//                                                       token slot — ALWAYS present,
+//                       vout0 546 → PROJECT_FEE_ADDRESS
+//                       vout1 546 → recipient          (SEND_TO_VOUT: receives AMT)
+//                       vout2 546 → self               (SEND_RESIDUAL_VOUT: the residual
+//                                                       output — ALWAYS present,
 //                                                       even when the residual is 0)
+//                       vout3 OP_RETURN  {"p":"lucky-20","op":"send","tick":"<TICKER>","amt":"<AMT>"}
 //                       vout4 BTC change → self        (optional; folded into the fee
 //                                                       when < 546)
 //
 // Builder obligation (§4): never spend a token-bearing UTXO as a fee input.
-// Every UTXO with value ≤ 546 sats is dropped (all LuckyProtocol carriers are
+// Every UTXO with value ≤ 546 sats is dropped (all LUCKY-20 carriers are
 // 546-sat outputs), and every outpoint the indexer reports as token-bearing
 // is excluded explicitly. Under DEFAULT ROUTING a payload-less spend of a
 // carrier does not destroy its tokens — it hands them to the tx's first
-// non-OP_RETURN output — so a carrier spent as a fee input would GIFT its
-// tokens to whoever that output pays.
+// non-OP_RETURN output — and a carrier spent as a fee input of a protocol
+// tx lands on the proof output of a DEPLOY, vout0 of a MINE, or vout2 of a
+// SEND: never lost, but never intended either.
 //
 // Mainnet only.
 
@@ -60,16 +49,15 @@ import {
   DUST_SATS,
   PROJECT_FEE_ADDRESS,
   DEPLOY_PROTOCOL_FEE_SATS,
-  MIN_COMMIT_AGE,
   MINE_PROTOCOL_FEE_SATS,
   SEND_PROTOCOL_FEE_SATS,
+  SEND_RESIDUAL_VOUT,
+  SEND_TO_VOUT,
   PROTOCOL_LOCKTIME,
-  buildCommitPayload,
+  buildDeployPayload,
   buildMinePayload,
-  commitHashFor,
-  buildRevealPayload,
   buildSendPayload,
-  parsePayload,
+  parsePayloadBytes,
   payloadToString,
 } from "./payloads.js";
 
@@ -81,25 +69,8 @@ export const NETWORK = btc.NETWORK; // mainnet
  */
 export const RBF_SEQUENCE = 0xfffffffd;
 
-/**
- * nSequence of a REVEAL's input 0, the COMMIT carrier: a BIP68 relative
- * lock of MIN_COMMIT_AGE (1) block — the tx is version 2 — so no chain,
- * not even one rebuilt by a chain reorganization, can confirm the REVEAL
- * in the same block as its COMMIT (§2.1: such a DEPLOY is invalid and uses
- * the reservation up). Nodes refuse the REVEAL until the COMMIT has
- * confirmed, and drop it if a reorganization puts the COMMIT back in the
- * mempool (it is published again, with the same salt, once the COMMIT
- * confirms again). Below 0xfffffffe it still signals replace-by-fee, and
- * it enables nLockTime like RBF_SEQUENCE.
- */
-export const REVEAL_CARRIER_SEQUENCE = MIN_COMMIT_AGE;
-
-/** The COMMIT carrier is always vout0 of the COMMIT tx (§2.1). */
-export const COMMIT_CARRIER_VOUT = 0;
-/** vout of the optional BTC change output of a COMMIT (carrier, OP_RETURN, change). */
-export const COMMIT_CHANGE_VOUT = 2;
-/** vout of the optional BTC change output of a REVEAL (proof, fee, OP_RETURN, change). */
-export const REVEAL_CHANGE_VOUT = 3;
+/** vout of the optional BTC change output of a DEPLOY (proof, fee, OP_RETURN, change). */
+export const DEPLOY_CHANGE_VOUT = 3;
 
 /**
  * Hard safety cap on the fee rate a builder will accept. The rate comes from
@@ -212,15 +183,6 @@ export function checkRecipientAddress(address, self = null) {
   }
 }
 
-/**
- * The scriptPubKey (lowercase hex) of the COMMIT carrier this app builds for
- * `address` — the output script of the user's own address (bc1q / bc1p).
- * It is what a COMMIT's H covers after the REVEAL payload (§2.1).
- */
-export function carrierScriptHex(address) {
-  return hex.encode(decodeAddress(address).script);
-}
-
 export function isP2tr(address) {
   return typeof address === "string" && address.startsWith("bc1p");
 }
@@ -317,8 +279,9 @@ export function psbtTxShape(psbtHex) {
 /**
  * After-signing check: does the PSBT the wallet returned carry the very
  * transaction it was asked to sign? A wallet may sign only what it was
- * given — a changed lock time, nSequence (the RBF signal, a REVEAL's
- * relative lock), input or output would otherwise be broadcast as is.
+ * given — a changed lock time, nSequence (the RBF signal), input or output
+ * would otherwise be broadcast as is. The signature TYPE is checked apart
+ * (src/lib/sighash.js signedSighashMismatch).
  * → null when identical, else what differs (a short phrase).
  */
 export function signedTxMismatch(unsignedPsbtHex, signedPsbtHex) {
@@ -474,18 +437,18 @@ export function protocolPayloadOfScripts(scripts) {
     if (payload !== null) return;
     const data = decodeOpReturnPush(script);
     if (!data) return;
-    const text = payloadToString(data);
-    const p = parsePayload(text);
+    const p = parsePayloadBytes(data);
     if (p) {
       payload = p;
-      payloadText = text;
+      payloadText = payloadToString(data);
       payloadVout = vout;
     }
   });
   return { opReturnCount, payload, payloadText, payloadVout };
 }
 
-function psbtOutputScripts(psbtHex) {
+/** The output scripts of a PSBT's transaction, in vout order. */
+export function psbtOutputScripts(psbtHex) {
   const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownInputs: true, allowUnknownOutputs: true });
   const scripts = [];
   for (let i = 0; i < tx.outputsLength; i++) scripts.push(tx.getOutput(i).script);
@@ -493,19 +456,86 @@ function psbtOutputScripts(psbtHex) {
 }
 
 /**
+ * The LUCKY-20 payload a PSBT carries (`{ op, ticker, amount? }`, as
+ * parsePayload), or null when it carries none or the PSBT does not read.
+ * Never throws.
+ */
+export function psbtPayload(psbtHex) {
+  try {
+    return protocolPayloadOfScripts(psbtOutputScripts(psbtHex)).payload;
+  } catch {
+    return null;
+  }
+}
+
+const hex8 = (n) => `0x${(Number(n) >>> 0).toString(16).padStart(8, "0")}`;
+
+/** The mainnet scriptPubKey (hex) of `address`, or null when it does not decode. */
+function scriptHexOfAddress(address) {
+  try {
+    return hex.encode(btc.OutScript.encode(btc.Address(NETWORK).decode(String(address))));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The reference output layout of `op` (spec §2.1–§2.3), checked
+ * against `outs` = [{ script (hex), amount (number) }]. `self` is the
+ * builder's own address; `to` the SEND's recipient. Throws "refusing to
+ * sign: output {n} is not …" on the first output that breaks it.
+ *
+ *   DEPLOY  546 → self · exactly 5,460 → fee · OP_RETURN · change ≥ 546 → self (optional)
+ *   MINE    546 → self · exactly 546 → fee   · OP_RETURN · change ≥ 546 → self (optional)
+ *   SEND    exactly 546 → fee · 546 → to · 546 → self · OP_RETURN · change ≥ 546 → self (optional)
+ */
+function checkLayout(op, outs, layout) {
+  const selfHex = scriptHexOfAddress(layout?.self);
+  if (!selfHex) throw new Error("refusing to sign: the layout check needs this wallet's own address");
+  const feeHex = scriptHexOfAddress(PROJECT_FEE_ADDRESS);
+  const isOpRet = (o) => !!o && /^6a/i.test(o.script || "");
+  const need = (n, ok, what) => {
+    if (!ok(outs[n])) throw new Error(`refusing to sign: output ${n} is not ${what}`);
+  };
+  const pays = (script, sats) => (o) => !!o && !isOpRet(o) && o.script === script && (sats === null || o.amount === sats);
+  const change = (o) => pays(selfHex, null)(o) && o.amount >= DUST_SATS;
+  let fixed;
+  if (op === "SEND") {
+    const toHex = layout.to ? scriptHexOfAddress(layout.to) : null;
+    if (!toHex || toHex === feeHex) throw new Error("refusing to sign: a SEND needs its recipient, and the protocol fee address cannot be one");
+    need(0, pays(feeHex, SEND_PROTOCOL_FEE_SATS), `exactly ${SEND_PROTOCOL_FEE_SATS} sats to the protocol fee address`);
+    need(SEND_TO_VOUT, pays(toHex, DUST_SATS), `${DUST_SATS} sats to the recipient`);
+    need(SEND_RESIDUAL_VOUT, pays(selfHex, DUST_SATS), `${DUST_SATS} sats back to this wallet (the residual output)`);
+    need(3, isOpRet, "the OP_RETURN payload");
+    fixed = 4;
+  } else if (op === "DEPLOY" || op === "MINE") {
+    const fee = op === "DEPLOY" ? DEPLOY_PROTOCOL_FEE_SATS : MINE_PROTOCOL_FEE_SATS;
+    need(0, pays(selfHex, DUST_SATS), `${DUST_SATS} sats back to this wallet`);
+    need(1, pays(feeHex, fee), `exactly ${fee.toLocaleString("en-US")} sats to the protocol fee address`);
+    need(2, isOpRet, "the OP_RETURN payload");
+    fixed = 3;
+  } else {
+    throw new Error(`refusing to sign: no reference layout for ${op}`);
+  }
+  if (outs.length > fixed + 1) throw new Error(`refusing to sign: output ${fixed + 1} is not part of the ${op} layout (${outs.length} outputs)`);
+  if (outs.length === fixed + 1) need(fixed, change, `BTC change of at least ${DUST_SATS} sats back to this wallet`);
+}
+
+/**
  * Sign-time guard: before a PSBT goes to the wallet,
  * assert that its OP_RETURN says what the flow believes it says.
  *
- *   expectPsbtPayload(hex, { op: "SEND", ticker: "LUCKY", amount: 100 })
- *   expectPsbtPayload(hex, { op: "COMMIT", hash, vout0Script, lockTime: PROTOCOL_LOCKTIME })
- *   expectPsbtPayload(hex, { op: "DEPLOY", ticker, salt, input0: { txid, vout: 0 }, input0Sequence: REVEAL_CARRIER_SEQUENCE })
+ *   expectPsbtPayload(hex, { op: "DEPLOY", ticker, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self } })
+ *   expectPsbtPayload(hex, { op: "MINE", ticker, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self } })
+ *   expectPsbtPayload(hex, { op: "SEND", ticker, amount, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self, to } })
  *   expectPsbtPayload(hex, { op: null })          // a plain payment: no OP_RETURN at all
  *
- * Throws on: more than one OP_RETURN output, a missing / unparsable
- * payload, the wrong opcode, ticker, amount, COMMIT hash or REVEAL salt,
- * and — when asked — the wrong nLockTime, input 0, input 0's nSequence or
- * vout0 script (hex; a COMMIT's H only works for the carrier script it was
- * computed with).
+ * (`to = self` for a split, a withdraw or a cancel.) Throws on: more than
+ * one OP_RETURN output, a missing / unparsable payload, the wrong opcode,
+ * ticker or amount, and — when asked — the wrong nLockTime, an input whose
+ * nSequence is not `inputsSequence`, or an output that breaks the reference
+ * layout of `op` (checkLayout): with fixed positions, one misplaced output
+ * would put tokens on the fee address or with someone else.
  * Returns the parsed payload (null for a plain payment).
  */
 export function expectPsbtPayload(psbtHex, expect = {}) {
@@ -513,25 +543,24 @@ export function expectPsbtPayload(psbtHex, expect = {}) {
   const found = protocolPayloadOfScripts(scripts);
   const payload = checkExpectedPayload(found, expect);
   const want = expect && typeof expect === "object" ? expect : {};
-  if (want.vout0Script !== undefined) {
-    const got = scripts.length ? hex.encode(scripts[0]) : "none";
-    if (got !== String(want.vout0Script).toLowerCase()) throw new Error("refusing to sign: the first output is not the reservation output its sealed code was made for");
-  }
-  if (want.lockTime !== undefined || want.input0 !== undefined || want.input0Sequence !== undefined) {
+  if (want.lockTime !== undefined || want.inputsSequence !== undefined || want.layout !== undefined) {
     const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownInputs: true, allowUnknownOutputs: true });
     if (want.lockTime !== undefined && tx.lockTime !== want.lockTime) {
       throw new Error(`refusing to sign: nLockTime is ${tx.lockTime}, expected ${want.lockTime}`);
     }
-    if (want.input0 !== undefined) {
-      const i0 = tx.inputsLength > 0 ? tx.getInput(0) : null;
-      const got = i0 ? `${hex.encode(i0.txid)}:${i0.index}` : "none";
-      const exp = `${String(want.input0.txid).toLowerCase()}:${Number(want.input0.vout)}`;
-      if (got !== exp) throw new Error(`refusing to sign: input 0 is ${got}, expected the reservation output ${exp}`);
+    if (want.inputsSequence !== undefined) {
+      for (let i = 0; i < tx.inputsLength; i++) {
+        const seq = tx.getInput(i).sequence ?? 0xffffffff;
+        if (seq !== want.inputsSequence) throw new Error(`refusing to sign: input ${i} has nSequence ${hex8(seq)}, expected ${hex8(want.inputsSequence)}`);
+      }
     }
-    if (want.input0Sequence !== undefined) {
-      const seq = tx.inputsLength > 0 ? (tx.getInput(0).sequence ?? 0xffffffff) : null;
-      const h = (n) => `0x${(n >>> 0).toString(16).padStart(8, "0")}`;
-      if (seq !== want.input0Sequence) throw new Error(`refusing to sign: input 0 has nSequence ${seq === null ? "none" : h(seq)}, expected ${h(want.input0Sequence)}`);
+    if (want.layout !== undefined) {
+      const outs = [];
+      for (let i = 0; i < tx.outputsLength; i++) {
+        const o = tx.getOutput(i);
+        outs.push({ script: o.script ? hex.encode(o.script) : "", amount: o.amount === undefined ? null : Number(o.amount) });
+      }
+      checkLayout(payload?.op ?? want.op, outs, want.layout || {});
     }
   }
   return payload;
@@ -561,12 +590,6 @@ export function checkExpectedPayload(found, expect = {}) {
   }
   if (want.amount !== undefined && Number(found.payload.amount) !== Number(want.amount)) {
     throw new Error(`refusing to sign: OP_RETURN moves ${found.payload.amount} tokens, expected ${want.amount}`);
-  }
-  if (want.hash !== undefined && found.payload.hash !== want.hash) {
-    throw new Error("refusing to sign: the COMMIT hash is not the one this reservation expects");
-  }
-  if (want.salt !== undefined && found.payload.salt !== want.salt) {
-    throw new Error("refusing to sign: the DEPLOY salt is not the one this reservation holds");
   }
   return found.payload;
 }
@@ -851,11 +874,11 @@ function newProtocolTx() {
 }
 
 /** A PSBT input for one of the wallet's own outputs `u` ({ txid, vout, sats }), RBF-signalling. */
-function protocolInput(u, script, tapInternalKey, sequence = RBF_SEQUENCE) {
+function protocolInput(u, script, tapInternalKey) {
   const input = {
     txid: u.txid,
     index: u.vout,
-    sequence,
+    sequence: RBF_SEQUENCE,
     witnessUtxo: { script, amount: BigInt(u.sats) },
   };
   if (tapInternalKey) input.tapInternalKey = tapInternalKey;
@@ -869,7 +892,7 @@ function protocolInput(u, script, tapInternalKey, sequence = RBF_SEQUENCE) {
  * `requireChange`: refuse to build unless the change output exists (≥
  * dust). No current caller needs it — DEPLOY / MINE route nothing
  * through their change output, and SEND has its own builder
- * whose residual slot is a fixed 546-sat output — so sub-dust change folds
+ * whose residual output is a fixed 546-sat output — so sub-dust change folds
  * into the miner fee.
  */
 function buildUnsigned({
@@ -932,11 +955,11 @@ function buildUnsigned({
   }
   if (!changeOmitted && change < DUST_SATS) {
     // Cannot happen (target includes the headroom) — guard the invariant
-    // loudly rather than silently dropping a required change slot.
+    // loudly rather than silently dropping a required change output.
     if (requireChange) {
       throw new Error(
-        `change output required (payload commits change_out_idx=${outputs.length} for residual ` +
-        `tokens) but change is ${change} sat < dust ${DUST_SATS} — refusing to build`,
+        `change output required (vout${outputs.length + (opReturnScript ? 1 : 0)}) but change is ` +
+        `${change} sat < dust ${DUST_SATS} — refusing to build`,
       );
     }
     changeOmitted = true;
@@ -972,16 +995,14 @@ function buildUnsigned({
 
 /**
  * Shared pipeline for a tx whose first inputs are PINNED — spent whatever
- * their value (a SEND's token carriers, a REVEAL's commit carrier) — and
- * whose fee is funded by selected inputs. Output order: `preOutputs`, the
- * OP_RETURN, `postOutputs`, then the optional BTC change to `address`
- * (folded into the miner fee when it would be < dust, like MINE's).
- * `pinned` rows must carry their EXACT on-chain `sats`: the segwit /
- * taproot sighash commits to every input's amount. `input0Sequence` is
- * input 0's nSequence (a REVEAL's relative lock); every other input gets
- * RBF_SEQUENCE.
+ * their value (a SEND's token carriers) — and whose fee is funded by
+ * selected inputs. Output order: `preOutputs`, the OP_RETURN,
+ * `postOutputs`, then the optional BTC change to `address` (folded into the
+ * miner fee when it would be < dust, like MINE's). `pinned` rows must carry
+ * their EXACT on-chain `sats`: the segwit / taproot sighash commits to
+ * every input's amount. Every input gets RBF_SEQUENCE.
  */
-function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints, feeRateSatVb, preOutputs, opReturnScript, postOutputs = [], minInputSats = 0, selectionOrder, input0Sequence = RBF_SEQUENCE }) {
+function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints, feeRateSatVb, preOutputs, opReturnScript, postOutputs = [], minInputSats = 0, selectionOrder }) {
   const { type, script } = decodeAddress(address);
   const tapInternalKey = type === "tr" ? xOnlyFromCompressedHex(pubkeyHex) : null;
   const pinnedKeys = new Set(pinned.map(outpointKey));
@@ -1022,7 +1043,7 @@ function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints
 
   const tx = newProtocolTx();
   const inputIndexes = [];
-  [...pinned, ...selected].forEach((u, i) => inputIndexes.push(tx.addInput(protocolInput(u, script, tapInternalKey, i === 0 ? input0Sequence : RBF_SEQUENCE))));
+  for (const u of [...pinned, ...selected]) inputIndexes.push(tx.addInput(protocolInput(u, script, tapInternalKey)));
   for (const o of preOutputs) tx.addOutputAddress(o.address, BigInt(o.value), NETWORK);
   tx.addOutput({ script: opReturnScript, amount: 0n });
   for (const o of postOutputs) tx.addOutputAddress(o.address, BigInt(o.value), NETWORK);
@@ -1043,99 +1064,46 @@ function buildPinnedUnsigned({ address, pubkeyHex, pinned, utxos, tokenOutpoints
   };
 }
 
-// ---- COMMIT / REVEAL (commit-reveal deploy, §2.1) ------------------------------------------
+// ---- DEPLOY (§2.1) ---------------------------------------------------------------------------
 
 /**
- * Build an unsigned COMMIT PSBT — step 1 of a deploy ("Reserve"). vout0 is
- * the 546-sat COMMIT CARRIER to the committer's own address (consensus:
- * vout0 must exist, must not be an OP_RETURN and must have a standard
- * address, else the COMMIT is recorded invalid); vout1 the 80-byte
- * `LUCKY-20|COMMIT|<H>`; no protocol fee. The §4 filter applies as for
- * every builder: a token UTXO spent here would default-route to vout0.
- *
- * H is computed HERE from the REVEAL payload of `(ticker, salt)` and the
- * scriptPubKey of the carrier this function builds (`address`'s own
- * script): H = SHA-256(payload ‖ carrier script) (§2.1). The ticker itself
- * never appears. → the unsigned build plus `{ hash, carrierScript }`
- * (carrierScript as lowercase hex), which the caller stores with the salt.
+ * Build an unsigned DEPLOY PSBT (§2.1): vout0 546 → self (the deployer's
+ * proof output), vout1 exactly 5,460 → PROJECT_FEE_ADDRESS (a consensus
+ * rule), vout2 `{"p":"lucky-20","op":"deploy","tick":"<TICKER>"}`, vout3
+ * optional change (DEPLOY_CHANGE_VOUT; sub-dust change folds into the fee,
+ * `changeVout: null`). A DEPLOY names no output: a token UTXO spent here
+ * would have its tokens default-routed to vout0 (the proof output) — moved,
+ * not gone, but never intended — so the §4 filter applies as for every
+ * builder. Every input signals replace-by-fee and the lock time is
+ * PROTOCOL_LOCKTIME, like every tx this module builds; the change is what a
+ * Speed up takes its extra fee from, so the Create page passes
+ * `selectionOrder: "largest"` to leave as much of it as it can.
  */
-export function buildCommitPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, salt, minInputSats = 0, selectionOrder }) {
-  const carrierScript = carrierScriptHex(address);
-  const hash = commitHashFor(ticker, salt, carrierScript);
-  const payload = buildCommitPayload(hash);
-  const built = buildUnsigned({
+export function buildDeployPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, minInputSats = 0, selectionOrder }) {
+  const payload = buildDeployPayload(ticker);
+  return buildUnsigned({
     address,
     pubkeyHex,
     utxos,
     tokenOutpoints,
     feeRateSatVb,
-    outputs: [{ address, value: DUST_SATS }], // vout0 COMMIT carrier
-    opReturnData: payload, //                    vout1
-    requireChange: false, //                     vout2 optional
-    minInputSats,
-    selectionOrder,
-  });
-  // The H above is only valid for this exact carrier script at vout0.
-  const vout0 = psbtOutputScripts(built.psbtHex)[COMMIT_CARRIER_VOUT];
-  if (!vout0 || hex.encode(vout0) !== carrierScript) throw new Error("the COMMIT's first output is not the carrier its hash was computed for");
-  return { ...built, hash, carrierScript };
-}
-
-/** Display-only fee preview for a COMMIT (one input of the wallet's type, carrier, OP_RETURN, change). Clamps instead of throwing. */
-export function estimateCommitFeeSats({ address, feeRateSatVb, inputCount = 1 }) {
-  const type = isP2tr(address) ? "tr" : "wpkh";
-  const vsize = estimateVsize({
-    inputCount,
-    inputType: type,
-    outputAddresses: [address, address],
-    opReturnScriptLen: makeOpReturnScript(buildCommitPayload("0".repeat(64))).length,
-  });
-  const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
-  return { vsize: Math.ceil(vsize), feeSats: Math.ceil(Math.ceil(vsize) * rate) };
-}
-
-/**
- * Build an unsigned REVEAL PSBT — step 2 of a deploy ("Publish"). Input 0
- * is the COMMIT carrier `carrier` = `{ txid, vout: 0, sats }` (its exact
- * on-chain value — 546 when this app built the COMMIT), with nSequence
- * REVEAL_CARRIER_SEQUENCE (a one-block relative lock), then fee inputs;
- * vout0 546 → self (deployer proof), vout1 5,460 → PROJECT_FEE_ADDRESS,
- * vout2 `LUCKY-20|DEPLOY|<TICKER>|<SALT>`, vout3 optional change. The
- * carrier belongs to `address`: the committer signs the reveal, and the
- * indexer attributes the ticker to the carrier's address.
- */
-export function buildRevealPsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRateSatVb, ticker, salt, carrier, minInputSats = 0, selectionOrder }) {
-  const payload = buildRevealPayload(ticker, salt);
-  const txid = String(carrier?.txid || "").toLowerCase();
-  const sats = Number(carrier?.sats);
-  if (!/^[0-9a-f]{64}$/.test(txid) || Number(carrier?.vout) !== COMMIT_CARRIER_VOUT) {
-    throw new Error("the REVEAL needs the reservation's output (its COMMIT tx, vout 0) as input 0");
-  }
-  if (!Number.isInteger(sats) || sats <= 0) throw new Error("the reservation output has no known BTC value");
-  return buildPinnedUnsigned({
-    address,
-    pubkeyHex,
-    pinned: [{ txid, vout: COMMIT_CARRIER_VOUT, sats }], //                     input 0
-    utxos,
-    tokenOutpoints,
-    feeRateSatVb,
-    preOutputs: [
+    outputs: [
       { address, value: DUST_SATS }, //                                          vout0 deployer proof
       { address: PROJECT_FEE_ADDRESS, value: DEPLOY_PROTOCOL_FEE_SATS }, //      vout1 fee (5,460)
     ],
-    opReturnScript: makeOpReturnScript(payload), //                               vout2
-    minInputSats, //                                                              vout3 optional change
+    opReturnData: payload, //                                                     vout2
+    requireChange: false, //                                                      vout3 optional
+    minInputSats,
     selectionOrder,
-    input0Sequence: REVEAL_CARRIER_SEQUENCE,
   });
 }
 
-/** Display-only fee preview for a REVEAL (the carrier + `inputCount` fee inputs; proof, fee, OP_RETURN, change). Clamps instead of throwing. */
-export function estimateRevealFeeSats({ address, ticker, feeRateSatVb, inputCount = 1 }) {
+/** Display-only fee preview for a DEPLOY (`inputCount` inputs of the wallet's type; proof, fee, OP_RETURN, change). Clamps instead of throwing. */
+export function estimateDeployFeeSats({ address, ticker, feeRateSatVb, inputCount = 1 }) {
   const type = isP2tr(address) ? "tr" : "wpkh";
-  const payload = buildRevealPayload(ticker, "0".repeat(32));
+  const payload = buildDeployPayload(ticker);
   const vsize = estimateVsize({
-    inputCount: 1 + inputCount,
+    inputCount,
     inputType: type,
     outputAddresses: [address, PROJECT_FEE_ADDRESS, address],
     opReturnScriptLen: makeOpReturnScript(payload).length,
@@ -1256,6 +1224,25 @@ export function speedUpFloorRate(psbtHex, incrementalRelayFee = DEFAULT_INCREMEN
 }
 
 /**
+ * The highest sat/vB a "Speed up" of `psbtHex` can pay from its change
+ * output at `changeVout` and still keep that output ≥ 546 sats: (old fee +
+ * change − 546) over its vsize, rounded DOWN to hundredths. 0 when
+ * `changeVout` is not a usable output (no change: no Speed up at all).
+ * Pure preview, same inputs as buildSpeedUpPsbt.
+ */
+export function speedUpCeilingRate(psbtHex, changeVout) {
+  const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownOutputs: true });
+  if (!Number.isInteger(changeVout) || changeVout < 0 || changeVout >= tx.outputsLength) return 0;
+  const out = tx.getOutput(changeVout);
+  if (isOpReturnScript(out.script)) return 0;
+  const change = Number(out.amount);
+  const vsize = Math.ceil(psbtVsize(psbtHex));
+  const room = psbtFeeSats(psbtHex) + change - DUST_SATS;
+  if (!(vsize > 0) || room <= 0) return 0;
+  return Math.floor((room / vsize) * 100) / 100;
+}
+
+/**
  * Build an unsigned MINE PSBT.
  *
  * @returns {{ psbtHex: string, feeSats: number, inputIndexes: number[], ... }}
@@ -1269,7 +1256,7 @@ export function buildMinePsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRa
     tokenOutpoints,
     feeRateSatVb,
     outputs: [
-      { address, value: DUST_SATS },                               // vout0 yield slot
+      { address, value: DUST_SATS },                               // vout0 yield output
       { address: PROJECT_FEE_ADDRESS, value: MINE_PROTOCOL_FEE_SATS }, // vout1 fee
     ],
     opReturnData: payload,                                         // vout2
@@ -1279,24 +1266,27 @@ export function buildMinePsbt({ address, pubkeyHex, utxos, tokenOutpoints, feeRa
   });
 }
 
-/** SEND payload indices (§2.3): TO_OUT = vout0, CHANGE_OUT = vout3 (the residual slot). */
-export const SEND_TO_OUT = 0;
-export const SEND_CHANGE_OUT = 3;
+/** SEND reference layout (§2.3): vout0 is the 546-sat protocol fee output. */
+export const SEND_FEE_VOUT = 0;
+/** vout1 receives AMT, vout2 the rest of the input pool (every ticker) — fixed by the protocol (§1). */
+export { SEND_TO_VOUT, SEND_RESIDUAL_VOUT };
+/** vout of a SEND's OP_RETURN payload. */
+export const SEND_OP_RETURN_VOUT = 3;
 /** vout of the optional BTC change output of a SEND (present only when ≥ 546 sats). */
 export const SEND_BTC_CHANGE_VOUT = 4;
 
 /**
- * Display-only fee preview for a SEND (one carrier input + `inputCount` fee
- * inputs of the wallet's type; recipient slot, fee, OP_RETURN, residual slot
- * and a change output). Clamps instead of throwing.
+ * Display-only fee preview for a SEND (`carrierCount` carrier inputs +
+ * `inputCount` fee inputs of the wallet's type; fee, recipient, residual,
+ * OP_RETURN and a change output). Clamps instead of throwing.
  */
 export function estimateSendFeeSats({ address, toAddress, ticker, amount = 1, feeRateSatVb, inputCount = 1, carrierCount = 1 }) {
   const type = isP2tr(address) ? "tr" : "wpkh";
-  const payload = buildSendPayload({ ticker, amount, toOutIdx: SEND_TO_OUT, changeOutIdx: SEND_CHANGE_OUT });
+  const payload = buildSendPayload({ ticker, amount });
   const vsize = estimateVsize({
     inputCount: carrierCount + inputCount,
     inputType: type,
-    outputAddresses: [toAddress || address, PROJECT_FEE_ADDRESS, address, address],
+    outputAddresses: [PROJECT_FEE_ADDRESS, toAddress || address, address, address],
     opReturnScriptLen: makeOpReturnScript(payload).length,
   });
   const rate = Math.min(MAX_FEE_RATE_SAT_VB, Math.max(1, Number(feeRateSatVb) || 1));
@@ -1308,11 +1298,14 @@ export function estimateSendFeeSats({ address, toAddress, ticker, amount = 1, fe
  * are the sender's token-bearing outpoints for `ticker` (from /utxos/:addr);
  * they are spent as inputs so their balances form the tx's input pool.
  *
- * Every token slot is a 546-sat output: vout0 (recipient) and vout3 (the
- * residual slot, ALWAYS present — the payload commits CHANGE_OUT = 3 and
- * the indexer routes the residual pool there even when it is 0). BTC change
- * is a separate vout4 that exists only when it is ≥ 546 sats; below that it
- * folds into the miner fee exactly like MINE's change.
+ * Every token output is a 546-sat output: vout1 (the recipient, AMT) and
+ * vout2 (the residual output, ALWAYS present — the protocol routes the rest
+ * of the pool there even when it is 0; without it the rest would go to the
+ * default output, which in this layout is the fee output at vout0). BTC
+ * change is a separate vout4 that exists only when it is ≥ 546 sats; below
+ * that it folds into the miner fee exactly like MINE's change. A SEND to
+ * yourself (a split, a withdraw, a cancel) is the same builder with
+ * `toAddress = address`: vout1 is then the new carrier.
  *
  * @returns {{ psbtHex, feeSats, inputIndexes, inputs, changeSats, changeOmitted, changeVout, residualVout, outputCount, feeRateSatVb }}
  */
@@ -1330,7 +1323,10 @@ export function buildSendPsbt({
   selectionOrder,
 }) {
   decodeRecipientAddress(toAddress);
-  const payload = buildSendPayload({ ticker, amount, toOutIdx: SEND_TO_OUT, changeOutIdx: SEND_CHANGE_OUT });
+  if (scriptHexOfAddress(toAddress) === scriptHexOfAddress(PROJECT_FEE_ADDRESS)) {
+    throw new Error("the protocol fee address cannot receive a SEND");
+  }
+  const payload = buildSendPayload({ ticker, amount });
 
   // Token carriers are pinned as inputs (their balances form the input pool)
   // and the fee selector funds the rest. They MUST be spent at their EXACT
@@ -1357,10 +1353,10 @@ export function buildSendPsbt({
   if (carriers.length === 0) {
     throw new Error(`no ${ticker} token UTXOs at ${address} to spend`);
   }
-  // Fixed layout: the two slots before the OP_RETURN and the residual slot
-  // after it — all three 546-sat carriers — then the optional BTC change
-  // (vout4, folded into the fee when < 546). The residual TOKEN slot
-  // (vout3) is part of the fixed layout and is never folded.
+  // Fixed layout: the fee, the recipient and the residual output before the
+  // OP_RETURN — the last two 546-sat carriers — then the optional BTC change
+  // (vout4, folded into the fee when < 546). The residual output (vout2) is
+  // part of the fixed layout and is never folded.
   const built = buildPinnedUnsigned({
     address,
     pubkeyHex,
@@ -1369,13 +1365,13 @@ export function buildSendPsbt({
     tokenOutpoints,
     feeRateSatVb,
     preOutputs: [
-      { address: toAddress, value: DUST_SATS }, //                        vout0 recipient slot
-      { address: PROJECT_FEE_ADDRESS, value: SEND_PROTOCOL_FEE_SATS }, // vout1 fee
+      { address: PROJECT_FEE_ADDRESS, value: SEND_PROTOCOL_FEE_SATS }, // vout0 fee
+      { address: toAddress, value: DUST_SATS }, //                        vout1 recipient (AMT)
+      { address, value: DUST_SATS }, //                                   vout2 residual output — always
     ],
-    opReturnScript: makeOpReturnScript(payload), //                       vout2
-    postOutputs: [{ address, value: DUST_SATS }], //                      vout3 residual slot — always
+    opReturnScript: makeOpReturnScript(payload), //                       vout3
     minInputSats, //                                                      vout4 optional BTC change
     selectionOrder,
   });
-  return { ...built, residualVout: SEND_CHANGE_OUT };
+  return { ...built, residualVout: SEND_RESIDUAL_VOUT };
 }

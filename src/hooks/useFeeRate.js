@@ -48,7 +48,7 @@ function writeStoredChoice(choice) {
  *
  * Options: `{ preset, persist = true }` — `preset` starts from that preset
  * instead of the stored choice, and `persist: false` keeps the choice local
- * to the component (the Create page's Publish step starts at "fast" without
+ * to the component (the Create page's DEPLOY starts at "fast" without
  * touching the choice every other builder uses).
  */
 export function useFeeRate(feesData, { preset = null, persist = true } = {}) {

@@ -5,33 +5,21 @@ import { friendlyError } from "../hooks/useWallet.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import { useDeployLog } from "../hooks/useMinerLog.js";
 import { useFeeRate } from "../hooks/useFeeRate.js";
-import { txidOfRaw, useCommitReveal } from "../hooks/useCommitReveal.js";
-import { MAX_FEE_RATE_SAT_VB, estimateCommitFeeSats, estimateRevealFeeSats, speedUpFloorRate } from "../lib/psbt.js";
-import { refreshTxRecords, txRecords } from "../lib/txrecords.js";
+import { ownDeployFor, useCreate } from "../hooks/useCreate.js";
+import { MAX_FEE_RATE_SAT_VB, estimateDeployFeeSats, speedUpFloorRate } from "../lib/psbt.js";
+import { DROP_GRACE_MS } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
-import { clampCustomFee, missingFeeHint, needsHighFeeAck } from "../lib/feechoice.js";
-import { ACTIVATION_HEIGHT, DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
+import { clampCustomFee, isUsableFeeRate, missingFeeHint, needsHighFeeAck } from "../lib/feechoice.js";
+import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE, buildDeployPayload, payloadToString } from "../lib/payloads.js";
 import { activationNotice, activationState, lockedHint } from "../lib/activation.js";
-import {
-  DEAD_END_PHASES,
-  EXPIRY_WARN_BLOCKS,
-  PUBLISH_CUTOFF_BLOCKS,
-  PUBLISH_MIN_CONFIRMATIONS,
-  canResendStep,
-  commitStatusText,
-  expiryText,
-  invalidReasonText,
-  publishMissedBlock,
-  revealReasonText,
-  rowConfirmations,
-} from "../lib/commitReveal.js";
+import { deployLeds, headroomText, isOwnVerdict, ownDeployText, rowConfirmations, rowIsFinal } from "../lib/createFlow.js";
 import { FINAL_DEPTH, confirmationsAt, confirmationsText } from "../lib/finality.js";
 import { cleanTickerInput, cleanedCaret } from "../lib/tickerInput.js";
 import { readyText } from "../lib/statusText.js";
 import { BUCKETS, EXPECTED_YIELD } from "../lib/yield.js";
 import { blockUrl, fmtDec, fmtInt, fmtSats, shortTxid, txUrl } from "../lib/format.js";
 import { blockLineKey } from "../lib/minerlog.js";
-import { DEPLOY_PHASES, blockFoundLine, deployHeartbeatLine, deployUntrackedLine, deployedLine, feeQuoteLine, registrationLine, tipLine, walletLine } from "../lib/deploylog.js";
+import { DEPLOY_PHASES, blockFoundLine, deployHeartbeatLine, deployUntrackedLine, feeQuoteLine, tipLine, walletLine } from "../lib/deploylog.js";
 import TokenCard from "../components/TokenCard.jsx";
 import { ConnectPrompt, SpentInputs, StopWaitingButton } from "../components/TxProgress.jsx";
 import FeeSelector from "../components/FeeSelector.jsx";
@@ -39,43 +27,30 @@ import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
 import MinerLog from "../components/MinerLog.jsx";
 
-const AVAIL_LED = { idle: "idle", checking: "busy", free: "ok", taken: "err", error: "err", lagging: "busy", own: "busy", mine: "ok", reserved: "ok", "reserved-dead": "err" };
+const AVAIL_LED = { idle: "idle", checking: "busy", free: "ok", taken: "err", error: "err", lagging: "busy", own: "busy", mine: "ok" };
 const HEARTBEAT_MS = 60_000;
 const FEE_LOG_MIN_MS = 10 * 60_000;
 // Registered → hop to the token page after the banner had a moment on screen.
 const HOP_MS = 4_000;
-const PENDING_PHASES = new Set(["reserve-pending", "reserve-unsent", "reserve-unseen", "recording", "settling", "taken-tentative", "publish-pending", "publish-unsent", "publish-unseen", "publish-pending-taken", "publish-confirmed"]);
-
-/**
- * This browser's own earlier DEPLOY of `ticker` from `address` that has not
- * been seen to settle (src/lib/txrecords.js), re-checked
- * against /tx-status: `{ txid, state }` or null.
- */
-async function ownDeployFor(address, ticker) {
-  if (!address) return null;
-  if (!txRecords(address).some((r) => r.kind === "deploy" && r.ticker === ticker)) return null;
-  const recs = await refreshTxRecords(address, (txid) => indexer.txStatus(txid));
-  const rec = [...recs].reverse().find((r) => r.kind === "deploy" && r.ticker === ticker);
-  return rec ? { txid: rec.txid, state: rec.state } : null;
-}
+/** Phases in which the flow owns the ticker field (its ticker is shown and locked). */
+const HOLDS_TICKER = new Set(["building", "review", "signing", "broadcasting", "pending", "confirmed"]);
 
 /** Is the registry row `row` the user's own name (its deployer is the connected address)? */
 function ownsRow(row, address) {
   return !!row && !!address && row.deployer === address;
 }
 
-function ownDeployText(ticker, own) {
-  const tx = `tx ${own.txid.slice(0, 12)}…`;
-  if (own.state === "confirmed") return `Your publish of ${ticker} (${tx}) has confirmed — waiting for the indexer to list it.`;
-  if (own.state === "unknown") return `Your earlier publish of ${ticker} (${tx}) could not be checked right now — it stays paused until it can be checked.`;
-  return `You already have a pending publish of ${ticker} (${tx}).`;
-}
+const txLink = (txid) => (
+  <a href={txUrl(txid)} target="_blank" rel="noopener noreferrer" className="mono" title={txid}>
+    {shortTxid(txid)}
+  </a>
+);
 
 export default function CreatePage({ params, navigate }) {
-  const { wallet: walletState, address, pubkeyHex, fee, fees, indexerOk, sync, tipBlock, refreshAll, chainTip } = useApp();
+  const { wallet: walletState, address, pubkeyHex, fees, indexerOk, sync, tipBlock, refreshAll, chainTip } = useApp();
   const connected = walletState.status === "connected";
   const providerName = walletState.providerName;
-  // Reserving is locked below UNLOCK_HEIGHT (969,599); an UNKNOWN tip counts
+  // Creating is locked below UNLOCK_HEIGHT (969,599); an UNKNOWN tip counts
   // as locked — the gate fails closed. The app's lock time keeps anything
   // sent from confirming before ACTIVATION_HEIGHT.
   const tipNow = chainTip;
@@ -84,31 +59,37 @@ export default function CreatePage({ params, navigate }) {
   // ---- the Deploy // log buffer (the flow hook writes into it) ------------------------------------
   const { lines, push, clear, meta } = useDeployLog();
 
-  // ---- the two-step flow ---------------------------------------------------------------------------
-  const cr = useCommitReveal({
+  // The DEPLOY pays its own fee choice, "fast" by default: while it waits in
+  // the mempool its ticker is public. Not persisted — every other builder
+  // keeps the user's usual choice.
+  const createFee = useFeeRate(fees.error ? null : fees.data, { preset: "fast", persist: false });
+  const rate = createFee.satVb;
+
+  // `params.ticker` seeds the field; App keys this page on it.
+  const [tickerState, setTickerState] = useState(() => cleanTickerInput(params.ticker || ""));
+  const requested = cleanTickerInput(params.ticker || "").ticker || null;
+
+  // ---- the DEPLOY flow ---------------------------------------------------------------------------------
+  const cr = useCreate({
     address: connected ? address : null,
     pubkeyHex,
     providerName,
     tip: tipNow,
     indexed: sync.indexed,
+    trustUnseen: sync.trustUnseen,
     incrementalRelayFee: fees.data?.incrementalrelayfee ?? null,
+    requested,
     log: push,
     onSettled: refreshAll,
   });
-  const rec = cr.rec;
-  const phase = cr.phase;
-  // Step 2 pays with its own fee choice, "fast" by default: while a publish
-  // waits in the mempool its ticker is public.
-  const revealFee = useFeeRate(fees.error ? null : fees.data, { preset: "fast", persist: false });
+  const flow = cr.flow;
+  const holds = HOLDS_TICKER.has(flow.phase) && !!flow.ticker;
 
-  // `params.ticker` seeds the field; App keys this page on it.
-  const [tickerState, setTickerState] = useState(() => cleanTickerInput(params.ticker || ""));
   const typed = tickerState.ticker;
-  // An open reservation owns the field: its ticker is shown and locked.
-  const ticker = rec ? rec.ticker : typed;
-  const tickerNote = rec ? null : tickerState.note;
+  // A DEPLOY in progress owns the field: its ticker is shown and locked.
+  const ticker = holds ? flow.ticker : typed;
+  const tickerNote = holds ? null : tickerState.note;
   const valid = TICKER_RE.test(ticker);
-  const requested = cleanTickerInput(params.ticker || "").ticker;
   const inputRef = useRef(null);
   const caretRef = useRef(null);
   const onTickerChange = (e) => {
@@ -139,13 +120,19 @@ export default function CreatePage({ params, navigate }) {
       }
     }
   }, [typed]);
+  // A resumed DEPLOY shows its ticker; once it is over, the field keeps it.
+  useEffect(() => {
+    if (holds && flow.ticker && flow.ticker !== typed) setTickerState(cleanTickerInput(flow.ticker));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- follows the flow's ticker only
+  }, [holds, flow.ticker]);
 
-  // Live availability of the TYPED ticker (no reservation open): /tokens/:ticker
-  // → null is "free" only while the indexer has applied the tip.
+  // Live availability of the TYPED ticker (no DEPLOY in progress): /tokens/:ticker
+  // → null is "free" only while the indexer has applied the tip and this
+  // browser has no pending DEPLOY of it.
   const [avail, setAvail] = useState({ ticker: "", state: "idle" });
   const indexedHeight = sync.indexed;
   useEffect(() => {
-    if (rec || !TICKER_RE.test(typed)) {
+    if (holds || !TICKER_RE.test(typed)) {
       setAvail({ ticker: typed, state: "idle" });
       return undefined;
     }
@@ -159,7 +146,7 @@ export default function CreatePage({ params, navigate }) {
           setAvail({ ticker: typed, state: ownsRow(row, address) ? "mine" : "taken", row });
           return;
         }
-        const own = await ownDeployFor(address, typed);
+        const own = await ownDeployFor(connected ? address : null, typed);
         if (alive) setAvail(own ? { ticker: typed, state: "own", own } : { ticker: typed, state: "free", asOf: indexedHeight });
       } catch (e) {
         if (alive) setAvail({ ticker: typed, state: "error", error: friendlyError(e) });
@@ -169,52 +156,56 @@ export default function CreatePage({ params, navigate }) {
       alive = false;
       clearTimeout(id);
     };
-  }, [typed, rec, address, indexedHeight]);
-  // A reservation that can no longer be published says so here too.
-  const availState = rec ? (DEAD_END_PHASES.has(phase) ? "reserved-dead" : "reserved") : avail.ticker === typed ? (avail.state === "free" && !sync.synced ? "lagging" : avail.state) : TICKER_RE.test(typed) ? "checking" : "idle";
-  const availFree = !rec && availState === "free";
+  }, [typed, holds, address, connected, indexedHeight]);
+  const availState = holds
+    ? "own"
+    : avail.ticker === typed
+      ? avail.state === "free" && !sync.synced
+        ? "lagging"
+        : avail.state
+      : TICKER_RE.test(typed)
+        ? "checking"
+        : "idle";
+  const availFree = !holds && availState === "free";
 
-  // ---- fee previews --------------------------------------------------------------------------------
-  const feeRate = fee.satVb;
-  const revealRate = revealFee.satVb;
-  const commitEstimate = useMemo(() => {
-    if (!feeRate) return null;
-    try {
-      return estimateCommitFeeSats({ address: address || PROJECT_FEE_ADDRESS, feeRateSatVb: feeRate });
-    } catch {
-      return null;
-    }
-  }, [feeRate, address]);
-  const revealEstimate = useMemo(() => {
-    const rate = rec ? revealRate : revealFee.presets.find((p) => p.id === "fast")?.satVb ?? revealRate;
+  // ---- fee preview ---------------------------------------------------------------------------------
+  const estimate = useMemo(() => {
     if (!rate || !valid) return null;
     try {
-      return { ...estimateRevealFeeSats({ address: address || PROJECT_FEE_ADDRESS, ticker, feeRateSatVb: rate }), rate };
+      return estimateDeployFeeSats({ address: address || PROJECT_FEE_ADDRESS, ticker, feeRateSatVb: rate });
     } catch {
       return null;
     }
-  }, [rec, revealRate, revealFee.presets, valid, address, ticker]);
+  }, [rate, valid, address, ticker]);
+  const payloadText = useMemo(() => {
+    if (!valid) return null;
+    try {
+      return payloadToString(buildDeployPayload(ticker));
+    } catch {
+      return null;
+    }
+  }, [valid, ticker]);
 
   // ---- actions ---------------------------------------------------------------------------------------
-  const canReserve = connected && !rec && valid && availFree && !cr.busy && indexerOk && !preActivation && !!feeRate;
-  const onReserve = () => {
-    if (canReserve) cr.reserve(ticker, feeRate);
-  };
-  const canPublish = connected && phase === "ready" && !cr.busy && indexerOk && !!revealRate;
-  const onPublish = () => {
-    if (canPublish) cr.publish(revealRate);
+  const idleish = flow.phase === "idle" || flow.phase === "error" || flow.phase === "done" || flow.phase === "released";
+  const canCreate = connected && valid && availFree && sync.synced && !cr.busy && idleish && indexerOk && !preActivation && isUsableFeeRate(rate);
+  const onCreate = () => {
+    if (canCreate) cr.create(ticker, rate);
   };
 
-  // Registered and final → hop to the token page once the banner has been
-  // on screen. A provisional result stays here, where it is checked until
-  // final (and a change by a chain reorganization is explained); the check
-  // clears `provisional` then, and the hop follows.
-  const finished = cr.finished;
+  // A reviewed DEPLOY signs exactly the transaction it shows (its rate and
+  // fee included): a later change of the Fast estimate does not cancel it.
+  const { dismiss } = cr;
+
+  // Registered → hop to the token page once the banner has been on screen.
+  // Not for a DEPLOY picked up again on return: the user opened Create on
+  // purpose, and the result links to the token instead.
+  const hop = flow.phase === "done" && isOwnVerdict(flow.verdict) && !flow.resumed ? flow.ticker : null;
   useEffect(() => {
-    if (!finished || finished.verdict !== "registered" || finished.provisional) return undefined;
-    const id = setTimeout(() => navigate(tokenHref(finished.ticker)), HOP_MS);
+    if (!hop) return undefined;
+    const id = setTimeout(() => navigate(tokenHref(hop)), HOP_MS);
     return () => clearTimeout(id);
-  }, [finished, navigate]);
+  }, [hop, navigate]);
 
   // ---- DEPLOY // LOG: wallet / fee / tip / block lines ----------------------------------------------
   const tipRef = useRef(tipBlock.data);
@@ -258,21 +249,8 @@ export default function CreatePage({ params, navigate }) {
     push(tipLine(tipRef.current, "deploy", null));
   }, [tipHeight, push]);
 
-  // (d) the registry's verdict of a publish (provisional until FINAL_DEPTH).
-  useEffect(() => {
-    if (!finished || finished.verdict !== "registered") return;
-    push(deployedLine(finished.ticker, finished.height, finished.revealTxid, Date.now(), { provisional: !!finished.provisional }));
-    push(registrationLine(finished.ticker, "registered", finished.revealTxid));
-  }, [finished, push]);
-  const revealTxid = rec?.reveal?.txid ?? null;
-  useEffect(() => {
-    if (!rec || !revealTxid) return;
-    if (phase === "taken-after") push(registrationLine(rec.ticker, "taken", revealTxid));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per verdict
-  }, [phase, revealTxid, push]);
-
-  // (e) heartbeat every 60 s while a step waits for a block.
-  const waitingBlock = phase === "reserve-pending" || phase === "publish-pending" || phase === "publish-pending-taken";
+  // (d) heartbeat every 60 s while the DEPLOY waits for a block.
+  const waitingBlock = flow.phase === "pending";
   useEffect(() => {
     if (!waitingBlock) return undefined;
     const beat = () => {
@@ -286,7 +264,7 @@ export default function CreatePage({ params, navigate }) {
     return () => clearInterval(id);
   }, [waitingBlock, push]);
 
-  // (f) a new tip block — plain line; filled in place when already printed.
+  // (e) a new tip block — plain line; filled in place when already printed.
   const prevTipRef = useRef(null);
   useEffect(() => {
     if (tipHeight === null) return;
@@ -304,50 +282,47 @@ export default function CreatePage({ params, navigate }) {
     push(blockFoundLine(tip));
   }, [tipHeight, push]);
 
-  // Leaving the page while a step is pending: the stored reservation brings it back on return.
-  const phaseRef = useRef(phase);
-  phaseRef.current = phase;
-  const recRef = useRef(rec);
-  recRef.current = rec;
+  // Leaving the page while the DEPLOY is pending: the broadcast record brings it back on return.
+  const flowRef = useRef(flow);
+  flowRef.current = flow;
   useEffect(
     () => () => {
-      const r = recRef.current;
-      if (r && PENDING_PHASES.has(phaseRef.current)) push(deployUntrackedLine(r.reveal?.txid || r.commit?.txid));
+      const f = flowRef.current;
+      if ((f.phase === "pending" || f.phase === "confirmed") && f.txid) push(deployUntrackedLine(f.txid));
     },
     [push],
   );
 
   const onClear = useCallback(() => {
     clear();
-    if (finished) cr.dismiss();
-  }, [clear, finished, cr]);
+    dismiss();
+  }, [clear, dismiss]);
 
-  // ---- LEDs of the log: Reserve · Confirm · Publish · Registered -------------------------------------
-  const leds = ledStatesFor(phase, cr.op, cr.error, finished);
-  const logBusy = cr.busy || PENDING_PHASES.has(phase);
+  // ---- LEDs of the log: Sign · Broadcast · Confirm · Registered -------------------------------------
+  const leds = deployLeds(flow);
+  const logBusy = cr.busy || flow.phase === "pending" || flow.phase === "confirmed";
 
-  const commitTx = rec?.commit?.sentAt ? rec.commit.txid : null;
+  const trackedTxid = flow.phase === "pending" || flow.phase === "confirmed" || flow.phase === "done" || flow.phase === "released" ? flow.txid : null;
+  const footerTicker = trackedTxid ? flow.ticker : valid ? ticker : "";
   const footer = (
     <div className="chip-caption">
-      <span>two transactions · reserve (the ticker stays hidden) → publish · the first valid publish claims the name</span>
-      {(commitTx || revealTxid) && (
+      <span>{`one transaction · DEPLOY${footerTicker ? ` ${footerTicker}` : ""} · the first DEPLOY to confirm claims the name`}</span>
+      {trackedTxid && (
         <span>
-          {commitTx && (
+          tx {txLink(trackedTxid)}
+          {Number.isInteger(flow.height) ? (
             <>
-              step 1{" "}
-              <a href={txUrl(commitTx)} target="_blank" rel="noopener noreferrer" className="mono" title={commitTx}>
-                {shortTxid(commitTx)}
+              {" · block "}
+              <a href={blockUrl(flow.height)} target="_blank" rel="noopener noreferrer" className="mono">
+                #{fmtInt(flow.height)}
               </a>
             </>
-          )}
-          {revealTxid && rec?.reveal?.sentAt && (
+          ) : flow.phase === "pending" ? (
             <>
-              {" · step 2 "}
-              <a href={txUrl(revealTxid)} target="_blank" rel="noopener noreferrer" className="mono" title={revealTxid}>
-                {shortTxid(revealTxid)}
-              </a>
+              {" · checking every 15 s"}
+              {cr.status.pollError ? ` · last check failed: ${cr.status.pollError}` : ""}
             </>
-          )}
+          ) : null}
         </span>
       )}
     </div>
@@ -364,22 +339,22 @@ export default function CreatePage({ params, navigate }) {
     mine_count: 0,
   };
   const yieldsLine = `${BUCKETS.map((b) => b.yield).join(" / ")} by the confirming block's last hex digit (${BUCKETS.map((b) => b.label).join(" / ")}) · expected ${fmtDec(EXPECTED_YIELD)}`;
-  const otherRequested = rec && requested && requested !== rec.ticker ? requested : null;
+  const otherPending = cr.otherPending && !holds ? cr.otherPending : null;
+  const releasedNote = !holds && valid ? (cr.settling || []).find((n) => n.ticker === ticker && n.verdict === "released") : null;
+  const totalSats = estimate ? DEPLOY_PROTOCOL_FEE_SATS + DUST_SATS + estimate.feeSats : null;
+  const showForm = connected && !holds && flow.phase !== "done";
 
   return (
     <main className="page create-page">
       <div className="create-layout">
-        <Panel title="Deploy // new ticker" led={AVAIL_LED[availState] || "idle"} right={<span className="label">RESERVE → PUBLISH · §2.1</span>} aria-label="Deploy a new ticker">
+        <Panel title="Deploy // new ticker" led={AVAIL_LED[availState] || "idle"} right={<span className="label">DEPLOY · §2.1</span>} aria-label="Deploy a new ticker">
           {/* Before the ticker field: on a phone the lock must be read before
-              a green "not in the registry" invites a reservation. */}
-          {preActivation && !rec && <div className="notice">{activationNotice(tipNow, "Reserving a ticker")}</div>}
-          {otherRequested && (
+              a green "not in the registry" invites a DEPLOY. */}
+          {preActivation && !holds && <div className="notice">{activationNotice(tipNow, "Creating a ticker")}</div>}
+          {otherPending && (
             <div className="notice">
-              You opened Create for {otherRequested}, but your reservation of {rec.ticker} is still open — publish or abandon it before reserving another name.
+              Your DEPLOY of {otherPending.ticker} (tx {otherPending.txid.slice(0, 12)}…) is still waiting for its result — <a href="#/create">open it</a>.
             </div>
-          )}
-          {rec && cr.storageBackend === "memory" && (
-            <div className="notice">This browser does not let the site keep data, so the reservation lives only in this tab — keep it open until step 2 is done.</div>
           )}
           <label className="field">
             <span className="label">Ticker</span>
@@ -396,7 +371,7 @@ export default function CreatePage({ params, navigate }) {
                 autoComplete="off"
                 autoCapitalize="characters"
                 spellCheck={false}
-                disabled={cr.busy || !!rec}
+                disabled={cr.busy || holds}
                 aria-describedby="ticker-help"
               />
               <Led state={AVAIL_LED[availState] || "idle"} />
@@ -406,8 +381,8 @@ export default function CreatePage({ params, navigate }) {
                 {tickerNote}
               </span>
             )}
-            <span id="ticker-help" className={`field-help${availState === "taken" || availState === "own" || availState === "reserved-dead" ? " err" : availState === "free" || availState === "mine" || availState === "reserved" ? " ok" : ""}`}>
-              <AvailHelp availState={availState} ticker={ticker} typed={typed} valid={valid} avail={avail} sync={sync} />
+            <span id="ticker-help" className={`field-help${availState === "taken" || (availState === "own" && !holds) ? " err" : availState === "free" || availState === "mine" ? " ok" : ""}`}>
+              <AvailHelp availState={availState} holds={holds} ticker={ticker} typed={typed} valid={valid} avail={avail} sync={sync} />
             </span>
           </label>
 
@@ -426,77 +401,75 @@ export default function CreatePage({ params, navigate }) {
             </div>
             <div>
               <dt>Protocol fee</dt>
-              <dd>{fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} (paid in step 2)</dd>
+              <dd>{fmtSats(DEPLOY_PROTOCOL_FEE_SATS)}</dd>
             </div>
             <div>
-              <dt>Kept in your wallet</dt>
+              <dt>Proof output</dt>
+              <dd>{fmtSats(DUST_SATS)} back to you</dd>
+            </div>
+            <div>
+              <dt>Network fee</dt>
               <dd>
-                {fmtSats(DUST_SATS)} (step 1, used again in step 2) and {fmtSats(DUST_SATS)} (step 2 proof)
+                {estimate ? `≈ ${fmtSats(estimate.feeSats)}` : "—"}
+                {rate ? <span className="muted"> @ {rate} sat/vB</span> : null}
               </dd>
             </div>
             <div>
-              <dt>Network fees</dt>
-              <dd>
-                step 1 {commitEstimate ? `≈ ${fmtSats(commitEstimate.feeSats)}` : "—"}
-                {feeRate ? <span className="muted"> @ {feeRate} sat/vB</span> : null}
-                {" · "}step 2 {revealEstimate ? `≈ ${fmtSats(revealEstimate.feeSats)}` : "—"}
-                {revealEstimate ? <span className="muted"> @ {revealEstimate.rate} sat/vB (fast)</span> : null}
-              </dd>
+              <dt>Total</dt>
+              <dd>{totalSats !== null ? `≈ ${fmtSats(totalSats)}` : "—"}</dd>
             </div>
+            {payloadText && (
+              <div>
+                <dt>OP_RETURN</dt>
+                <dd>
+                  <span className="mono">{payloadText}</span> <span className="muted">(compact, exactly what goes on chain)</span>
+                </dd>
+              </div>
+            )}
           </dl>
 
-          <Steps cr={cr} rec={rec} phase={phase} tipNow={tipNow} revealFee={revealFee} fees={fees.data} connected={connected} />
-
-          {connected && <SettlingNotes cr={cr} indexed={sync.indexed ?? tipNow} />}
-
+          {showForm && (
+            <>
+              <FeeSelector fee={createFee} disabled={cr.busy} />
+              <p className="fineprint">
+                While your DEPLOY waits for a block, anyone who reads the mempool can see {valid ? ticker : "the ticker"} in it and send another DEPLOY of {valid ? ticker : "it"} that
+                pays a higher fee. The first DEPLOY to confirm takes the name. If another one confirms first, yours is ignored, and its{" "}
+                {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)}-sat protocol fee and its network fee are spent and not refunded. That is why the fee starts at Fast, and why you can speed
+                your DEPLOY up while it waits.
+              </p>
+            </>
+          )}
           {!connected ? (
             <ConnectPrompt action="create a token" />
-          ) : !rec && !finished ? (
+          ) : flow.phase === "review" ? (
+            <Review key={flow.startedAt} cr={cr} flow={flow} />
+          ) : showForm ? (
             <>
-              <FeeSelector fee={fee} disabled={cr.busy} />
-              {!preActivation && valid && availFree && (
-                <p className="fineprint">
-                  Step 1 (Reserve) puts a sealed code on the chain: nobody can see which ticker you chose, and the code is tied to your address, so a copy of it is
-                  useless to anyone else. When it has {PUBLISH_MIN_CONFIRMATIONS} confirmations, step 2 (Publish) shows the name and
-                  pays the {fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee. The first valid publish of {ticker} claims it; a name created by someone else before your
-                  publish cannot be taken over.
+              <button className="btn btn-primary btn-lg" type="button" onClick={onCreate} disabled={!canCreate}>
+                {cr.busy ? "Working…" : `Create ${valid ? ticker : "token"}`}
+              </button>
+              {releasedNote && (
+                <p className="notice">
+                  An earlier DEPLOY of {releasedNote.ticker} from this browser may still confirm (tx {releasedNote.txid.slice(0, 12)}…). Creating again can pay the fees twice.
                 </p>
               )}
-              <button className="btn btn-primary btn-lg" type="button" onClick={onReserve} disabled={!canReserve}>
-                {cr.busy && cr.op?.kind === "reserve" ? "Working…" : `Step 1 · Reserve ${valid ? ticker : "ticker"}`}
-              </button>
-            </>
-          ) : phase === "ready" || (cr.op?.kind === "publish" && rec) ? (
-            <>
-              <FeeSelector fee={revealFee} disabled={cr.busy} />
-              <p className="fineprint">
-                Publishing shows {rec.ticker} in the mempool until it confirms, so the fee defaults to Fast: a slow publish gives others time to try to create the same
-                name first. Others may have reserved {rec.ticker} too — only the first publish to confirm gets it, and a later one still pays its fees.
-              </p>
-              <button className="btn btn-primary btn-lg" type="button" onClick={onPublish} disabled={!canPublish}>
-                {cr.busy && cr.op?.kind === "publish" ? "Working…" : `Step 2 · Publish ${rec.ticker}`}
-              </button>
             </>
           ) : null}
 
           {connected && (
             <FlowStatus
               cr={cr}
-              rec={rec}
-              phase={phase}
-              finished={finished}
+              flow={flow}
+              tipNow={tipNow}
               providerName={providerName}
-              idle={{ indexerOk, preActivation, valid, availState, typed, sync, fee, feeRate, assetSafe: walletState.assetSafe }}
-              revealRate={revealRate}
-              revealFee={revealFee}
+              fees={fees.data}
               indexed={sync.indexed ?? tipNow}
-              onRestart={(t) => {
-                // Start again with a NEW reservation (a new sealed code) of the same name.
-                cr.abandon();
-                setTickerState(cleanTickerInput(t));
-              }}
+              idle={{ indexerOk, preActivation, valid, availState, typed, sync, fee: createFee, rate, assetSafe: walletState.assetSafe }}
+              onRetry={() => cr.create(flow.ticker || ticker, rate)}
             />
           )}
+
+          {connected && <SettlingNotes cr={cr} flow={flow} fieldTicker={holds ? null : ticker} indexed={sync.indexed ?? tipNow} />}
         </Panel>
 
         <aside className="create-preview">
@@ -505,7 +478,7 @@ export default function CreatePage({ params, navigate }) {
           <p className="fineprint">Every token&apos;s picture is an identicon drawn from its ticker — nothing is uploaded or stored.</p>
           <MinerLog
             lines={lines}
-            mine={{ phase: cr.error ? "error" : logBusy ? "pending" : "idle" }}
+            mine={{ phase: flow.phase === "error" ? "error" : logBusy ? "pending" : "idle" }}
             ticker={ticker}
             onClear={onClear}
             title="Deploy // log"
@@ -523,10 +496,9 @@ export default function CreatePage({ params, navigate }) {
 }
 
 /** The help line under the ticker field. */
-function AvailHelp({ availState, ticker, typed, valid, avail, sync }) {
-  if (availState === "reserved") return <>Reserved by you — finish step 2 below.</>;
-  if (availState === "reserved-dead") return <>This reservation can no longer be published — see below.</>;
-  if (!typed) return <>1–8 characters, A–Z and 0–9. The first valid publish claims the name.</>;
+function AvailHelp({ availState, holds, ticker, typed, valid, avail, sync }) {
+  if (holds) return <>Your DEPLOY of {ticker} is in progress — see below.</>;
+  if (!typed) return <>1–8 characters, A–Z and 0–9. The first DEPLOY to confirm claims the name.</>;
   if (!valid) return <>Tickers are 1–8 characters, A–Z and 0–9.</>;
   switch (availState) {
     case "checking":
@@ -536,7 +508,7 @@ function AvailHelp({ availState, ticker, typed, valid, avail, sync }) {
     case "lagging":
       return <>{`${ticker} is not in the indexer's registry yet. ${syncPauseText(sync, "an availability answer")}`}</>;
     case "own":
-      return <>{ownDeployText(ticker, avail.own)}</>;
+      return <>{avail.own ? ownDeployText(ticker, avail.own) : null}</>;
     case "mine":
       return (
         <>
@@ -557,201 +529,78 @@ function AvailHelp({ availState, ticker, typed, valid, avail, sync }) {
   }
 }
 
-/** Per-LED state of Reserve · Confirm · Publish · Registered. */
-function ledStatesFor(phase, op, error, finished) {
-  if (finished?.verdict === "registered") return ["ok", "ok", "ok", "ok"];
-  let s;
-  switch (phase) {
-    case "draft":
-      s = ["busy", "idle", "idle", "idle"];
-      break;
-    case "reserve-unsent":
-    case "reserve-pending":
-    case "reserve-unseen":
-    case "recording":
-    case "settling":
-      s = ["ok", "busy", "idle", "idle"];
-      break;
-    case "ready":
-      s = ["ok", "ok", "idle", "idle"];
-      break;
-    case "taken-tentative":
-      s = ["ok", "ok", "busy", "idle"];
-      break;
-    case "taken":
-    case "closing":
-    case "expired":
-    case "invalid":
-    case "carrier-spent":
-    case "before-activation":
-      s = ["ok", "ok", "err", "idle"];
-      break;
-    case "publish-unsent":
-    case "publish-pending":
-    case "publish-unseen":
-    case "publish-confirmed":
-      s = ["ok", "ok", "ok", "busy"];
-      break;
-    case "publish-pending-taken":
-    case "taken-after":
-    case "refused":
-      s = ["ok", "ok", "ok", "err"];
-      break;
-    default:
-      s = ["idle", "idle", "idle", "idle"];
-  }
-  if (op?.kind === "reserve") s = ["busy", "idle", "idle", "idle"];
-  if (op?.kind === "publish") s = ["ok", "ok", "busy", "idle"];
-  if (!op && error && (error.kind === "reserve" || error.kind === "publish")) {
-    const i = error.kind === "reserve" ? 0 : 2;
-    if (s[i] !== "ok") s = s.map((x, j) => (j === i ? "err" : x));
-  }
-  return s;
-}
-
 /**
- * The two steps with their state, the reservation window and the
- * keep-your-browser-data warning. Shown while a reservation is open.
+ * The Speed up headroom warning of a built DEPLOY (the headroom review): signed only
+ * after "Create {T} anyway" is ticked. Keyed on the build, so a new build
+ * starts unticked.
  */
-function Steps({ cr, rec, phase, tipNow, revealFee, fees, connected }) {
-  if (!rec || !connected) return null;
-  const c = rec.commit;
-  const r = rec.reveal;
-  const t = cr.timing;
-  const step1 = !c ? (
-    "waiting for your signature — nothing sent yet"
-  ) : c.unseenAt && !Number.isInteger(c.height) ? (
-    "not seen by the indexer's node for a few minutes — it may still confirm; this page keeps checking"
-  ) : !c.sentAt ? (
-      "signed — checking that it reached the network…"
-    ) : Number.isInteger(c.height) ? (
-      <>
-        confirmed in block{" "}
-        <a href={blockUrl(c.height)} target="_blank" rel="noopener noreferrer" className="mono">
-          #{fmtInt(c.height)}
-        </a>
-        {t && !t.settled ? ` · ${t.confirmations} of ${PUBLISH_MIN_CONFIRMATIONS} confirmations` : ""}
-      </>
-    ) : (
-      `waiting for ${PUBLISH_MIN_CONFIRMATIONS} confirmations`
-    );
-  const step2 = r?.unseenAt && !Number.isInteger(r.height)
-    ? "not seen by the indexer's node for a few minutes — it may still confirm; this page keeps checking"
-    : r?.sentAt
-    ? Number.isInteger(r.height)
-      ? `confirmed in block #${fmtInt(r.height)} — checking the registry`
-      : "sent — waiting for a block"
-    : phase === "ready"
-      ? "ready — press Publish"
-      : phase === "settling" && t
-        ? `opens at step 1's ${PUBLISH_MIN_CONFIRMATIONS === 2 ? "2nd" : `${PUBLISH_MIN_CONFIRMATIONS}th`} confirmation (block #${fmtInt(t.publishFrom)})`
-        : phase === "recording"
-          ? "opens when the indexer has recorded step 1"
-          : DEAD_END_PHASES.has(phase)
-            ? "not possible (see below)"
-            : `opens when step 1 has ${PUBLISH_MIN_CONFIRMATIONS} confirmations`;
-  const warnExpiry = t && !t.expired && t.blocksLeft <= EXPIRY_WARN_BLOCKS;
+function Review({ cr, flow }) {
+  const [ack, setAck] = useState(false);
   return (
-    <div className="cr-steps" role="group" aria-label="Deploy steps">
-      <div className={`cr-step${c?.sentAt ? " done" : ""}`}>
-        <span className="cr-num mono">1</span>
-        <div>
-          <b>Reserve</b> <span className="muted">— nobody can see which ticker you chose</span>
-          <div className="cr-state">
-            {step1}
-            {c?.txid && (
-              <>
-                {" · tx "}
-                <a href={txUrl(c.txid)} target="_blank" rel="noopener noreferrer" className="mono" title={c.txid}>
-                  {shortTxid(c.txid)}
-                </a>
-              </>
-            )}
-            {c?.feeSats != null ? ` · fee ${fmtInt(c.feeSats)} sats` : ""}
-          </div>
-          {c?.sentAt && !Number.isInteger(c.height) && <SpeedUp cr={cr} step="commit" fees={fees} />}
-        </div>
+    <div className="status" role="status" aria-live="polite">
+      <div className="line">
+        <Led state="err" />
+        <span>{headroomText(flow.headroom, flow.ticker)}</span>
       </div>
-      <div className={`cr-step${r?.sentAt ? " done" : ""}`}>
-        <span className="cr-num mono">2</span>
-        <div>
-          <b>Publish</b> <span className="muted">— shows {rec.ticker} and pays the {fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee</span>
-          <div className="cr-state">
-            {step2}
-            {r?.sentAt && (
-              <>
-                {" · tx "}
-                <a href={txUrl(r.txid)} target="_blank" rel="noopener noreferrer" className="mono" title={r.txid}>
-                  {shortTxid(r.txid)}
-                </a>
-                {r.feeSats != null ? ` · fee ${fmtInt(r.feeSats)} sats` : ""}
-              </>
-            )}
-          </div>
-          {phase !== "publish-pending-taken" && publishMissedBlock(r, tipNow) && (
-            <p className="notice" role="alert">
-              Your publish missed block #{fmtInt(r.sentTip + 1)}{tipNow > r.sentTip + 1 ? ` and ${tipNow - r.sentTip - 1} more` : ""}. {rec.ticker} is visible in the mempool now, and every
-              block it waits gives someone else time to reserve it and publish first — speed it up.
-            </p>
-          )}
-          {/* never for a publish that is already beaten: speeding it up only pays more for nothing */}
-          {r?.sentAt && !Number.isInteger(r.height) && phase !== "publish-pending-taken" && <SpeedUp cr={cr} step="reveal" fees={fees} />}
-        </div>
+      <div className="detail">
+        {flow.inputCount != null ? `${flow.inputCount} input${flow.inputCount === 1 ? "" : "s"} · ` : ""}
+        network fee <span className="mono">{fmtInt(flow.feeSats)} sats</span>
+        {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}
+        {flow.vsize ? ` · ${fmtInt(flow.vsize)} vB` : ""}
+        <SpentInputs inputs={flow.inputs} assetSafe={flow.assetSafe} />
       </div>
-      {t && !r?.sentAt && !DEAD_END_PHASES.has(phase) && (
-        <p className={`cr-window${warnExpiry || t.expired ? " warn" : ""}`}>
-          {expiryText(t)}
-          {Number.isInteger(tipNow) && !t.expired ? ` Now at block #${fmtInt(tipNow)}.` : ""}
-          {warnExpiry && !t.expired ? " Publish soon: the later it goes out, the more a slow block or a chain reorganization can push it past the window." : ""}
-        </p>
-      )}
-      {!r?.sentAt && !DEAD_END_PHASES.has(phase) && (
-        <p className="notice">
-          Do not clear this browser&apos;s data (cookies and site data) and do not switch browsers before step 2 is done: the code that proves which ticker you reserved
-          is saved only here. Without it the reservation cannot be published.
-        </p>
-      )}
-      {phase === "ready" && revealFee?.satVb == null && <p className="fineprint">{missingFeeHint(revealFee.choice, revealFee.satVb, "publish")}</p>}
+      <div className="notice-row">
+        <label className="ack">
+          <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} disabled={cr.busy} />
+          <span>Create {flow.ticker} anyway</span>
+        </label>
+      </div>
+      <div className="actions">
+        <button className="btn btn-primary" type="button" onClick={cr.confirmCreate} disabled={!ack || cr.busy}>
+          Sign DEPLOY {flow.ticker}
+        </button>
+        <button className="btn btn-sm" type="button" onClick={cr.cancelReview} disabled={cr.busy}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
 
 /**
- * "Speed up" for a pending step: the same transaction with a higher fee taken
- * from its change (replace-by-fee). The suggested rate is the Fast estimate,
- * or the lowest rate a replacement may use when that is higher; the user may
- * enter a rate of their own (in a rush the estimates lag), and one above the
- * high-fee threshold is confirmed before it can be signed.
+ * "Speed up" for the pending DEPLOY: the same transaction with a higher fee
+ * taken from its change (replace-by-fee). The suggested rate is the Fast
+ * estimate, or the lowest rate a replacement may use when that is higher;
+ * the user may enter a rate of their own (in a rush the estimates lag), and
+ * one above the high-fee threshold is confirmed before it can be signed.
  */
-function SpeedUp({ cr, step, fees }) {
+function SpeedUp({ cr, flow, fees }) {
   const inputId = useId();
   const [open, setOpen] = useState(false);
   // A rate of the user's own ("" = the suggested one); a high one is confirmed once, for that rate.
   const [customText, setCustomText] = useState("");
   const [ackRate, setAckRate] = useState(null);
-  const s = cr.rec?.[step];
   const floor = useMemo(() => {
     try {
-      return s?.psbt ? speedUpFloorRate(s.psbt, fees?.incrementalrelayfee ?? undefined) : null;
+      return flow.psbt ? speedUpFloorRate(flow.psbt, fees?.incrementalrelayfee ?? undefined) : null;
     } catch {
       return null;
     }
-  }, [s?.psbt, fees?.incrementalrelayfee]);
+  }, [flow.psbt, fees?.incrementalrelayfee]);
   const fast = Number(fees?.fastestFee) || 0;
   const suggested = floor ? Math.max(fast, floor) : null;
   const custom = customText.trim() === "" ? null : clampCustomFee(customText);
   const rate = custom ? custom.value : suggested;
   // A typo here costs real sats: above the usual threshold the rate is confirmed first.
   const high = rate !== null && rate > (floor ?? 0) && needsHighFeeAck(rate, fees);
-  const quote = open && rate ? cr.speedUpQuote(step, rate) : null;
-  const busyHere = cr.op?.kind === "speedup" && cr.op.step === step;
-  const err = cr.error?.kind === "speedup" && cr.error.step === step ? cr.error.message : null;
+  const quote = open && rate ? cr.speedUpQuote(rate) : null;
+  const busy = !!cr.speeding;
   const close = () => {
     setOpen(false);
     setCustomText("");
     setAckRate(null);
   };
-  if (!s?.psbt) return null;
+  if (!cr.canSpeedUp) return null;
   const rateInput = (
     <span className="cr-speedup-rate">
       <label htmlFor={inputId}>Rate</label>
@@ -764,7 +613,7 @@ function SpeedUp({ cr, step, fees }) {
         placeholder={suggested ? String(suggested) : "sat/vB"}
         value={customText}
         onChange={(e) => setCustomText(e.target.value)}
-        disabled={cr.busy}
+        disabled={busy}
         autoComplete="off"
         spellCheck={false}
         aria-invalid={!!custom?.error}
@@ -775,7 +624,7 @@ function SpeedUp({ cr, step, fees }) {
   return (
     <div className="cr-speedup">
       {!open ? (
-        <button className="btn btn-sm" type="button" onClick={() => setOpen(true)} disabled={cr.busy}>
+        <button className="btn btn-sm" type="button" onClick={() => setOpen(true)} disabled={busy}>
           Speed up
         </button>
       ) : quote && !quote.error ? (
@@ -788,7 +637,7 @@ function SpeedUp({ cr, step, fees }) {
           {high && ackRate !== rate && (
             <span className="err" role="alert">
               {rate.toLocaleString("en-US")} sat/vB is high{fast ? ` — the fastest estimate is ${fast} sat/vB` : ""}. A typo here costs real sats.{" "}
-              <button className="btn btn-sm" type="button" onClick={() => setAckRate(rate)} disabled={cr.busy}>
+              <button className="btn btn-sm" type="button" onClick={() => setAckRate(rate)} disabled={busy}>
                 Use {rate.toLocaleString("en-US")} sat/vB
               </button>
             </span>
@@ -797,15 +646,15 @@ function SpeedUp({ cr, step, fees }) {
             <button
               className="btn btn-sm btn-primary"
               type="button"
-              disabled={cr.busy || (high && ackRate !== rate)}
+              disabled={busy || (high && ackRate !== rate)}
               onClick={async () => {
-                await cr.speedUp(step, rate);
+                await cr.speedUp(rate);
                 close();
               }}
             >
-              {busyHere ? (cr.op.phase === "signing" ? "Confirm in wallet…" : "Working…") : "Sign faster version"}
+              {busy ? (cr.speeding === "signing" ? "Confirm in wallet…" : "Working…") : "Sign faster version"}
             </button>
-            <button className="btn btn-sm" type="button" onClick={close} disabled={cr.busy}>
+            <button className="btn btn-sm" type="button" onClick={close} disabled={busy}>
               Cancel
             </button>
           </span>
@@ -819,315 +668,202 @@ function SpeedUp({ cr, step, fees }) {
           </button>
         </>
       )}
-      {err && !open && <span className="err">{err}</span>}
+      {cr.speedError && !open && <span className="err">{cr.speedError}</span>}
     </div>
   );
 }
 
 /**
- * One status block between the buttons and the log: why the action is off
- * (idle), the in-flight step with its signing detail, the waiting states,
- * the dead ends (taken / expired / …) with Abandon, and the verdict.
+ * One status block between the button and the settling notes: why Create
+ * is off (idle), the in-flight step with its signing detail, the pending
+ * DEPLOY with its Speed up and notices, and the verdict.
  */
-function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, revealFee, indexed, onRestart }) {
+function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, onRetry }) {
   const who = providerName || "your wallet";
-  const op = cr.op;
-  // Abandon asks once, inline (no blocking browser dialog).
-  const [confirming, setConfirming] = useState(false);
+  const t = flow.ticker;
   let led = "idle";
   let text = null;
   let detail = null;
   let actions = null;
-  const abandonBtn = () =>
-    confirming ? (
-      <>
-        <span className="cr-confirm">
-          {phase === "publish-pending-taken" ? (
-            <>
-              Abandon {rec?.ticker}? Your publish is still waiting in the mempool: if it confirms, it is ignored and still pays the {fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee and
-              the network fee. Abandoning only forgets it on this page.
-            </>
-          ) : (
-            <>
-              Abandon {rec?.ticker}?{phase === "reserve-pending" || phase === "reserve-unseen" || phase === "reserve-unsent" ? " Step 1 may still confirm." : ""}
-              {phase === "publish-unseen" ? " Step 2 may still confirm — and still count as yours." : ""} Its {fmtInt(DUST_SATS)}-sat output stays in your wallet, but this reservation can no
-              longer publish the name.
-            </>
-          )}
-        </span>
-        <button
-          className="btn btn-sm"
-          type="button"
-          onClick={() => {
-            setConfirming(false);
-            cr.abandon();
-          }}
-          disabled={cr.busy}
-        >
-          Yes, abandon
-        </button>
-        <button className="btn btn-sm" type="button" onClick={() => setConfirming(false)}>
-          Keep it
-        </button>
-      </>
-    ) : (
-      <button className="btn btn-sm" type="button" onClick={() => setConfirming(true)} disabled={cr.busy}>
-        Abandon reservation
-      </button>
-    );
-  // "Send again": the same signed transaction (same txid) relayed once more.
-  const resendBtn = (step) =>
-    canResendStep(rec?.[step], txidOfRaw) ? (
-      <button className="btn btn-sm" type="button" onClick={() => cr.resend(step)} disabled={cr.busy}>
-        Send again
-      </button>
-    ) : null;
-  const doneBtn = (
-    <button className="btn btn-sm" type="button" onClick={cr.finish} disabled={cr.busy}>
-      Done
+  let body = null;
+  const dismissBtn = (label = "Done") => (
+    <button className="btn btn-sm" type="button" onClick={cr.dismiss}>
+      {label}
     </button>
   );
+  const signingDetail = (
+    <>
+      {flow.inputCount != null ? `${flow.inputCount} input${flow.inputCount === 1 ? "" : "s"} · ` : ""}
+      network fee <span className="mono">{fmtInt(flow.feeSats)} sats</span>
+      {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}
+      {flow.vsize ? ` · ${fmtInt(flow.vsize)} vB` : ""}
+      {` · protocol fee ${fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats`}
+      {flow.utxoSource === "indexer" ? " · inputs from indexer (no wallet UTXO API)" : ""}
+      <SpentInputs inputs={flow.inputs} assetSafe={flow.assetSafe} />
+    </>
+  );
 
-  if (op && op.kind !== "speedup") {
-    led = "busy";
-    const what = op.kind === "reserve" ? "step 1 (reserve)" : "step 2 (publish)";
-    if (op.phase === "building") {
-      text = op.waitNote || `Building ${what} — fee inputs never include token-bearing outputs.`;
-      if (op.waitNote) actions = <StopWaitingButton onClick={cr.stopWaiting} />;
-    } else if (op.phase === "signing") text = `Awaiting signature for ${what} — confirm in ${who}.`;
-    else text = `Broadcasting ${what}…`;
-    if (op.phase !== "building" && op.feeSats != null) {
-      detail = (
+  switch (flow.phase) {
+    case "building":
+      led = "busy";
+      text = flow.waitNote || `Building the DEPLOY of ${t} — fee inputs never include token-bearing outputs.`;
+      if (flow.waitNote) actions = <StopWaitingButton onClick={cr.stopWaiting} />;
+      break;
+    case "review":
+      return null; // the Review block says it
+    case "signing":
+      led = "busy";
+      text = `Awaiting signature for the DEPLOY of ${t} — confirm in ${who}.`;
+      detail = signingDetail;
+      break;
+    case "broadcasting":
+      led = "busy";
+      text = "Broadcasting…";
+      detail = signingDetail;
+      break;
+    case "pending":
+      body = <Pending cr={cr} flow={flow} tipNow={tipNow} fees={fees} indexed={indexed} />;
+      break;
+    case "confirmed":
+      led = "busy";
+      text = `DEPLOY of ${t} confirmed${Number.isInteger(flow.height) ? ` in block #${fmtInt(flow.height)}` : ""} — waiting for the indexer's registry.`;
+      break;
+    case "done": {
+      const row = flow.row;
+      const at = Number.isInteger(row?.deploy_block) ? ` — block #${fmtInt(row.deploy_block)}` : "";
+      const provisional = !flow.final ? ` Provisional until ${FINAL_DEPTH} confirmations.` : "";
+      if (flow.verdict === "registered") {
+        led = flow.final ? "ok" : "busy";
+        text = (
+          <>
+            Created {t}
+            {at}.{provisional} <a href={tokenHref(t)}>Open {t}</a>.
+          </>
+        );
+      } else if (flow.verdict === "registered-own") {
+        led = flow.final ? "ok" : "busy";
+        text = (
+          <>
+            Created {t}
+            {at}, by a transaction this page did not send (tx {row?.deploy_txid ? txLink(row.deploy_txid) : "…"}). It is registered to your address.{provisional}{" "}
+            <a href={tokenHref(t)}>Open {t}</a>.
+          </>
+        );
+      } else if (flow.verdict === "taken") {
+        led = "err";
+        const n = rowConfirmations(row, indexed);
+        text = (
+          <>
+            Another DEPLOY of {t} confirmed first (tx {row?.deploy_txid ? txLink(row.deploy_txid) : "…"}
+            {Number.isInteger(row?.deploy_block) ? `, block #${fmtInt(row.deploy_block)}` : ""}).
+            {Number.isInteger(flow.height) ? ` Yours confirmed in block #${fmtInt(flow.height)} and was ignored;` : " Yours was ignored;"} its{" "}
+            {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)}-sat protocol fee and its network fee are spent and not refunded.
+            {!rowIsFinal(row, indexed) ? ` Until that block has ${FINAL_DEPTH} confirmations${Number.isInteger(n) ? ` (now ${n})` : ""}, a chain reorganization could still change this.` : ""}
+          </>
+        );
+      } else {
+        led = "busy";
+        text = `The indexer has not listed ${t} yet — this page checks again when you return.`;
+      }
+      actions = dismissBtn();
+      break;
+    }
+    case "released":
+      led = "err";
+      text = `None of your DEPLOY's versions is in the node's mempool any more. It may still confirm; creating again can pay the fees twice.`;
+      detail = flow.txid ? <>last version tx {txLink(flow.txid)}</> : null;
+      actions = dismissBtn("Dismiss");
+      break;
+    case "error":
+      led = "err";
+      text = flow.error || "Failed.";
+      actions = (
         <>
-          {op.inputCount != null ? `${op.inputCount} input${op.inputCount === 1 ? "" : "s"} · ` : ""}
-          network fee <span className="mono">{fmtInt(op.feeSats)} sats</span>
-          {op.feeRateSatVb ? ` @ ${op.feeRateSatVb} sat/vB` : ""}
-          {op.kind === "publish" ? ` · protocol fee ${fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats` : ""}
-          {op.utxoSource === "indexer" ? " · inputs from indexer (no wallet UTXO API)" : ""}
-          <SpentInputs inputs={op.inputs} assetSafe={op.assetSafe} />
+          <button className="btn btn-sm" type="button" onClick={onRetry}>
+            Retry
+          </button>
+          {dismissBtn("Dismiss")}
         </>
       );
+      break;
+    default: {
+      const reason = idleReason(idle);
+      if (reason) text = reason;
+      else if (!idle.rate) text = missingFeeHint(idle.fee.choice, idle.rate, "deploy", { awaitingAck: !!idle.fee.highFee?.pending });
+      else text = readyText(idle.assetSafe, "Create");
     }
-  } else if (finished?.verdict === "registered") {
-    led = finished.provisional ? "busy" : "ok";
-    const at = Number.isInteger(finished.height) ? ` in block #${fmtInt(finished.height)}` : "";
-    text = (
-      <>
-        Created {finished.ticker}
-        {at} — your publish was the first valid one.
-        {finished.provisional ? ` It is final after ${FINAL_DEPTH} confirmations (about an hour); this page keeps checking and opens the token page then.` : ""}{" "}
-        <a href={tokenHref(finished.ticker)}>Open {finished.ticker}</a>.
-      </>
-    );
-    actions = (
-      <button className="btn btn-sm" type="button" onClick={cr.dismiss}>
-        Done
-      </button>
-    );
-  } else if (rec) {
-    switch (phase) {
-      case "draft":
-        // A signature for step 1 may still be open (another tab, or before
-        // this page was reopened): nothing has been sent yet.
-        led = "busy";
-        text = `Step 1 for ${rec.ticker} is waiting for a signature in ${who} (maybe in another tab). Nothing has been sent yet. If you closed that window, discard it.`;
-        actions = (
-          <button className="btn btn-sm" type="button" onClick={cr.abandon} disabled={cr.busy}>
-            Discard
-          </button>
-        );
-        break;
-      case "reserve-unseen":
-        led = "busy";
-        text = `Step 1 has not been seen by the indexer's node for a few minutes and has not confirmed. It may still confirm, so your reservation code stays saved and this page keeps checking. You can send the same signed transaction again; if you are sure it is gone, abandon the reservation and reserve again.`;
-        actions = (
-          <>
-            {resendBtn("commit")}
-            {abandonBtn()}
-          </>
-        );
-        break;
-      case "publish-unseen":
-        led = "busy";
-        text = `Step 2 has not been seen by the indexer's node for a few minutes. It may still confirm; this page keeps checking and opens Publish again if it is gone. You can send the same signed transaction again.`;
-        actions = (
-          <>
-            {resendBtn("reveal")}
-            {abandonBtn()}
-          </>
-        );
-        break;
-      case "reserve-unsent":
-        led = "busy";
-        text = canResendStep(rec.commit, txidOfRaw)
-          ? "Step 1 is signed, but no relay confirmed that it was sent. It may still have reached the network, so your reservation code stays saved and this page keeps checking. Send the same signed transaction again, or wait."
-          : "Checking whether step 1 reached the network…";
-        actions = (
-          <>
-            {resendBtn("commit")}
-            {abandonBtn()}
-          </>
-        );
-        break;
-      case "reserve-pending":
-        led = "busy";
-        text = `Step 1 sent — step 2 opens at its ${PUBLISH_MIN_CONFIRMATIONS === 2 ? "2nd" : `${PUBLISH_MIN_CONFIRMATIONS}th`} confirmation. Details are in the Deploy log.`;
-        actions = abandonBtn();
-        break;
-      case "recording":
-        led = "busy";
-        text =
-          cr.commitInfo === null || cr.commitInfo === undefined
-            ? "Step 1 confirmed — waiting for the indexer to record the reservation."
-            : cr.commitInfo.status === "open" && cr.row === undefined
-              ? `Checking that ${rec.ticker} is still free…`
-              : `Your reservation is ${commitStatusText(cr.commitInfo.status)}.`;
-        if (cr.commitInfoError) detail = `last check failed: ${cr.commitInfoError}`;
-        else if (cr.rowError) detail = `last availability check failed: ${cr.rowError}`;
-        actions = abandonBtn();
-        break;
-      case "settling": {
-        led = "busy";
-        const t = cr.timing;
-        text = `Step 1 is confirmed (${t ? `${t.confirmations} of ${PUBLISH_MIN_CONFIRMATIONS}` : "1"} confirmations). Publish opens at block #${t ? fmtInt(t.publishFrom) : "…"}: sent earlier, a chain reorganization could put both steps into one block, where the publish does not count and the reservation is used up.`;
-        actions = abandonBtn();
-        break;
-      }
-      case "ready":
-        led = "ok";
-        text = revealRate ? `Step 1 is confirmed. Publish ${rec.ticker} now — availability is checked again right before it is sent.` : missingFeeHint(revealFee.choice, revealRate, "publish");
-        actions = abandonBtn();
-        break;
-      case "taken-tentative": {
-        led = "busy";
-        const n = rowConfirmations(cr.row, indexed);
-        text = `${rec.ticker} looks taken: another publish of it confirmed${Number.isInteger(n) ? ` (${confirmationsText(n)})` : ""}. That usually stands, but until it has ${FINAL_DEPTH} confirmations a chain reorganization could still change it — wait a few blocks before you abandon this reservation.`;
-        actions = abandonBtn();
-        break;
-      }
-      case "closing":
-        led = "err";
-        text = `Fewer than ${PUBLISH_CUTOFF_BLOCKS} blocks are left before this reservation expires${cr.timing ? ` at block #${fmtInt(cr.timing.expiresAt)}` : ""}. A publish sent now would most likely confirm too late — its fees paid and the name public for nothing — so Publish is closed. Abandon it (the ${fmtInt(DUST_SATS)}-sat output stays in your wallet) and reserve again.`;
-        actions = abandonBtn();
-        break;
-      case "taken":
-        led = "err";
-        text = `${rec.ticker} was created by someone else before you published, so this reservation can no longer claim it. Abandon it — its ${fmtInt(DUST_SATS)}-sat output stays in your wallet — and reserve another name.`;
-        actions = abandonBtn();
-        break;
-      case "expired":
-        led = "err";
-        text = `This reservation expired: step 2 must confirm within ${fmtInt(2016)} blocks of step 1. Abandon it (the ${fmtInt(DUST_SATS)}-sat output stays in your wallet) and reserve again.`;
-        actions = abandonBtn();
-        break;
-      case "invalid":
-        led = "err";
-        text = invalidReasonText(cr.commitInfo?.invalid_reason);
-        actions = (
-          <>
-            <button className="btn btn-sm btn-primary" type="button" onClick={() => onRestart?.(rec.ticker)} disabled={cr.busy}>
-              Start again with a new code
-            </button>
-            {abandonBtn()}
-          </>
-        );
-        break;
-      case "carrier-spent":
-        led = "err";
-        text = `The ${fmtInt(DUST_SATS)}-sat output of step 1 was spent by another transaction, so it can no longer be published. Abandon it and reserve again.`;
-        actions = abandonBtn();
-        break;
-      case "before-activation":
-        led = "err";
-        text = `Step 1 confirmed in block #${fmtInt(rec.commit.height)}, before LUCKY-20 starts at block #${fmtInt(ACTIVATION_HEIGHT)}, so it is not a reservation. Abandon it (the ${fmtInt(DUST_SATS)}-sat output stays in your wallet) and reserve again.`;
-        actions = abandonBtn();
-        break;
-      case "publish-unsent":
-        led = "busy";
-        text = canResendStep(rec.reveal, txidOfRaw)
-          ? "Step 2 is signed, but no relay confirmed that it was sent. It may still have reached the network, so this page keeps checking. Send the same signed transaction again, or wait."
-          : "Checking whether step 2 reached the network…";
-        actions = resendBtn("reveal");
-        break;
-      case "publish-pending":
-        led = "busy";
-        text = `Step 2 sent — waiting for a block to confirm the publish of ${rec.ticker}. Details are in the Deploy log.`;
-        break;
-      case "publish-pending-taken": {
-        led = "err";
-        // Not final yet: a chain reorganization that takes the other publish out lets yours count.
-        const n = rowConfirmations(cr.row, indexed);
-        const tentative = Number.isInteger(n) && n < FINAL_DEPTH ? ` The other publish has ${confirmationsText(n)}: until it has ${FINAL_DEPTH}, a chain reorganization could still take it out, and yours could count.` : "";
-        text = `${rec.ticker} was created by someone else while your publish was waiting — yours will be ignored when it confirms (the fees are still paid).${tentative}`;
-        actions = abandonBtn();
-        break;
-      }
-      case "publish-confirmed":
-        led = "busy";
-        text = `Step 2 confirmed — checking the registry for ${rec.ticker}.`;
-        break;
-      case "taken-after": {
-        led = "err";
-        const n = rowConfirmations(cr.row, indexed);
-        const tentative = Number.isInteger(n) && n < FINAL_DEPTH ? ` (the other publish has ${confirmationsText(n)} — a chain reorganization could still change this)` : "";
-        text = `${rec.ticker} was claimed by another publish that came first — yours was ignored; the ${fmtSats(DEPLOY_PROTOCOL_FEE_SATS)} protocol fee and the network fees were still paid${tentative}.`;
-        actions = doneBtn;
-        break;
-      }
-      case "refused":
-        led = "err";
-        text = `The indexer did not register ${rec.ticker} from your publish${cr.commitInfo?.reveal_reason ? `: ${revealReasonText(cr.commitInfo.reveal_reason)}` : ""}. The fees were paid.`;
-        actions = doneBtn;
-        break;
-      default:
-        break;
-    }
-  } else {
-    const reason = idleReason(idle);
-    if (reason) text = reason;
-    else if (!idle.feeRate) text = missingFeeHint(idle.fee.choice, idle.feeRate, "reserve", { awaitingAck: !!idle.fee.highFee?.pending });
-    else text = readyText(idle.assetSafe, "Reserve");
   }
-
-  // A dead end already explains itself (a Publish that found the name taken says the same thing).
-  const err = cr.error && cr.error.kind !== "speedup" && !op && !(rec && DEAD_END_PHASES.has(phase)) ? cr.error.message : null;
-  if (!text && !err) return null;
+  if (body) return body;
+  if (!text) return null;
   return (
     <div className="status" role="status" aria-live="polite">
-      {text && (
-        <div className="line">
-          <Led state={led} />
-          <span>{text}</span>
-        </div>
-      )}
+      <div className="line">
+        <Led state={led} />
+        <span>{text}</span>
+      </div>
       {detail && <div className="detail">{detail}</div>}
-      {err && (
-        <div className="line">
-          <Led state="err" />
-          <span>{err}</span>
-        </div>
-      )}
-      {(actions || err) && (
-        <div className="actions">
-          {actions}
-          {err && !rec && (
-            <button className="btn btn-sm" type="button" onClick={cr.dismiss}>
-              Dismiss
-            </button>
+      {actions && <div className="actions">{actions}</div>}
+    </div>
+  );
+}
+
+/** The pending DEPLOY, and its taken-while-pending notice: sent and waiting for a block. */
+function Pending({ cr, flow, tipNow, fees, indexed }) {
+  const t = flow.ticker;
+  const taken = flow.takenRow;
+  const unseenMinutes = cr.newestUnseen ? Math.max(Math.round(DROP_GRACE_MS / 60_000), Math.round((Date.now() - (cr.unseenAt ?? Date.now()) + DROP_GRACE_MS) / 60_000)) : 0;
+  const missedFrom = Number.isInteger(flow.sentTip) ? flow.sentTip + 1 : null;
+  const more = Number.isInteger(missedFrom) && Number.isInteger(tipNow) ? tipNow - missedFrom : 0;
+  const n = taken ? confirmationsAt(taken.deploy_block, indexed) : null;
+  return (
+    <div className="cr-steps" role="status" aria-live="polite">
+      <div className="line">
+        <Led state={taken ? "err" : "busy"} />
+        <span>
+          DEPLOY of {t} sent — waiting for a block. tx {txLink(flow.txid)}
+          {flow.feeSats != null ? ` · fee ${fmtInt(flow.feeSats)} sats` : ""}
+          {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}. {t} is visible in the mempool until this confirms.
+        </span>
+      </div>
+      {flow.resumed && !flow.psbt && <p className="cr-state">This DEPLOY was picked up again without its unsigned copy, so it cannot be sped up from this page.</p>}
+      {flow.unsent && <p className="notice">No relay confirmed that it was sent; it may still reach the network — this page keeps checking.</p>}
+      {taken ? (
+        <p className="notice" role="alert">
+          {t} was registered by another DEPLOY (tx {txLink(taken.deploy_txid)}
+          {Number.isInteger(taken.deploy_block) ? `, block #${fmtInt(taken.deploy_block)}` : ""}) while yours was waiting. Yours will be ignored when it confirms; its{" "}
+          {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)}-sat protocol fee and its network fee are spent and not refunded.
+          {n === null || n < FINAL_DEPTH ? ` Until that block has ${FINAL_DEPTH} confirmations, a chain reorganization could still change this.` : ""}
+        </p>
+      ) : (
+        <>
+          {cr.missed && Number.isInteger(missedFrom) && (
+            <p className="notice" role="alert">
+              Your DEPLOY missed block #{fmtInt(missedFrom)}
+              {more > 0 ? ` and ${more} more` : ""}. {t} is visible in the mempool, and another DEPLOY of {t} that pays more can confirm first. Speed it up.
+            </p>
           )}
-        </div>
+          {cr.newestUnseen && <p className="notice">The node has not seen your DEPLOY for {unseenMinutes} minutes — it may have been replaced or dropped. Still checking.</p>}
+          <SpeedUp cr={cr} flow={flow} fees={fees} />
+          {cr.speedError && !cr.canSpeedUp && <p className="err">{cr.speedError}</p>}
+        </>
       )}
     </div>
   );
 }
 
 /**
- * Created names that are not final yet (settling notes): each says where it
- * stands, until its block has FINAL_DEPTH confirmations — and plainly when
- * a chain reorganization changed it.
+ * Results that are not final yet (settling notes): each says where it
+ * stands until its block has FINAL_DEPTH confirmations — and plainly when a
+ * chain reorganization changed it. A released DEPLOY stays listed until its
+ * note expires: one of its versions may still confirm.
  */
-function SettlingNotes({ cr, indexed }) {
-  const notes = (cr.settling || []).filter((n) => n.revealTxid !== cr.finished?.revealTxid || n.verdict !== "provisional");
+function SettlingNotes({ cr, flow, fieldTicker, indexed }) {
+  const shown = new Set(flow.phase === "done" ? [flow.txid, flow.row?.deploy_txid].filter(Boolean).map((x) => String(x).toLowerCase()) : []);
+  const notes = (cr.settling || []).filter((n) => {
+    if (n.verdict === "released" && n.ticker === fieldTicker) return false; // said under the button
+    if (flow.phase === "done" && n.verdict !== "changed-missing" && n.versions.some((x) => shown.has(x))) return false; // the result above says it
+    return true;
+  });
   if (!notes.length) return null;
   return (
     <div className="status" role="status" aria-live="polite">
@@ -1135,37 +871,29 @@ function SettlingNotes({ cr, indexed }) {
         const conf = confirmationsAt(n.height, indexed);
         let led = "busy";
         let text;
-        let actions = null;
         if (n.verdict === "changed-taken") {
           led = "err";
-          text = `A chain reorganization changed this result: ${n.ticker} is now registered to another publish. This page keeps checking until it is final.`;
+          if (n.origin === "taken") text = `Another DEPLOY of ${n.ticker} holds the name. Until its block has ${FINAL_DEPTH} confirmations, a chain reorganization could still change this.`;
+          else if (n.origin === "released") text = `${n.ticker} is registered to another DEPLOY. If your earlier DEPLOY confirms, it is ignored; its fees are spent and not refunded.`;
+          else text = `A chain reorganization changed this result: ${n.ticker} is now registered to another DEPLOY. This page keeps checking until it is final.`;
         } else if (n.verdict === "changed-missing") {
           led = "err";
-          text = `A chain reorganization took your publish of ${n.ticker} out of its block — it is not in the registry right now. It usually confirms again within a block or two; this page keeps checking.`;
-          if (!cr.rec) {
-            actions = (
-              <button className="btn btn-sm" type="button" onClick={() => cr.restoreSettling(n.revealTxid)} disabled={cr.busy}>
-                Track the reservation again
-              </button>
-            );
-          }
+          text = `A chain reorganization took your DEPLOY of ${n.ticker} out of its block — it is not in the registry right now. It usually confirms again within a block or two; this page keeps checking.`;
+        } else if (n.verdict === "released") {
+          text = `An earlier DEPLOY of ${n.ticker} from this browser left the node's mempool and may still confirm. Creating ${n.ticker} again can pay the fees twice.`;
         } else {
           text = `Created ${n.ticker}${Number.isInteger(n.height) ? ` in block #${fmtInt(n.height)}` : ""} — provisional${Number.isInteger(conf) ? `, ${confirmationsText(conf)}` : ""}; final after ${FINAL_DEPTH}.`;
         }
         return (
-          <div key={n.revealTxid}>
+          <div key={n.txid}>
             <div className="line">
               <Led state={led} />
               <span>
-                {text}{" "}
-                <a href={txUrl(n.revealTxid)} target="_blank" rel="noopener noreferrer" className="mono" title={n.revealTxid}>
-                  {shortTxid(n.revealTxid)}
-                </a>
+                {text} {txLink(n.txid)}
               </span>
             </div>
             <div className="actions">
-              {actions}
-              <button className="btn btn-ghost btn-sm" type="button" onClick={() => cr.dismissSettling(n.revealTxid)}>
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => cr.dismissSettling(n.txid)}>
                 Dismiss
               </button>
             </div>
@@ -1176,7 +904,7 @@ function SettlingNotes({ cr, indexed }) {
   );
 }
 
-/** Why Reserve is off while no reservation is open, or null when nothing but the fee rate can stop it. */
+/** Why Create is off while nothing is in progress, or null when nothing but the fee rate can stop it. */
 function idleReason({ indexerOk, preActivation, valid, availState, typed, sync }) {
   if (!indexerOk) return "The indexer is not answering right now — token creation is paused until it does.";
   if (preActivation) return lockedHint();
@@ -1191,7 +919,7 @@ function idleReason({ indexerOk, preActivation, valid, availState, typed, sync }
     case "mine":
       return `You already created ${typed}.`;
     case "own":
-      return `Your publish of ${typed} is still pending (see above).`;
+      return `Your DEPLOY of ${typed} is still pending (see above).`;
     case "error":
       return "Availability could not be checked (see above).";
     case "lagging":

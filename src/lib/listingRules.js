@@ -19,20 +19,12 @@
 //              seller such an off-book listing as a row with status
 //              "expired": it can still be bought at its price until the
 //              seller withdraws it.
-//   reserved   the first output of a step-1 reservation (COMMIT) that can
-//              still be published is never listed: a listing's signature
-//              covers only that output and the payment, so a buyer could
-//              publish the reserved ticker with the seller named creator —
-//              nor, after the reservation expired, until its last block is
-//              final (a reorganization could still make it publishable).
-
 //   cap        one seller address may hold at most MAX_OPEN_LISTINGS_PER_ADDRESS
 //              OPEN listings at a time, across every ticker (spec §7.4
 //              "Per-seller cap"). A listing of an outpoint that already
 //              has an open listing replaces it and takes no extra place.
 
 import { parseListing } from "./swap.js";
-import { FINAL_DEPTH, confirmationsAt } from "./finality.js";
 
 export const LISTING_VERSIONS = Object.freeze([1, 2]);
 
@@ -271,38 +263,6 @@ export function listingCapDecision(quota, outpointId) {
 /** The order book's exact refusal of a higher price for a listed outpoint. */
 export const WITHDRAW_FIRST_TEXT = "withdraw first: the cheaper signed listing stays fillable on-chain";
 
-/** The order book's exact refusal of the first output of an open reservation. */
-export const COMMIT_CARRIER_LISTING_TEXT =
-  "outpoint reserves a ticker (the output of an open COMMIT, step 1 of a deploy): a listing of it would let the buyer publish that ticker with you named as its creator. Move it with a send to yourself, or publish your ticker, before listing";
-
-/** The same rule in plain words for the sell form. */
-export const COMMIT_CARRIER_PLAIN_TEXT =
-  "This output holds a ticker reservation: it is the first output of a step 1 (Reserve) transaction that can still be published. A listing's signature covers only this output and your payment, so a buyer could use it to publish that reserved ticker with you named as its creator. Move it with a send to yourself (or publish your own reservation) before listing it.";
-
-/** The sell form's words while an expired reservation's last block is not final yet. */
-export function commitExpiredWaitText(lastBlock, indexed) {
-  const n = Number.isInteger(lastBlock) && Number.isInteger(indexed) ? Math.max(1, FINAL_DEPTH - (confirmationsAt(lastBlock, indexed) ?? 0)) : null;
-  const when = Number.isInteger(lastBlock) ? ` from block ${(lastBlock + FINAL_DEPTH - 1).toLocaleString("en-US")}` : "";
-  return `This output held a ticker reservation that has just expired. The order book lists it only once the reservation's last block has ${FINAL_DEPTH} confirmations${when}${n ? ` — about ${n} more block${n === 1 ? "" : "s"}` : ""}. Nothing needs to be sent; list it then.`;
-}
-
-/**
- * Why outpoint `vout` of a tx whose /commits record is `commit` (a
- * CommitView, or null when the tx is not a recorded COMMIT) must not be
- * listed — or null, exactly as the order book decides it: vout 0 of an
- * unspent COMMIT whose status is `open`, or `expired` while its last
- * reveal block (`expires_at_height`) has fewer than FINAL_DEPTH
- * confirmations at `indexed` (the same indexer's applied height; unknown →
- * refused, the book decides after the wait).
- */
-export function commitCarrierProblem(vout, commit, indexed = null) {
-  if (Number(vout) !== 0 || !commit || commit.spent_txid) return null;
-  if (commit.status === "open") return COMMIT_CARRIER_PLAIN_TEXT;
-  if (commit.status !== "expired") return null;
-  const last = Number.isInteger(commit.expires_at_height) ? commit.expires_at_height : null;
-  if (last !== null && Number.isInteger(indexed) && (confirmationsAt(last, indexed) ?? 0) >= FINAL_DEPTH) return null;
-  return commitExpiredWaitText(last, Number.isInteger(indexed) ? indexed : null);
-}
 /** BIP68: bit 31 of nSequence disables the relative lock-time. */
 export const SEQUENCE_DISABLE_FLAG = 0x80000000;
 

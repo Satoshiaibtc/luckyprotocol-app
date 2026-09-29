@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
-import { buildMinePsbt, buildSpeedUpPsbt, decodeAddress, expectPsbtPayload, filterSpendable, inputCostSats, minFeeInputSats, outpointKey } from "../lib/psbt.js";
+import { RBF_SEQUENCE, buildMinePsbt, buildSpeedUpPsbt, decodeAddress, expectPsbtPayload, filterSpendable, inputCostSats, minFeeInputSats, outpointKey } from "../lib/psbt.js";
+import { PROTOCOL_LOCKTIME } from "../lib/payloads.js";
 import { isUsableFeeRate } from "../lib/feechoice.js";
 import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { DROP_GRACE_MS, forgetTx, markTxConfirmed, markTxUnconfirmed, recordBroadcastTx, txRecords } from "../lib/txrecords.js";
@@ -175,8 +176,10 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
         assetSafe: utxoRes.assetSafe,
       });
 
-      // Sign-time guard: the OP_RETURN must be exactly one MINE for this ticker.
-      expectPsbtPayload(built.psbtHex, { op: "MINE", ticker });
+      // Sign-time guard: exactly one OP_RETURN, a MINE of this ticker, the
+      // protocol lock time, replace-by-fee on every input, and the reference
+      // layout (vout0 546 → you, vout1 the exact fee).
+      expectPsbtPayload(built.psbtHex, { op: "MINE", ticker, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self: addr } });
       const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: addr });
       setFlow((m) => ({ ...m, phase: "broadcasting" }));
       // The unsigned PSBT and its change output ride with the record: a Speed up rebuilds from them, also after a reload.
@@ -238,8 +241,8 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
         const st = await indexer.txStatus(txid);
         if (st && st.confirmed) throw new Error("It has just confirmed — no need to speed it up.");
         const q = buildSpeedUpPsbt({ psbtHex: x.psbt, changeVout: x.changeVout, feeRateSatVb: rate, incrementalRelayFee });
-        // The same guard as the first signature: one OP_RETURN, a MINE of this ticker.
-        expectPsbtPayload(q.psbtHex, { op: "MINE", ticker: x.ticker });
+        // The same guard as the first signature.
+        expectPsbtPayload(q.psbtHex, { op: "MINE", ticker: x.ticker, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self: address } });
         set((p) => ({ ...p, speeding: "signing" }));
         // A replacement: the inputs of every version it replaces may be spent
         // again — an earlier one whose faster copy was never confirmed as

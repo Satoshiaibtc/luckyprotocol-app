@@ -1,24 +1,33 @@
 // Tests for src/lib/secondSource.js: the mempool.space second
 // check of a listing's outpoint — URL shape, the pure comparison with
 // agree / unverified / disagree fixtures (value, script, and the §7.2 step 3 OP_RETURN
-// re-parse for MINE and SEND carriers), and the transport's unreachable
+// re-parse for MINE and SEND carriers, with the creating tx's fee output
+// and its input 1), and the transport's unreachable
 // paths (timeout, network error, server error, non-JSON, and a 404 beside
 // an outage) through an injected fetch. Plain Node, no framework, no network.
 import assert from "node:assert/strict";
+import { hex } from "@scure/base";
 import { SECOND_SOURCE_ORIGIN, SECOND_SOURCE_TIMEOUT_MS, carrierAmountCheck, checkSecondSource, compareSecondSource, originCheckState, originRefused, payloadOfTxVouts, secondSourceAllowsSigning, secondSourceUrls } from "../src/lib/secondSource.js";
+import { decodeAddress } from "../src/lib/psbt.js";
+import { PROJECT_FEE_ADDRESS } from "../src/lib/payloads.js";
 
 const TXID = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const SCRIPT = "5120" + "ab".repeat(32); // a P2TR scriptPubKey
-const FEE = "0014" + "ee".repeat(20);
+const FEE = hex.encode(decodeAddress(PROJECT_FEE_ADDRESS).script); // the protocol fee address's script
+const SELLER = "0014" + "cd".repeat(20);
 // `OP_RETURN <one push>` as an explorer serialises it: 6a + PUSHBYTES_n + ascii.
 const opret = (text) => ({ scriptpubkey: `6a${text.length > 75 ? "4c" : ""}${text.length.toString(16).padStart(2, "0")}${Buffer.from(text, "ascii").toString("hex")}`, scriptpubkey_type: "op_return", value: 0 });
-// The reference SEND layout (§2.3 / a fill's §7.2): vout1 is TO_OUT here.
+const send = (tick, amt) => `{"p":"lucky-20","op":"send","tick":"${tick}","amt":"${amt}"}`;
+const minePayload = (tick) => `{"p":"lucky-20","op":"mine","tick":"${tick}"}`;
+// The reference fill (§7.2): vout0 the seller's price, vout1 the buyer's
+// token carrier (AMT), vout2 the buyer's residual carrier, vout3 the fee,
+// vout4 the OP_RETURN. The listing is a later resale of vout1.
 const listing = { txid: TXID, vout: 1, carrierSats: 546, scriptHex: SCRIPT, ticker: "LUCKY", amount: 1200 };
 
 const agreeOutspend = { spent: false };
 const agreeTx = {
   txid: TXID,
-  vout: [{ scriptpubkey: "0014" + "cd".repeat(20), value: 12_000 }, { scriptpubkey: SCRIPT, value: 546, scriptpubkey_type: "v1_p2tr" }, { scriptpubkey: FEE, value: 546 }, opret("LUCKY-20|SEND|LUCKY|1200|1|4"), { scriptpubkey: SCRIPT, value: 546 }],
+  vout: [{ scriptpubkey: SELLER, value: 12_000 }, { scriptpubkey: SCRIPT, value: 546, scriptpubkey_type: "v1_p2tr" }, { scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret(send("LUCKY", 1200))],
   status: { confirmed: true, block_height: 970_000, block_hash: "00".repeat(31) + "0f" },
 };
 
@@ -82,8 +91,8 @@ const agreeTx = {
 
 // ---- §7.2 step 3: the OP_RETURN re-parsed ----------------------------------------------------------
 {
-  const withPayload = (text) => ({ ...agreeTx, vout: agreeTx.vout.map((v, i) => (i === 3 ? opret(text) : v)) });
-  assert.deepEqual(payloadOfTxVouts(agreeTx.vout), { op: "SEND", ticker: "LUCKY", amount: 1200, toOutIdx: 1, changeOutIdx: 4 }, "the payload as the indexer reads it");
+  const withPayload = (text) => ({ ...agreeTx, vout: agreeTx.vout.map((v, i) => (i === 4 ? opret(text) : v)) });
+  assert.deepEqual(payloadOfTxVouts(agreeTx.vout), { op: "SEND", ticker: "LUCKY", amount: 1200 }, "the payload as the indexer reads it");
   assert.equal(payloadOfTxVouts([{ scriptpubkey: SCRIPT }]), null);
   assert.equal(payloadOfTxVouts([{ scriptpubkey: "zz" }]), null, "junk hex is not a payload");
 
@@ -91,28 +100,47 @@ const agreeTx = {
   assert.equal(noTicker.verdict, "disagree", "without ticker / amount the OP_RETURN cannot be checked — fail closed");
   assert.match(noTicker.reasons[0], /no ticker \/ amount/);
 
-  // SEND carrier: TO_OUT with the same AMT agrees; another AMT, another vout, another ticker do not.
-  assert.equal(compareSecondSource(listing, { outspend: agreeOutspend, tx: agreeTx }).verdict, "agree", "vout 1 is TO_OUT and AMT == amount");
-  const amt = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|SEND|LUCKY|1300|1|4") });
+  // SEND carrier: vout1 with the same AMT agrees; another AMT, another vout, another ticker do not.
+  assert.equal(compareSecondSource(listing, { outspend: agreeOutspend, tx: agreeTx }).verdict, "agree", "vout 1 and AMT == amount");
+  const amt = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload(send("LUCKY", 1300)) });
   assert.equal(amt.verdict, "disagree");
   assert.match(amt.reasons[0], /moves 1300 LUCKY to vout 1, the listing says 1200/);
-  const otherTicker = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|SEND|ORE|1200|1|4") });
-  assert.equal(otherTicker.verdict, "disagree", "TO_OUT of a SEND of another ticker holds only that ticker");
-  assert.match(otherTicker.reasons[0], /SEND of ORE whose LUCKY residual goes to vout 4, the listing is vout 1/);
-  // §4.1: every ticker's residual lands on the residual slot — a carrier left
-  // there by a SEND of another ticker (a "move ORE to its own carrier" send
-  // of a UTXO that also held LUCKY) is a real LUCKY carrier: unverified, never a dead listing.
-  const otherResidual = compareSecondSource({ ...listing, vout: 4, amount: 300 }, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|SEND|ORE|1200|1|4") });
-  assert.equal(otherResidual.verdict, "unverified", "the residual slot of a SEND of another ticker");
+  const otherTicker = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload(send("ORE", 1200)) });
+  assert.equal(otherTicker.verdict, "disagree", "vout1 of a SEND of another ticker holds only that ticker");
+  assert.match(otherTicker.reasons[0], /SEND of ORE whose LUCKY residual goes to vout 2, the listing is vout 1/);
+  // §4.1: every ticker's residual lands on the residual output — a carrier
+  // left there by a SEND of another ticker (a "move ORE to its own carrier"
+  // send of a UTXO that also held LUCKY) is a real LUCKY carrier:
+  // unverified, never a dead listing.
+  const otherResidual = compareSecondSource({ ...listing, vout: 2, amount: 300 }, { outspend: agreeOutspend, tx: withPayload(send("ORE", 1200)) });
+  assert.equal(otherResidual.verdict, "unverified", "the residual output of a SEND of another ticker");
   assert.equal(otherResidual.reasons.length, 0);
   assert.match(otherResidual.notes[0], /residual output of a SEND of ORE: it holds whatever LUCKY/);
   assert.equal(secondSourceAllowsSigning(otherResidual.verdict, { unverifiedAck: true }), true, "a buyer can confirm and sign it");
-  const otherResidualFallback = carrierAmountCheck({ vout: 0, ticker: "LUCKY", amount: 300 }, withPayload("LUCKY-20|SEND|ORE|1200|1|9"));
-  assert.deepEqual([otherResidualFallback.reasons.length, otherResidualFallback.notes.length], [0, 1], "CHANGE_OUT unusable → the default output is the residual slot");
-  const commitOrigin = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload(`LUCKY-20|COMMIT|${"ab".repeat(32)}`) });
-  assert.equal(commitOrigin.verdict, "disagree");
-  assert.match(commitOrigin.reasons[0], /the creating tx is a COMMIT, which credits no token output/, "never \"OP_RETURN for undefined\"");
-  assert.equal(originRefused({ verdict: "disagree", reasons: commitOrigin.reasons }), true, "a COMMIT output is refused for its origin");
+  // vout2 unusable → the default output (the lowest non-OP_RETURN) is the residual output.
+  const noVout2 = { txid: TXID, vout: [{ scriptpubkey: SELLER, value: 12_000 }, { scriptpubkey: SCRIPT, value: 546 }, opret(send("ORE", 1200)), { scriptpubkey: FEE, value: 546 }], status: agreeTx.status };
+  const otherResidualFallback = carrierAmountCheck({ vout: 0, ticker: "LUCKY", amount: 300 }, noVout2);
+  assert.deepEqual([otherResidualFallback.reasons.length, otherResidualFallback.notes.length], [0, 1], "vout2 an OP_RETURN → the default output (vout0) is the residual output");
+  // In the plain-SEND reference layout that default output is the fee output at vout0.
+  const plainNoVout2 = { txid: TXID, vout: [{ scriptpubkey: FEE, value: 546 }, { scriptpubkey: SCRIPT, value: 546 }, opret(send("LUCKY", 10))], status: agreeTx.status };
+  const onFee = carrierAmountCheck({ vout: 0, ticker: "LUCKY", amount: 90 }, plainNoVout2);
+  assert.deepEqual([onFee.reasons.length, onFee.notes.length], [0, 1], "without vout2 the rest lands on vout0, the fee output");
+  // A vout0 of a SEND with a usable vout2 carries nothing.
+  const v0 = carrierAmountCheck({ vout: 0, ticker: "LUCKY", amount: 1200 }, agreeTx);
+  assert.match(v0.reasons[0], /routes LUCKY to vout 1 and the residual to vout 2 — vout 0 carries no tokens/, "vout0 of a SEND (the fee, or a fill's price) is never a token output");
+  // …including the seller's payment output of a fill that did not pay the SEND fee (§4 rule 6): the listed tokens sit there, but it is no MINE or SEND token output.
+  const feeLessFill = { ...agreeTx, vout: agreeTx.vout.filter((_, i) => i !== 3) };
+  const onPayment = compareSecondSource({ ...listing, vout: 0, carrierSats: 12_000, scriptHex: SELLER }, { outspend: agreeOutspend, tx: feeLessFill });
+  assert.equal(onPayment.verdict, "disagree", "a listing's payment output after a fee-less spend");
+  assert.equal(originRefused(onPayment), true, "…refused for its origin");
+
+  const deployOrigin = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload('{"p":"lucky-20","op":"deploy","tick":"LUCKY"}') });
+  assert.equal(deployOrigin.verdict, "disagree");
+  assert.match(deployOrigin.reasons[0], /the creating tx is a DEPLOY, which credits no token output/);
+  assert.equal(originRefused({ verdict: "disagree", reasons: deployOrigin.reasons }), true, "a DEPLOY output is refused for its origin");
+  const pipe = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|SEND|LUCKY|1200|1|2") });
+  assert.equal(pipe.verdict, "disagree", "a `|`-separated push is not a payload");
+  assert.match(pipe.reasons[0], /no LUCKY-20 OP_RETURN/);
   assert.equal(originRefused({ verdict: "disagree", reasons: ["mempool.space shows no LUCKY-20 OP_RETURN on the creating tx — vout 1 is not a MINE or SEND token output"] }), true, "a plain transfer is refused for its origin");
   assert.equal(originRefused({ verdict: "disagree", reasons: ["mempool.space says the outpoint is already spent"] }), false, "spent says nothing about the origin");
   assert.equal(originRefused({ verdict: "unreachable", reasons: [] }), false);
@@ -126,21 +154,39 @@ const agreeTx = {
   assert.deepEqual(originCheckState({ key: row.key, refused: false }, row), { blocked: false, pending: false }, "answered (an unreachable source included): listable");
   assert.deepEqual(originCheckState({ key: null, refused: false, checking: true }, { ...row, multi: true }), { blocked: false, pending: false }, "a multi-ticker carrier is not checked");
   assert.deepEqual(originCheckState({ key: null, refused: false }, null), { blocked: false, pending: false }, "nothing selected");
-  const residual = compareSecondSource({ ...listing, vout: 4, amount: 7 }, { outspend: agreeOutspend, tx: agreeTx });
-  assert.equal(residual.verdict, "unverified", "the CHANGE_OUT residual slot is a token slot too (§2.3 / §4.1) — but its balance depends on the inputs: amount not independently verified");
+  const residual = compareSecondSource({ ...listing, vout: 2, amount: 7 }, { outspend: agreeOutspend, tx: agreeTx });
+  assert.equal(residual.verdict, "unverified", "the vout2 residual output is a token output too (§2.3 / §4.1) — but its balance depends on the inputs: amount not independently verified");
   assert.equal(residual.reasons.length, 0);
-  assert.match(residual.notes[0], /vout 4 is the SEND's residual output \(CHANGE_OUT\).*cannot see token balances/);
-  const notASlot = compareSecondSource({ ...listing, vout: 2, scriptHex: FEE }, { outspend: agreeOutspend, tx: agreeTx });
+  assert.match(residual.notes[0], /vout 2 is the SEND's residual output \(vout2\).*cannot see token balances/);
+  const notASlot = compareSecondSource({ ...listing, vout: 3, scriptHex: FEE }, { outspend: agreeOutspend, tx: agreeTx });
   assert.equal(notASlot.verdict, "disagree");
-  assert.match(notASlot.reasons[0], /routes LUCKY to vout 1 and the residual to vout 4 — vout 2 carries no tokens/);
-  const none = compareSecondSource(listing, { outspend: agreeOutspend, tx: { ...agreeTx, vout: agreeTx.vout.filter((_, i) => i !== 3) } });
+  assert.match(notASlot.reasons[0], /routes LUCKY to vout 1 and the residual to vout 2 — vout 3 carries no tokens/);
+  const none = compareSecondSource(listing, { outspend: agreeOutspend, tx: { ...agreeTx, vout: agreeTx.vout.filter((_, i) => i !== 4) } });
   assert.equal(none.verdict, "disagree");
   assert.match(none.reasons[0], /no LUCKY-20 OP_RETURN/);
-  const deploy = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|DEPLOY|LUCKY") });
-  assert.match(deploy.reasons[0], /is a DEPLOY, which credits no token output/);
 
-  // MINE carrier: vout 0, yield from the confirming block hash (…f → 1000).
-  const mineTx = { txid: TXID, vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret("LUCKY-20|MINE|LUCKY")], status: { confirmed: true, block_hash: "00".repeat(31) + "0f" } };
+  // The creating SEND's fee output: without it the SEND moved nothing to vout1.
+  const noFee = { ...agreeTx, vout: agreeTx.vout.map((v, i) => (i === 3 ? { scriptpubkey: SELLER, value: 546 } : v)) };
+  const noFeeTo = compareSecondSource(listing, { outspend: agreeOutspend, tx: noFee });
+  assert.equal(noFeeTo.verdict, "disagree", "vout1 of a SEND without its fee output holds nothing");
+  assert.match(noFeeTo.reasons[0], /the creating SEND has no 546-sat fee output, so it credited nothing to vout 1/);
+  assert.equal(originRefused(noFeeTo), true, "…refused for its origin");
+  const wrongFee = { ...agreeTx, vout: agreeTx.vout.map((v, i) => (i === 3 ? { scriptpubkey: FEE, value: 547 } : v)) };
+  assert.equal(compareSecondSource(listing, { outspend: agreeOutspend, tx: wrongFee }).verdict, "disagree", "the fee must be exactly 546 sats");
+  assert.equal(compareSecondSource({ ...listing, vout: 2, amount: 7 }, { outspend: agreeOutspend, tx: noFee }).verdict, "unverified", "an unapplied SEND still routes its pool to vout2");
+
+  // Input 1 of the creating SEND signed as a listing (0x83): vout1 may hold that listing's tokens instead of AMT.
+  const withVin = (vin1) => ({ ...agreeTx, vin: [{ witness: ["11".repeat(64)], prevout: { scriptpubkey: SCRIPT } }, vin1] });
+  const listed1 = compareSecondSource(listing, { outspend: agreeOutspend, tx: withVin({ witness: ["22".repeat(64) + "83"], prevout: { scriptpubkey: "5120" + "33".repeat(32) } }) });
+  assert.equal(listed1.verdict, "unverified", "a P2TR key-path 0x83 signature on input 1");
+  assert.match(listed1.notes[0], /input 1 of the creating tx is signed as a listing, so vout 1 may hold that listing's tokens/);
+  const listed1w = compareSecondSource(listing, { outspend: agreeOutspend, tx: withVin({ witness: ["30" + "44".repeat(70) + "83", "02" + "55".repeat(32)], prevout: { scriptpubkey: "0014" + "66".repeat(20) } }) });
+  assert.equal(listed1w.verdict, "unverified", "a P2WPKH 0x83 signature on input 1");
+  assert.equal(compareSecondSource(listing, { outspend: agreeOutspend, tx: withVin({ witness: ["22".repeat(64)], prevout: { scriptpubkey: "5120" + "33".repeat(32) } }) }).verdict, "agree", "a whole-tx signature on input 1 changes nothing");
+  assert.equal(compareSecondSource(listing, { outspend: agreeOutspend, tx: withVin({ witness: ["22".repeat(64) + "83"], prevout: { scriptpubkey: "0020" + "33".repeat(32) } }) }).verdict, "agree", "a spent output with no signature type has no listing signature");
+
+  // MINE carrier: vout 0, yield from the confirming block hash (…f → 1000), with its 546-sat fee output.
+  const mineTx = { txid: TXID, vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret(minePayload("LUCKY"))], status: { confirmed: true, block_hash: "00".repeat(31) + "0f" } };
   const mine = { txid: TXID, vout: 0, carrierSats: 546, scriptHex: SCRIPT, ticker: "LUCKY", amount: 1000 };
   assert.equal(compareSecondSource(mine, { outspend: agreeOutspend, tx: mineTx }).verdict, "agree", "yield 1000 == amount");
   const wrongYield = compareSecondSource({ ...mine, amount: 550 }, { outspend: agreeOutspend, tx: mineTx });
@@ -154,7 +200,11 @@ const agreeTx = {
   assert.match(unconfirmed.reasons[0], /not show the MINE as confirmed/);
   const wrongVout = compareSecondSource({ ...mine, vout: 1, scriptHex: FEE }, { outspend: agreeOutspend, tx: mineTx });
   assert.match(wrongVout.reasons[0], /a MINE credits vout 0, the listing is vout 1/);
-  console.log("second source OP_RETURN: SEND TO_OUT (AMT) agrees, CHANGE_OUT is unverified, other vouts / tickers / opcodes disagree; MINE vout 0 + recomputed yield");
+  const feeLessMine = compareSecondSource(mine, { outspend: agreeOutspend, tx: { ...mineTx, vout: [mineTx.vout[0], { scriptpubkey: SELLER, value: 546 }, mineTx.vout[2]] } });
+  assert.equal(feeLessMine.verdict, "disagree", "a MINE without its fee output credited nothing");
+  assert.match(feeLessMine.reasons[0], /the creating MINE has no 546-sat fee output, so it credited nothing to vout 0/);
+  assert.equal(originRefused(feeLessMine), true);
+  console.log("second source OP_RETURN: SEND vout1 (AMT) agrees, vout2 is unverified, vout0 / other vouts / tickers / opcodes / pipe pushes disagree; no fee output → nothing credited; input 1 signed 0x83 → unverified; MINE vout 0 + recomputed yield");
 }
 
 // ---- partial credits and amounts the second source cannot confirm -----------
@@ -162,7 +212,7 @@ const agreeTx = {
   const CAP = 970_200;
   const mineTx = (height, last = "f") => ({
     txid: TXID,
-    vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret("LUCKY-20|MINE|LUCKY")],
+    vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret(minePayload("LUCKY"))],
     status: { confirmed: true, block_height: height, block_hash: "00".repeat(31) + "0" + last },
   });
   const mine = { txid: TXID, vout: 0, carrierSats: 546, scriptHex: SCRIPT, ticker: "LUCKY", amount: 300, capHeight: CAP };
@@ -193,15 +243,17 @@ const agreeTx = {
   assert.match(zero.reasons[0], /0 tokens — a zero-token carrier is never buyable/);
   assert.match(carrierAmountCheck({ vout: 0, ticker: "LUCKY", amount: 0 }, mineTx(CAP)).reasons[0], /zero-token carrier/);
 
-  // SEND: TO_OUT with AMT is verified; the residual output is not; an unusable CHANGE_OUT sends the residual to the default output
-  const sendTx = (text) => ({ txid: TXID, vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret(text), { scriptpubkey: SCRIPT, value: 546 }], status: { confirmed: true, block_height: 970_250, block_hash: "00".repeat(32) } });
-  const to = { txid: TXID, vout: 0, carrierSats: 546, scriptHex: SCRIPT, ticker: "LUCKY", amount: 40 };
-  assert.equal(compareSecondSource(to, { outspend: agreeOutspend, tx: sendTx("LUCKY-20|SEND|LUCKY|40|0|3") }).verdict, "agree");
-  assert.equal(compareSecondSource({ ...to, vout: 3, amount: 9 }, { outspend: agreeOutspend, tx: sendTx("LUCKY-20|SEND|LUCKY|40|0|3") }).verdict, "unverified", "residual output");
-  const fallback = compareSecondSource({ ...to, amount: 49 }, { outspend: agreeOutspend, tx: sendTx("LUCKY-20|SEND|LUCKY|40|0|2") });
-  assert.equal(fallback.verdict, "unverified", "CHANGE_OUT is the OP_RETURN → residual lands on the default output vout0 = TO_OUT: AMT + residual");
-  assert.match(fallback.notes[0], /residual lands there too/);
-  assert.equal(compareSecondSource({ ...to, amount: 39 }, { outspend: agreeOutspend, tx: sendTx("LUCKY-20|SEND|LUCKY|40|0|2") }).verdict, "disagree", "less than AMT on TO_OUT is never right");
+  // SEND in the plain reference layout: vout1 with AMT is verified; the residual output is not.
+  const sendTx = { txid: TXID, vout: [{ scriptpubkey: FEE, value: 546 }, { scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: SCRIPT, value: 546 }, opret(send("LUCKY", 40))], status: { confirmed: true, block_height: 970_250, block_hash: "00".repeat(32) } };
+  const to = { txid: TXID, vout: 1, carrierSats: 546, scriptHex: SCRIPT, ticker: "LUCKY", amount: 40 };
+  assert.equal(compareSecondSource(to, { outspend: agreeOutspend, tx: sendTx }).verdict, "agree");
+  assert.equal(compareSecondSource({ ...to, vout: 2, amount: 9 }, { outspend: agreeOutspend, tx: sendTx }).verdict, "unverified", "residual output");
+  // vout0 an OP_RETURN and vout2 unusable: the default output is vout1, which then holds AMT + the residual.
+  const merged = { txid: TXID, vout: [opret(send("LUCKY", 40)), { scriptpubkey: SCRIPT, value: 546 }, opret("memo"), { scriptpubkey: FEE, value: 546 }], status: sendTx.status };
+  const fallback = compareSecondSource({ ...to, amount: 49 }, { outspend: agreeOutspend, tx: merged });
+  assert.equal(fallback.verdict, "unverified", "vout2 is an OP_RETURN → the residual lands on the default output vout1 = AMT + residual");
+  assert.match(fallback.notes[0], /residual lands on vout 1 too/);
+  assert.equal(compareSecondSource({ ...to, amount: 39 }, { outspend: agreeOutspend, tx: merged }).verdict, "disagree", "less than AMT on vout1 is never right");
 
   // the buy sheet's gate: agree as is; unverified and unreachable each need their own tick; disagree never
   assert.equal(secondSourceAllowsSigning("agree"), true);
@@ -240,8 +292,8 @@ const fetchWith = (map, log) => async (url, init) => {
     assert.ok(l.init.signal instanceof AbortSignal, "abortable (the timeout)");
   }
 
-  const residualUrls = secondSourceUrls(TXID, 4);
-  const unv = await checkSecondSource({ ...listing, vout: 4, amount: 7 }, { fetchImpl: fetchWith({ [residualUrls.outspend]: json(agreeOutspend), [residualUrls.tx]: json(agreeTx) }) });
+  const residualUrls = secondSourceUrls(TXID, 2);
+  const unv = await checkSecondSource({ ...listing, vout: 2, amount: 7 }, { fetchImpl: fetchWith({ [residualUrls.outspend]: json(agreeOutspend), [residualUrls.tx]: json(agreeTx) }) });
   assert.equal(unv.verdict, "unverified");
   assert.match(unv.detail, /agrees on the outpoint .* but cannot confirm the amount/);
   assert.equal(unv.notes.length, 1);

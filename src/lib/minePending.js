@@ -33,6 +33,7 @@ import { mineYield } from "./yield.js";
 import { fmtInt, shortTxid } from "./format.js";
 import { creditOf, mineInvalidReasonText } from "./minerlog.js";
 import { FINAL_DEPTH, bestConfirmations, finalityText } from "./finality.js";
+import { psbtPayload } from "./psbt.js";
 
 /** Finished items kept beyond this many are dropped (oldest first); an item still in flight is never dropped. */
 export const PENDING_MINES_MAX = 12;
@@ -99,11 +100,17 @@ export function switchMineVersion(item, txid) {
 /**
  * Can this item be sped up here? Only a MINE still waiting for a block
  * whose unsigned PSBT this browser kept, with a BTC change output to take
- * the extra fee from. → "yes" | "no-change" | "no" (nothing to rebuild from,
- * or not waiting).
+ * the extra fee from. →
+ *   "yes"           — a pending LUCKY-20 MINE with a change output
+ *   "no-change"     — a pending MINE without one (nothing to take a fee from)
+ *   "not-protocol"  — the kept PSBT's OP_RETURN is not a LUCKY-20 MINE
+ *                     payload: the tx credits nothing, and a faster copy
+ *                     would only spend more
+ *   "no"            — nothing to rebuild from, or not waiting
  */
 export function mineSpeedUpState(item) {
   if (!item || item.phase !== "pending" || !item.psbt) return "no";
+  if (psbtPayload(item.psbt)?.op !== "MINE") return "not-protocol";
   return Number.isInteger(item.changeVout) ? "yes" : "no-change";
 }
 

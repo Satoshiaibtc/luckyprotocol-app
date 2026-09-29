@@ -13,16 +13,19 @@
 //   6. the indexer answering "busy" is not "offline", and no page text
 //      carries a request path;
 //   7. small texts: the fill's block, the activation gate at tip 0, the
-//      site banner's list of paused actions, the deploy step's signed copy.
+//      site banner's list of paused actions;
+//   8. after signing: every asked input carries the signature TYPE the
+//      transaction needs — 0x00 / 0x01 for a DEPLOY, MINE, SEND or a
+//      fill's own inputs, exactly 0x83 for a listing — or nothing is sent
+//      (`code: "sighash-mismatch"`).
 import assert from "node:assert/strict";
 import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { pubECDSA, pubSchnorr } from "@scure/btc-signer/utils.js";
 import {
-  buildCommitPsbt,
+  buildDeployPsbt,
   buildMinePsbt,
-  buildRevealPsbt,
   buildSendPsbt,
   convergeSelection,
   estimateVsize,
@@ -43,7 +46,6 @@ import { indexerErrorText, isIndexerBusy } from "../src/lib/errors.js";
 import { filledLineText } from "../src/lib/market.js";
 import { activationState } from "../src/lib/activation.js";
 import { chainTipOf, syncWarningText } from "../src/lib/sync.js";
-import { canResendStep, deployStage, normalizeStep, spedUpStep, stepVersions, switchStepTo } from "../src/lib/commitReveal.js";
 import { forgetTx, txRecords } from "../src/lib/txrecords.js";
 import { mineVersions } from "../src/lib/minePending.js";
 import { sendVersions } from "../src/lib/send.js";
@@ -107,13 +109,13 @@ const SIGN_ALL = (psbtHex) => mockSignPsbt(psbtHex, { autoFinalized: true });
     const signed = SIGN_ALL(rewritten(mine.psbtHex, change));
     assert.match(String(signedTxMismatch(mine.psbtHex, signed)), re, JSON.stringify(change));
   }
-  // The REVEAL's relative lock on input 0 and the COMMIT's lock time are covered the same way.
-  const salt = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
-  const reveal = buildRevealPsbt({ address: MOCK_WALLET.address, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos, tokenOutpoints: [], feeRateSatVb: 3, ticker: "NEWTKN", salt, carrier: { txid: T(9), vout: 0, sats: 546 } });
-  assert.match(String(signedTxMismatch(reveal.psbtHex, SIGN_ALL(rewritten(reveal.psbtHex, { input0Sequence: RBF_SEQUENCE })))), /input 0's sequence/);
-  const commit = buildCommitPsbt({ address: MOCK_WALLET.address, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos, tokenOutpoints: [], feeRateSatVb: 3, ticker: "NEWTKN", salt });
-  assert.equal(parse(commit.psbtHex).lockTime, PROTOCOL_LOCKTIME);
-  assert.match(String(signedTxMismatch(commit.psbtHex, SIGN_ALL(rewritten(commit.psbtHex, { lockTime: 0 })))), /lock time/);
+  // A DEPLOY's lock time and its RBF sequences are covered the same way.
+  const deploy = buildDeployPsbt({ address: MOCK_WALLET.address, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos, tokenOutpoints: [], feeRateSatVb: 3, ticker: "NEWTKN" });
+  assert.equal(parse(deploy.psbtHex).lockTime, PROTOCOL_LOCKTIME);
+  assert.equal(parse(deploy.psbtHex).getInput(0).sequence, RBF_SEQUENCE);
+  assert.equal(signedTxMismatch(deploy.psbtHex, SIGN_ALL(deploy.psbtHex)), null);
+  assert.match(String(signedTxMismatch(deploy.psbtHex, SIGN_ALL(rewritten(deploy.psbtHex, { lockTime: 0 })))), /lock time changed/, "a DEPLOY whose lock time was dropped");
+  assert.match(String(signedTxMismatch(deploy.psbtHex, SIGN_ALL(rewritten(deploy.psbtHex, { input0Sequence: 0xffffffff })))), /input 0's sequence changed/, "a DEPLOY that no longer signals RBF on one input");
   assert.match(String(signedTxMismatch(mine.psbtHex, "00")), /not a readable PSBT/);
   console.log("signed check: version, lock time, every input's sequence and every output are compared; a listing passes");
 }
@@ -124,6 +126,7 @@ globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null)
 let signGate = null; // a promise the next signature waits on
 let signCalls = 0;
 let tamper = null;
+let forceSighash = null; // { index, type }: the wallet signs input `index` with sighash `type` whatever it was asked
 const pushed = [];
 const provider = {
   async requestAccounts() {
@@ -141,7 +144,16 @@ const provider = {
   async signPsbt(psbtHex, opts) {
     signCalls++;
     if (signGate) await signGate;
-    return mockSignPsbt(tamper ? rewritten(psbtHex, tamper) : psbtHex, opts);
+    let given = tamper ? rewritten(psbtHex, tamper) : psbtHex;
+    let o = opts;
+    if (forceSighash) {
+      const { index, type } = forceSighash;
+      const tx = parse(given);
+      tx.updateInput(index, { sighashType: type }, true);
+      given = hex.encode(tx.toPSBT());
+      o = { ...opts, toSignInputs: opts.toSignInputs.map((r) => (r.index === index ? { ...r, sighashTypes: [type] } : r)) };
+    }
+    return mockSignPsbt(given, o);
   },
   async pushPsbt(signed) {
     const txid = rawTxSummary(extractRawTxHex(signed)).txid;
@@ -210,7 +222,6 @@ globalThis.window = { unisat: provider };
   await assert.rejects(wallet.signPsbt(c3.psbtHex, { inputIndexes: c3.inputIndexes, address: ADDR, replaces: [txidB] }), (e) => e.code === "busy", "the earlier version's record still guards the input");
   const versions = [txidB, txidA];
   assert.deepEqual(mineVersions({ txid: txidB, replaces: [txidA] }), versions);
-  assert.deepEqual(stepVersions({ txid: txidB, replaces: [txidA] }), versions);
   assert.deepEqual(sendVersions({ txid: txidB, replaces: [txidA] }), versions);
   const signedC3 = await wallet.signPsbt(c3.psbtHex, { inputIndexes: c3.inputIndexes, address: ADDR, replaces: versions });
   assert.ok(signedC3.length > 0, "a Speed up naming every version it replaces may sign");
@@ -317,8 +328,8 @@ globalThis.window = { unisat: provider };
     for (const [label, utxos, rate] of wallets) {
       const opts = { ...base, utxos, feeRateSatVb: rate, minInputSats: 0 }; // an asset-safe list: smallest-first
       checkBuilt(`${type} MINE ${label}`, buildMinePsbt({ ...opts, ticker: "LUCKY" }), rate);
-      checkBuilt(`${type} COMMIT ${label}`, buildCommitPsbt({ ...opts, ticker: "NEWTKN", salt: "0123456789abcdef0123456789abcdef" }), rate);
-      checkBuilt(`${type} REVEAL ${label}`, buildRevealPsbt({ ...opts, ticker: "NEWTKN", salt: "0123456789abcdef0123456789abcdef", carrier: { txid: TX("c"), vout: 0, sats: 546 } }), rate);
+      checkBuilt(`${type} DEPLOY ${label}`, buildDeployPsbt({ ...opts, ticker: "NEWTKN" }), rate);
+      checkBuilt(`${type} DEPLOY largest-first ${label}`, buildDeployPsbt({ ...opts, ticker: "NEWTKN", selectionOrder: "largest" }), rate);
       checkBuilt(`${type} SEND ${label}`, buildSendPsbt({ ...opts, tokenUtxos: [{ txid: TX("d"), vout: 0, sats: 546 }], ticker: "LUCKY", amount: 5, toAddress: k.address }), rate);
     }
     // Next to a large output, outputs worth less than twice their own input fee are not consolidated at a high rate.
@@ -336,7 +347,7 @@ globalThis.window = { unisat: provider };
     const tx = parse(listing.psbtHex);
     tx.signIdx(seller.priv, 0, [btc.SigHash.SINGLE_ANYONECANPAY]);
     const order = { id: `${TX("e")}:0`, ticker: "LUCKY", amount: 100, price_sats: 5_000, unit_price: 50, seller: seller.address, carrier_sats: 546, status: "open" };
-    const fill = buildFillPsbt({ listingPsbtHex: hex.encode(tx.toPSBT()), order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: small(60, 1_800, "c1"), tokenOutpoints: [], feeRateSatVb: 20 });
+    const fill = buildFillPsbt({ listingPsbtHex: hex.encode(tx.toPSBT()), order, sendAmount: 100, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: small(60, 1_800, "c1"), tokenOutpoints: [], feeRateSatVb: 20 });
     assert.ok(fill.inputs.length > 3, `several small inputs (${fill.inputs.length})`);
     assert.equal(psbtFeeSats(fill.psbtHex), fill.feeSats, "the fill pays the fee it quotes");
     const signed = mockSignPsbtAs(buyer, fill.psbtHex, fill.inputIndexes);
@@ -400,36 +411,58 @@ function mockSignPsbtAs(key, psbtHex, indexes) {
   for (const s of [sync({ rebuilding: true }), sync({ stalled: true, noPeers: true }), sync({ stalled: true }), sync({ networkLag: 3 }), sync({})]) {
     assert.match(syncWarningText(s), /Creating, mining, sending, listing and buying (are paused|resume)/);
   }
-  // A deploy step keeps its signed copy (Send again) only for the version it was signed as.
-  const raw = "02000000000100";
-  const step = normalizeStep({ txid: TX("a"), raw, signedAt: 1, sentAt: null });
-  assert.equal(step.raw, raw);
-  assert.equal(canResendStep(step), true, "signed, no relay confirmed it: it may be sent again");
-  assert.equal(canResendStep({ ...step, sentAt: 2 }), false, "sent and not unseen: nothing to resend");
-  assert.equal(canResendStep({ ...step, sentAt: 2, unseenAt: 3 }), true, "lost sight of: it may be sent again");
-  assert.equal(canResendStep({ ...step, height: 969_700 }), false);
-  assert.equal(canResendStep(step, () => TX("b")), false, "a copy that is not this txid is never sent");
-  assert.equal(canResendStep(step, () => TX("a")), true);
-  assert.equal(switchStepTo({ ...step, replaces: [TX("c")] }, TX("c")).raw, null, "switched to another version: its copy is not this one");
-  assert.equal(normalizeStep({ txid: TX("a"), raw: "xyz" }).raw, null);
-  // A Speed up of a step: sent, it follows the faster copy; its broadcast
-  // unknown, the step follows it UNSENT (checked, and Send again relays the
-  // same copy) and every earlier version stays known — one may confirm instead.
-  const sentStep = normalizeStep({ txid: TX("a"), raw, signedAt: 1, sentAt: 2, sentTip: 969_700, feeSats: 300 });
-  const fast = { txid: TX("d"), psbt: "70736274ff", raw: "02000000000200", feeSats: 900, feeRateSatVb: 9, vsize: 100, tip: 969_701, now: 50 };
-  const sped = spedUpStep(sentStep, { ...fast, sent: true });
-  assert.deepEqual([sped.txid, sped.sentAt, sped.sentTip, sped.signedAt, sped.feeSats], [TX("d"), 50, 969_701, 1, 900]);
-  assert.deepEqual(sped.replaces, [TX("a")]);
-  const unsure = spedUpStep(sentStep, { ...fast, sent: false });
-  assert.deepEqual([unsure.txid, unsure.sentAt, unsure.sentTip, unsure.signedAt, unsure.unseenAt, unsure.height], [TX("d"), null, null, 50, null, null], "signed now, not known to be sent");
-  assert.deepEqual(unsure.replaces, [TX("a")], "the earlier version is still asked about");
-  assert.deepEqual(stepVersions(unsure), [TX("d"), TX("a")]);
-  assert.equal(canResendStep(unsure, () => TX("d")), true, "Send again relays the faster copy");
-  assert.equal(deployStage({ commit: unsure }), "commit-unsent", "the page checks it like any signed step");
-  const again = spedUpStep(unsure, { ...fast, txid: TX("e"), sent: false });
-  assert.deepEqual(again.replaces, [TX("a"), TX("d")], "versions accumulate, oldest first");
-  assert.deepEqual(stepVersions(normalizeStep(again)), [TX("e"), TX("d"), TX("a")], "and survive the stored record");
-  console.log("texts: a fill without a known block, tip 0, the paused-actions banner, a deploy step's signed copy and its Speed up");
+  console.log("texts: a fill without a known block, tip 0, the paused-actions banner");
+}
+
+// ---- 8. the signature TYPE the transaction needs --------------------------------------------------
+{
+  const ADDR = MOCK_WALLET.address;
+  const refused = (e) => e.code === "sighash-mismatch" && /input \d+ was signed with type 0x[0-9a-f]{2}, not the type this transaction needs, so nothing was sent/.test(e.message);
+  const before = pushed.length;
+  // The app's own transactions: a wallet that signs one asked input 0x83 is refused, and nothing is held or sent.
+  const dep = buildDeployPsbt({ address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: [{ txid: T(30), vout: 0, sats: 200_000 }, { txid: T(31), vout: 0, sats: 150_000 }], tokenOutpoints: [], feeRateSatVb: 3, ticker: "NEWTKN", selectionOrder: "largest" });
+  const send = buildSendPsbt({ address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: [{ txid: T(32), vout: 0, sats: 200_000 }], tokenOutpoints: [], tokenUtxos: [{ txid: T(33), vout: 0, sats: 546 }], feeRateSatVb: 3, ticker: "LUCKY", amount: 5, toAddress: ADDR });
+  for (const [label, built, index] of [["DEPLOY", dep, 0], ["SEND", send, 0], ["SEND (fee input)", send, 1]]) {
+    forceSighash = { index, type: LISTING_SIGHASH };
+    await assert.rejects(wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: ADDR }), refused, `${label}: input ${index} signed 0x83`);
+    forceSighash = null;
+    for (const k of psbtInputKeys(built.psbtHex)) assert.equal(wallet.inFlightOutpoints().has(k), false, `${label}: nothing held after the refusal`);
+    const ok = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address: ADDR });
+    assert.ok(ok.length > 0, `${label}: the wallet's own default signatures pass (64-byte P2TR = 0x00)`);
+    wallet.releaseInputs(built.psbtHex);
+  }
+  forceSighash = { index: 0, type: 0x81 };
+  await assert.rejects(wallet.signPsbt(dep.psbtHex, { inputIndexes: dep.inputIndexes, address: ADDR }), (e) => e.code === "sighash-mismatch" && /type 0x81/.test(e.message), "ANYONECANPAY|ALL on a DEPLOY");
+  forceSighash = { index: 0, type: 0x01 };
+  assert.ok((await wallet.signPsbt(dep.psbtHex, { inputIndexes: dep.inputIndexes, address: ADDR })).length > 0, "SIGHASH_ALL (0x01) signs the whole tx too");
+  wallet.releaseInputs(dep.psbtHex);
+  forceSighash = null;
+  // A fill: the buyer's own inputs are checked (the seller's 0x83 input 0 is not the wallet's to sign).
+  {
+    const seller = keyFor("sighash-seller", "tr");
+    const listing = buildListingPsbt({ address: seller.address, pubkeyHex: seller.pubkeyHex, tokenUtxo: { txid: T(34), vout: 0, sats: 546 }, priceSats: 5_000, amount: 100 });
+    const ltx = parse(listing.psbtHex);
+    ltx.signIdx(seller.priv, 0, [btc.SigHash.SINGLE_ANYONECANPAY]);
+    const order = { id: `${T(34)}:0`, ticker: "LUCKY", amount: 100, price_sats: 5_000, unit_price: 50, seller: seller.address, carrier_sats: 546, status: "open" };
+    const fill = buildFillPsbt({ listingPsbtHex: hex.encode(ltx.toPSBT()), order, sendAmount: 100, address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: [{ txid: T(35), vout: 0, sats: 200_000 }], tokenOutpoints: [], feeRateSatVb: 3 });
+    forceSighash = { index: fill.inputIndexes[0], type: LISTING_SIGHASH };
+    await assert.rejects(wallet.signPsbt(fill.psbtHex, { inputIndexes: fill.inputIndexes, address: ADDR }), refused, "a fill whose buyer input came back signed 0x83");
+    forceSighash = null;
+    const signedFill = await wallet.signPsbt(fill.psbtHex, { inputIndexes: fill.inputIndexes, address: ADDR });
+    assert.ok(finalizeFill(signedFill, { op: "SEND", ticker: "LUCKY", amount: 100 }).length > 0, "the same fill signed as asked goes through");
+    wallet.releaseInputs(fill.psbtHex);
+  }
+  // A listing is signed exactly 0x83: 0x01 is refused, the listing's own signature passes.
+  {
+    const listing = buildListingPsbt({ address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, tokenUtxo: { txid: T(36), vout: 0, sats: 546 }, priceSats: 10_000, amount: 100 });
+    forceSighash = { index: 0, type: 0x01 };
+    await assert.rejects(wallet.signPsbt(listing.psbtHex, { inputIndexes: [0], address: ADDR, autoFinalized: false, sighashTypes: [LISTING_SIGHASH] }), (e) => e.code === "sighash-mismatch" && /input 0 was signed with type 0x01/.test(e.message), "a listing signed 0x01");
+    forceSighash = null;
+    const signed = await wallet.signPsbt(listing.psbtHex, { inputIndexes: [0], address: ADDR, autoFinalized: false, sighashTypes: [LISTING_SIGHASH] });
+    assert.ok(signed.length > 0, "the listing's own 0x83 signature passes");
+  }
+  assert.equal(pushed.length, before, "nothing was broadcast");
+  console.log("sighash: a DEPLOY, SEND or fill input signed 0x83 / 0x81 is refused (sighash-mismatch) and nothing is sent; a listing must be exactly 0x83");
 }
 
 console.log("walletflows: all checks passed");

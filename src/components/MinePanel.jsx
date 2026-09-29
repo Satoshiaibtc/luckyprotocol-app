@@ -481,14 +481,17 @@ function PendingMines({ pendings, ticker, onDismiss, onClearFinished, speedUp, s
 /**
  * Speed up for one MINE still waiting for a block: the same transaction
  * with a higher fee from its change (SpeedUpSend's controls). A MINE
- * without a change output, or one whose PSBT this browser no longer holds,
- * says so instead.
+ * without a change output, one whose OP_RETURN is not a LUCKY-20 MINE, or
+ * one whose PSBT this browser no longer holds, says so instead.
  */
 function MineSpeedUp({ item, speedUp, speedUpQuote, fees }) {
   const state = mineSpeedUpState(item);
   if (item.phase !== "pending") return null;
   if (state === "no-change") {
     return <div className="mine-pending-extra muted">No change output to take a higher fee from — it confirms when a block includes it.</div>;
+  }
+  if (state === "not-protocol") {
+    return <div className="mine-pending-extra muted">This transaction&apos;s OP_RETURN is not a LUCKY-20 payload, so it credits nothing: its fees are spent.</div>;
   }
   if (state !== "yes") return null;
   const send = {

@@ -152,7 +152,7 @@ export default function Board({ notice }) {
             <>
               <h2>No tokens yet</h2>
               <p className="muted">
-                LUCKY-20 starts at block #{fmtInt(ACTIVATION_HEIGHT)}. Reserving a ticker opens one block earlier, at #{fmtInt(UNLOCK_HEIGHT)} — {countdownText(act.blocksLeft)}. Creating a ticker takes two steps (reserve, then publish) and costs {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats plus two network fees.
+                LUCKY-20 starts at block #{fmtInt(ACTIVATION_HEIGHT)}. Creating a ticker opens one block earlier, at #{fmtInt(UNLOCK_HEIGHT)} — {countdownText(act.blocksLeft)}. It takes one DEPLOY transaction and costs {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats plus the network fee.
               </p>
               <a className="btn" href="#/create">
                 See the Create page
@@ -161,7 +161,7 @@ export default function Board({ notice }) {
           ) : (
             <>
               <h2>No tokens yet</h2>
-              <p className="muted">Be the first: creating a ticker takes two steps (reserve, then publish) and costs {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats plus two network fees.</p>
+              <p className="muted">Be the first: creating a ticker takes one DEPLOY transaction and costs {fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats plus the network fee.</p>
               <a className="btn btn-primary" href="#/create">
                 Create the first one
               </a>
@@ -199,10 +199,10 @@ export default function Board({ notice }) {
             </>
           ) : TICKER_RE.test(needle) ? (
             preActivation ? (
-              <p className="muted">{needle} is not deployed. Reserving a ticker opens at block #{fmtInt(UNLOCK_HEIGHT)}, {countdownText(act.blocksLeft)}.</p>
+              <p className="muted">{needle} is not deployed. Creating a ticker opens at block #{fmtInt(UNLOCK_HEIGHT)}, {countdownText(act.blocksLeft)}.</p>
             ) : (
               <>
-                <p className="muted">{needle} is not deployed yet — the first valid publish of a reserved name claims it.</p>
+                <p className="muted">{needle} is not deployed yet — the first DEPLOY to confirm claims the name.</p>
                 <a className="btn btn-primary" href={`#/create?ticker=${encodeURIComponent(needle)}`}>
                   Create {needle}
                 </a>

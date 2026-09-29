@@ -1,0 +1,562 @@
+{
+  "note": "LUCKY-20 payload vectors (PROTOCOL.md section 2). Every conforming parser asserts every row: hex is the data pushed by an OP_RETURN output, expect is the parse result, or null when the bytes are not a LUCKY-20 payload. text repeats hex as ASCII when it is printable. amt in expect is the parsed number. Every accepted row also round-trips: building the payload from expect gives exactly hex.",
+  "vectors": [
+    {
+      "why": "deploy",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"deploy\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226465706c6f79222c227469636b223a224c55434b59227d",
+      "expect": {
+        "op": "deploy",
+        "tick": "LUCKY"
+      }
+    },
+    {
+      "why": "deploy, one-character ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"deploy\",\"tick\":\"A\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226465706c6f79222c227469636b223a2241227d",
+      "expect": {
+        "op": "deploy",
+        "tick": "A"
+      }
+    },
+    {
+      "why": "deploy, eight-character ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"deploy\",\"tick\":\"ZZZZ9999\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226465706c6f79222c227469636b223a225a5a5a5a39393939227d",
+      "expect": {
+        "op": "deploy",
+        "tick": "ZZZZ9999"
+      }
+    },
+    {
+      "why": "deploy, digits only",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"deploy\",\"tick\":\"12345678\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226465706c6f79222c227469636b223a223132333435363738227d",
+      "expect": {
+        "op": "deploy",
+        "tick": "12345678"
+      }
+    },
+    {
+      "why": "mine",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": {
+        "op": "mine",
+        "tick": "LUCKY"
+      }
+    },
+    {
+      "why": "mine, short ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"B2\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224232227d",
+      "expect": {
+        "op": "mine",
+        "tick": "B2"
+      }
+    },
+    {
+      "why": "send",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"1200\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a2231323030227d",
+      "expect": {
+        "op": "send",
+        "tick": "LUCKY",
+        "amt": 1200
+      }
+    },
+    {
+      "why": "send, smallest amount",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"1\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a2231227d",
+      "expect": {
+        "op": "send",
+        "tick": "LUCKY",
+        "amt": 1
+      }
+    },
+    {
+      "why": "send, a zero after the first digit",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"10\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a223130227d",
+      "expect": {
+        "op": "send",
+        "tick": "LUCKY",
+        "amt": 10
+      }
+    },
+    {
+      "why": "send, largest amount and longest ticker: the longest payload, 63 bytes",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"ABCDEFGH\",\"amt\":\"21000000\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224142434445464748222c22616d74223a223231303030303030227d",
+      "expect": {
+        "op": "send",
+        "tick": "ABCDEFGH",
+        "amt": 21000000
+      }
+    },
+    {
+      "why": "a space after a colon",
+      "text": "{\"p\": \"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a20226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "a space after a comma",
+      "text": "{\"p\":\"lucky-20\", \"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c20226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "a space after the opening brace",
+      "text": "{ \"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b202270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "a trailing space",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"} ",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d20",
+      "expect": null
+    },
+    {
+      "why": "a leading space",
+      "text": " {\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "207b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "a trailing newline",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d0a",
+      "expect": null
+    },
+    {
+      "why": "a trailing carriage return and newline",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d0d0a",
+      "expect": null
+    },
+    {
+      "why": "a tab",
+      "hex": "7b2270223a226c75636b792d3230222c09226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "pretty-printed",
+      "hex": "7b0a20202270223a20226c75636b792d3230222c0a2020226f70223a20226d696e65222c0a2020227469636b223a20224c55434b59220a7d",
+      "expect": null
+    },
+    {
+      "why": "op before p",
+      "text": "{\"op\":\"mine\",\"p\":\"lucky-20\",\"tick\":\"LUCKY\"}",
+      "hex": "7b226f70223a226d696e65222c2270223a226c75636b792d3230222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "tick before op",
+      "text": "{\"p\":\"lucky-20\",\"tick\":\"LUCKY\",\"op\":\"mine\"}",
+      "hex": "7b2270223a226c75636b792d3230222c227469636b223a224c55434b59222c226f70223a226d696e65227d",
+      "expect": null
+    },
+    {
+      "why": "amt before tick",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"amt\":\"1200\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c22616d74223a2231323030222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "p missing",
+      "text": "{\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "op missing",
+      "text": "{\"p\":\"lucky-20\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "tick missing",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65227d",
+      "expect": null
+    },
+    {
+      "why": "send without amt",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "mine with an amt",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\",\"amt\":\"1\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59222c22616d74223a2231227d",
+      "expect": null
+    },
+    {
+      "why": "deploy with an amt",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"deploy\",\"tick\":\"LUCKY\",\"amt\":\"1\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226465706c6f79222c227469636b223a224c55434b59222c22616d74223a2231227d",
+      "expect": null
+    },
+    {
+      "why": "deploy with a max key",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"deploy\",\"tick\":\"LUCKY\",\"max\":\"21000000\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226465706c6f79222c227469636b223a224c55434b59222c226d6178223a223231303030303030227d",
+      "expect": null
+    },
+    {
+      "why": "deploy with a salt key",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"deploy\",\"tick\":\"LUCKY\",\"salt\":\"000102030405060708090a0b0c0d0e0f\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226465706c6f79222c227469636b223a224c55434b59222c2273616c74223a223030303130323033303430353036303730383039306130623063306430653066227d",
+      "expect": null
+    },
+    {
+      "why": "send with a to key",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"1200\",\"to\":\"1\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a2231323030222c22746f223a2231227d",
+      "expect": null
+    },
+    {
+      "why": "tick twice",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "p twice",
+      "text": "{\"p\":\"lucky-20\",\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "amt twice",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"1\",\"amt\":\"1\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a2231222c22616d74223a2231227d",
+      "expect": null
+    },
+    {
+      "why": "amt as a number",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":1200}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a313230307d",
+      "expect": null
+    },
+    {
+      "why": "tick as a number",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":1234}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a313233347d",
+      "expect": null
+    },
+    {
+      "why": "amt as a boolean",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":true}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a747275657d",
+      "expect": null
+    },
+    {
+      "why": "tick as null",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":null}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a6e756c6c7d",
+      "expect": null
+    },
+    {
+      "why": "an array instead of an object",
+      "text": "[\"lucky-20\",\"mine\",\"LUCKY\"]",
+      "hex": "5b226c75636b792d3230222c226d696e65222c224c55434b59225d",
+      "expect": null
+    },
+    {
+      "why": "an escaped ticker letter",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUC\\u004bY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55435c753030346259227d",
+      "expect": null
+    },
+    {
+      "why": "an escaped letter in op",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"min\\u0065\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e5c7530303635222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "an escaped hyphen in p",
+      "text": "{\"p\":\"lucky\\u002d20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b795c75303032643230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "an escaped slash in p",
+      "text": "{\"p\":\"lucky-20\\/\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d32305c2f222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "an escaped quote inside the ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUC\\\"KY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55435c224b59227d",
+      "expect": null
+    },
+    {
+      "why": "lower-case ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"lucky\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a226c75636b79227d",
+      "expect": null
+    },
+    {
+      "why": "mixed-case ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"Lucky\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c75636b79227d",
+      "expect": null
+    },
+    {
+      "why": "upper-case p value",
+      "text": "{\"p\":\"LUCKY-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a224c55434b592d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "upper-case op",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"MINE\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a224d494e45222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "upper-case key",
+      "text": "{\"P\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2250223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "empty ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a22227d",
+      "expect": null
+    },
+    {
+      "why": "nine-character ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"ABCDEFGHI\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a22414243444546474849227d",
+      "expect": null
+    },
+    {
+      "why": "ticker with a hyphen",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUC-KY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55432d4b59227d",
+      "expect": null
+    },
+    {
+      "why": "ticker with a space",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUC KY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c5543204b59227d",
+      "expect": null
+    },
+    {
+      "why": "ticker with a non-ASCII letter (UTF-8)",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434bc39d227d",
+      "expect": null
+    },
+    {
+      "why": "ticker with a non-ASCII digit (UTF-8)",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59d9a1227d",
+      "expect": null
+    },
+    {
+      "why": "an unescaped quote inside the ticker",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LU\"CKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c5522434b59227d",
+      "expect": null
+    },
+    {
+      "why": "amt 0",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"0\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a2230227d",
+      "expect": null
+    },
+    {
+      "why": "amt with a leading zero",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"01200\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a223031323030227d",
+      "expect": null
+    },
+    {
+      "why": "amt above 21,000,000",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"21000001\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a223231303030303031227d",
+      "expect": null
+    },
+    {
+      "why": "amt of nine digits",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"100000000\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a22313030303030303030227d",
+      "expect": null
+    },
+    {
+      "why": "negative amt",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"-1\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a222d31227d",
+      "expect": null
+    },
+    {
+      "why": "amt with a plus sign",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"+1\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a222b31227d",
+      "expect": null
+    },
+    {
+      "why": "amt with a decimal point",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"1.0\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a22312e30227d",
+      "expect": null
+    },
+    {
+      "why": "amt with an exponent",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"1e3\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a22316533227d",
+      "expect": null
+    },
+    {
+      "why": "empty amt",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a22227d",
+      "expect": null
+    },
+    {
+      "why": "amt with a thousands separator",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"1,200\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a22312c323030227d",
+      "expect": null
+    },
+    {
+      "why": "amt with a leading space",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\" 1200\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a222031323030227d",
+      "expect": null
+    },
+    {
+      "why": "amt with a hex prefix",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"0x4b0\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a223078346230227d",
+      "expect": null
+    },
+    {
+      "why": "amt beyond the u64 range",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"send\",\"tick\":\"LUCKY\",\"amt\":\"18446744073709551616\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a223138343436373434303733373039353531363136227d",
+      "expect": null
+    },
+    {
+      "why": "amt with non-ASCII digits after the first (UTF-8)",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a2231d9a2d9a0d9a0227d",
+      "expect": null
+    },
+    {
+      "why": "amt in fullwidth digits (UTF-8)",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a2273656e64222c227469636b223a224c55434b59222c22616d74223a22efbc91efbc92efbc90efbc90227d",
+      "expect": null
+    },
+    {
+      "why": "bytes after the closing brace",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}x",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d78",
+      "expect": null
+    },
+    {
+      "why": "two payloads back to back",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "a trailing comma",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\",}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59222c7d",
+      "expect": null
+    },
+    {
+      "why": "no closing brace",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mine\",\"tick\":\"LUCKY\"",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b5922",
+      "expect": null
+    },
+    {
+      "why": "a NUL byte after the payload",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d00",
+      "expect": null
+    },
+    {
+      "why": "a UTF-8 byte order mark before the payload",
+      "hex": "efbbbf7b2270223a226c75636b792d3230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "single quotes",
+      "text": "{'p':'lucky-20','op':'mine','tick':'LUCKY'}",
+      "hex": "7b2770273a276c75636b792d3230272c276f70273a276d696e65272c277469636b273a274c55434b59277d",
+      "expect": null
+    },
+    {
+      "why": "empty push",
+      "hex": "",
+      "expect": null
+    },
+    {
+      "why": "another p",
+      "text": "{\"p\":\"brc-20\",\"op\":\"mint\",\"tick\":\"LUCKY\",\"amt\":\"1000\"}",
+      "hex": "7b2270223a226272632d3230222c226f70223a226d696e74222c227469636b223a224c55434b59222c22616d74223a2231303030227d",
+      "expect": null
+    },
+    {
+      "why": "p without the hyphen",
+      "text": "{\"p\":\"lucky20\",\"op\":\"mine\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b793230222c226f70223a226d696e65222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "an unknown op",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"avatar\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a22617661746172222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "op transfer",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"transfer\",\"tick\":\"LUCKY\",\"amt\":\"1200\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a227472616e73666572222c227469636b223a224c55434b59222c22616d74223a2231323030227d",
+      "expect": null
+    },
+    {
+      "why": "op mint",
+      "text": "{\"p\":\"lucky-20\",\"op\":\"mint\",\"tick\":\"LUCKY\"}",
+      "hex": "7b2270223a226c75636b792d3230222c226f70223a226d696e74222c227469636b223a224c55434b59227d",
+      "expect": null
+    },
+    {
+      "why": "fields separated by |, deploy",
+      "text": "LUCKY-20|DEPLOY|LUCKY",
+      "hex": "4c55434b592d32307c4445504c4f597c4c55434b59",
+      "expect": null
+    },
+    {
+      "why": "fields separated by |, mine",
+      "text": "LUCKY-20|MINE|LUCKY",
+      "hex": "4c55434b592d32307c4d494e457c4c55434b59",
+      "expect": null
+    },
+    {
+      "why": "fields separated by |, send",
+      "text": "LUCKY-20|SEND|LUCKY|1200|0|3",
+      "hex": "4c55434b592d32307c53454e447c4c55434b597c313230307c307c33",
+      "expect": null
+    },
+    {
+      "why": "fields separated by |, commit",
+      "text": "LUCKY-20|COMMIT|1ac55b4c608ed7c39eb3dbcecaf04c41222d5b3c37b6343477c9a91d4a6f33fc",
+      "hex": "4c55434b592d32307c434f4d4d49547c31616335356234633630386564376333396562336462636563616630346334313232326435623363333762363334333437376339613931643461366633336663",
+      "expect": null
+    },
+    {
+      "why": "fields separated by |, deploy with a fourth field",
+      "text": "LUCKY-20|DEPLOY|LUCKY|000102030405060708090a0b0c0d0e0f",
+      "hex": "4c55434b592d32307c4445504c4f597c4c55434b597c3030303130323033303430353036303730383039306130623063306430653066",
+      "expect": null
+    }
+  ]
+}

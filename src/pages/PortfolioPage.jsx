@@ -18,6 +18,7 @@ import { txRecords } from "../lib/txrecords.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
 import { WITHDRAW_CONFIRMED_TEXT, WITHDRAW_FEE_NOTE, WITHDRAW_PENDING_TEXT, listingRefusalText } from "../lib/market.js";
 import { isOffBook } from "../lib/listingRules.js";
+import { DUST_SATS } from "../lib/payloads.js";
 import { fmtInt, fmtMintedPct, fmtPct, fmtUnit, shortAddr, shortTxid, addrUrl, walletBalanceText } from "../lib/format.js";
 
 const POLL_MS = 15_000;
@@ -34,6 +35,17 @@ export default function PortfolioPage() {
   // Balances panel offers to split them (a SEND to yourself).
   const carriers = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
   const multiCarriers = useMemo(() => (carriers.data || []).filter((u) => Object.keys(u.balances || {}).length > 1), [carriers.data]);
+  // Token outputs worth more than 546 sats — typically a listing's payment
+  // output after a spend of the listing without the protocol fee (§4 rule 6):
+  // a wallet that spends one as plain BTC moves its tokens along with it.
+  // Each is offered a send to yourself onto a 546-sat carrier.
+  const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
+  const fatCarriers = useMemo(() => {
+    const sats = new Map((btcUtxos.data || []).map((u) => [`${u.txid}:${u.vout}`, u.sats]));
+    return (carriers.data || [])
+      .map((u) => ({ ...u, sats: sats.get(`${u.txid}:${u.vout}`) ?? null }))
+      .filter((u) => Number.isInteger(u.sats) && u.sats > DUST_SATS && Object.keys(u.balances || {}).length > 0);
+  }, [carriers.data, btcUtxos.data]);
   // /mines/:addr is paged by the indexer (50 / page, max 200, indexer API): the
   // table pages with Load more, and the mix reads the newest 200 and says so
   // — never a silent "50 mines".
@@ -201,6 +213,40 @@ export default function PortfolioPage() {
               <p className="fineprint">
                 A carrier with more than one ticker cannot be listed for sale. <strong>Split off</strong> sends that ticker to yourself: it lands alone on a new 546-sat carrier, and the other tickers stay
                 together on your residual carrier.
+              </p>
+            </div>
+          )}
+          {fatCarriers.length > 0 && (
+            <div className="bal-multi">
+              <span className="label">Tokens on a payment output · {fmtInt(fatCarriers.length)}</span>
+              <ul className="bal-multi-list">
+                {fatCarriers.map((u) => {
+                  const utxo = `${u.txid}:${u.vout}`;
+                  return (
+                    <li key={utxo}>
+                      <span className="mono muted" title={utxo}>
+                        {shortTxid(u.txid, 6, 4)}:{u.vout}
+                      </span>
+                      <span className="bal-multi-amounts">
+                        {fmtInt(u.sats)} sats ·{" "}
+                        {Object.entries(u.balances)
+                          .map(([tk, a]) => `${fmtInt(a)} ${tk}`)
+                          .join(" + ")}
+                      </span>
+                      <span className="bal-multi-actions">
+                        {Object.keys(u.balances).map((tk) => (
+                          <a key={tk} className="btn btn-ghost btn-sm" href={sendHref(tk, { utxo, toSelf: true })}>
+                            Move {tk}
+                          </a>
+                        ))}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+              <p className="fineprint">
+                These outputs hold more than 546 sats of BTC. A wallet that spends one as plain BTC moves its tokens along with it. Move them to a 546-sat carrier with a send to
+                yourself; the BTC comes back as change.
               </p>
             </div>
           )}

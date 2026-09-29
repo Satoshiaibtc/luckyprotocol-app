@@ -105,7 +105,7 @@ export function TradesTable({ q, self, usd = null, showTicker = false, empty = "
               {usd ? <small className="usd">{fmtUsd(t.price_sats, usd)}</small> : null}
             </span>
             <span>
-              {/* null when vout[TO_OUT] has no address form (§7.5) */}
+              {/* null when vout1 has no address form (§7.5) */}
               {t.buyer ? <AddrLink address={t.buyer} self={self} head={4} tail={4} /> : <span className="muted" title="the token output pays a script without an address form">—</span>}
             </span>
             <span className="right">

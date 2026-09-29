@@ -152,6 +152,23 @@ globalThis.fetch = async (url) => {
 {
   const h = await indexer.health();
   assert.deepEqual([typeof h.last_poll_at, h.node_peers, typeof h.tip_time, h.rebuilding, h.final_depth, h.persist_ok, h.stalled], ["number", 8, "number", false, 6, true, false], "/health: last_poll_at, node_peers, tip_time, rebuilding, final_depth, persist_ok");
+  // The raw /health keeps `rebuilding` always true (a build that reads that
+  // key pauses every write); the rebuild flag is `state_rebuilding`, which
+  // the reader returns as `rebuilding`.
+  const rawHealth = await mockGet("/health");
+  assert.deepEqual([rawHealth.rebuilding, rawHealth.state_rebuilding], [true, false], "the mock's raw /health: rebuilding true, state_rebuilding false");
+  globalThis.sessionStorage = { getItem: (k) => (k === "lp.mock.health" ? '{"rebuilding":true}' : null), setItem() {}, removeItem() {} };
+  try {
+    assert.deepEqual([(await mockGet("/health")).rebuilding, (await mockGet("/health")).state_rebuilding], [true, true], "the lp.mock.health knob's `rebuilding` sets state_rebuilding");
+    assert.equal((await indexer.health()).rebuilding, true, "…which the reader returns as rebuilding");
+  } finally {
+    delete globalThis.sessionStorage;
+  }
+  await assert.rejects(mockGet(`/commits/${"ab".repeat(32)}`), (e) => e.status === 404, "the mock serves no /commits route");
+  if (TABLE) {
+    assert.ok(specKeys("/", "`GET /` (alias `GET /health`)").includes("state_rebuilding"), "the route table's /health row names state_rebuilding");
+    assert.ok(!TABLE.split(/\r?\n/).some((l) => l.startsWith("| `GET /commits")), "the route table has no /commits row");
+  }
   assert.equal((await indexer.fees()).ok, true, "/fees: ok");
   const toks = (await indexer.tokens({ limit: 200 })).items;
   const blok = toks.find((t) => t.ticker === "BLOK");

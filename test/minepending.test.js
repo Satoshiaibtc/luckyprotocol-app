@@ -15,6 +15,7 @@ import {
   isFinished,
   mineButtonLabel,
   mineFocus,
+  mineSpeedUpState,
   newPendingMine,
   pendingMineRow,
   resumeMinePendings,
@@ -25,6 +26,10 @@ import { resumeMineState } from "../src/hooks/useMine.js";
 import { seedWaitNote } from "../src/lib/retry.js";
 import { blockFoundLine, blockLineKey, finalLine, mempoolLine, reconcileLine, reorgLine, settledYoursLine } from "../src/lib/minerlog.js";
 import { FINAL_DEPTH } from "../src/lib/finality.js";
+import * as btc from "@scure/btc-signer";
+import { hex } from "@scure/base";
+import { buildMinePsbt, makeOpReturnScript } from "../src/lib/psbt.js";
+import { MOCK_WALLET } from "../src/lib/mock.js";
 
 const TX = (c) => c.repeat(64);
 const GRACE = 180_000;
@@ -239,6 +244,22 @@ const GRACE = 180_000;
   const again = seedWaitNote({ elapsedMs: 5_000, rescan: true });
   assert.ok(/^Setting up this wallet again \(after a chain reorganization or an indexer restart\): /.test(again), again);
   console.log("minepending seed wait: a rescan after a reorganization is said as such");
+}
+
+// ---- a pending MINE whose OP_RETURN is not a LUCKY-20 payload credits nothing: no Speed up ----------------
+{
+  const built = buildMinePsbt({ address: MOCK_WALLET.address, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: [{ txid: TX("7"), vout: 0, sats: 90_000 }], tokenOutpoints: [], feeRateSatVb: 2, ticker: "LUCKY" });
+  const item = newPendingMine({ txid: TX("a"), ticker: "LUCKY", broadcastAt: 1_000, psbt: built.psbtHex, changeVout: built.changeVout });
+  assert.equal(mineSpeedUpState(item), "yes", "a JSON MINE with change can be sped up");
+  // The same transaction carrying a `|`-separated push instead: not a payload.
+  const tx = btc.Transaction.fromPSBT(hex.decode(built.psbtHex), { allowUnknownOutputs: true });
+  tx.updateOutput(2, { script: makeOpReturnScript(new TextEncoder().encode("LUCKY-20|MINE|LUCKY")) }, true);
+  const pipe = { ...item, psbt: hex.encode(tx.toPSBT()) };
+  assert.equal(mineSpeedUpState(pipe), "not-protocol", "a pipe payload: it credits nothing, a faster copy would only spend more");
+  assert.equal(mineSpeedUpState({ ...pipe, changeVout: null }), "not-protocol", "…whether or not it has change");
+  assert.equal(mineSpeedUpState({ ...item, psbt: "zz" }), "not-protocol", "an unreadable PSBT is no MINE to speed up");
+  assert.equal(mineSpeedUpState({ ...pipe, phase: "confirmed" }), "no", "only a pending item is ever sped up");
+  console.log("minepending speed up: a pending tx whose OP_RETURN is not a LUCKY-20 MINE is \"not-protocol\"");
 }
 
 console.log("minepending: all checks passed");

@@ -98,12 +98,12 @@ export default function TokenPage({ ticker, params, navigate }) {
           <h2>{ticker} is not deployed</h2>
           {preActivation ? (
             <p className="muted">
-              LUCKY-20 starts at block #{fmtInt(ACTIVATION_HEIGHT)}. Reserving a ticker opens one block earlier, at #{fmtInt(UNLOCK_HEIGHT)} — {countdownText(act.blocksLeft)}; the
+              LUCKY-20 starts at block #{fmtInt(ACTIVATION_HEIGHT)}. Creating a ticker opens one block earlier, at #{fmtInt(UNLOCK_HEIGHT)} — {countdownText(act.blocksLeft)}; the
               app&apos;s transactions cannot be confirmed before #{fmtInt(ACTIVATION_HEIGHT)}.
             </p>
           ) : (
             <p className="muted">
-              No DEPLOY for this ticker has been indexed{sync.indexed !== null ? ` up to block #${fmtInt(sync.indexed)}` : ""}. If you just published it, the indexer will list it once
+              No DEPLOY for this ticker has been indexed{sync.indexed !== null ? ` up to block #${fmtInt(sync.indexed)}` : ""}. If you just sent its DEPLOY, the indexer will list it once
               the transaction confirms — this page re-checks every 15 s.
             </p>
           )}

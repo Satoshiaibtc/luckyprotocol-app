@@ -25,7 +25,6 @@ import {
   OFF_BOOK_LISTING_TEXT,
   OWN_PENDING_SPEND_TEXT,
   UNKNOWN_VALUE_TEXT,
-  commitCarrierProblem,
   isOffBook,
   listingCapDecision,
   listingCapText,
@@ -266,30 +265,8 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
   const lowBlocked = !!low && lowAck !== lowKey;
   const unitProblem = unitInputProblem(unitStr);
 
-  // §7.4: the first output of a step-1 reservation (COMMIT) that can
-  // still be published is never listed — checked through /commits/:txid
-  // when the row is picked, and again right before the wallet signs.
   const selTxid = sel?.txid ?? null;
   const selVout = sel?.vout ?? null;
-  const [carrierCheck, setCarrierCheck] = useState({ key: null, problem: null, error: null });
-  useEffect(() => {
-    if (!selKey || selVout !== 0 || !selTxid) {
-      setCarrierCheck({ key: selKey, problem: null, error: null });
-      return undefined;
-    }
-    let alive = true;
-    setCarrierCheck({ key: selKey, problem: undefined, error: null });
-    indexer.commit(selTxid).then(
-      (c) => alive && setCarrierCheck({ key: selKey, problem: commitCarrierProblem(0, c, sync?.indexed ?? null), error: null }),
-      (e) => alive && setCarrierCheck({ key: selKey, problem: null, error: friendlyError(e) }),
-    );
-    return () => {
-      alive = false;
-    };
-    // the indexed height moves every block; the check follows the selection
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selKey, selTxid, selVout]);
-  const reservedCarrier = !!sel && carrierCheck.key === sel.key && !!carrierCheck.problem;
 
   // §7.2 step 3 on the seller's side: a buyer re-checks where the listed
   // UTXO's tokens came from (the creating tx's OP_RETURN) and refuses a
@@ -335,8 +312,8 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
   const capBlocked = !!capCheck && !capCheck.ok && !selFilling;
 
   const signListing = async () => {
-    if (!connected || !sel || sel.multi || selFilling || selPending || !priceOk || sel.sats === null || smallCarrier || !marketOpen || listPause || raiseBlocked || reservedCarrier || capBlocked || originBlocked || originPending || lowBlocked) return;
-    // "checking" = the reads made before the wallet is opened (cap, reserved carrier).
+    if (!connected || !sel || sel.multi || selFilling || selPending || !priceOk || sel.sats === null || smallCarrier || !marketOpen || listPause || raiseBlocked || capBlocked || originBlocked || originPending || lowBlocked) return;
+    // "checking" = the reads made before the wallet is opened (the per-seller cap).
     setListFlow({ phase: "checking" });
     try {
       // §7.4 per-seller cap, re-read at the click (another tab or device may
@@ -354,11 +331,6 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
         myOrders.refresh();
         setListFlow({ phase: "error", error: listingCapText(cap.cap, cap.used) });
         return;
-      }
-      if (sel.vout === 0) {
-        // Re-checked at the click — fails closed when the indexer cannot say.
-        const problem = commitCarrierProblem(0, await indexer.commit(sel.txid), sync?.indexed ?? null);
-        if (problem) throw new Error(problem);
       }
       const built = buildListingPsbt({ address, pubkeyHex, tokenUtxo: { txid: sel.txid, vout: sel.vout, sats: sel.sats }, priceSats, amount: sel.amount });
       // Never ask the wallet to sign a listing no fill could relay.
@@ -525,7 +497,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
           </div>
           <div className="notice">
             This UTXO carries more than one ticker, so it cannot be listed (§7.1). Moving the {fmtInt(sel.amount)} {ticker} to its own 546-sat carrier (a SEND to yourself) makes them
-            listable once it confirms; the other tickers move together to the residual carrier (vout3).
+            listable once it confirms; the other tickers move together to the residual carrier (vout2).
           </div>
           <div className="sheet-actions">
             <button
@@ -690,11 +662,6 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
               </div>
             </div>
           )}
-          {reservedCarrier && (
-            <div className="notice notice-raise" role="alert">
-              {carrierCheck.problem}
-            </div>
-          )}
           {selFilling && (
             <div className="notice">
               {ownPendingSpendOf(records, sel.key, sel.listing.pending_spend_txid)
@@ -723,8 +690,12 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
             </div>
           )}
 
+          <div className="fineprint">
+            A buyer&apos;s fill must include the {SEND_PROTOCOL_FEE_SATS}-sat protocol fee. A spend of your listing without it pays you the price and returns the tokens on that payment
+            output — move them to a carrier before spending that output from another wallet.
+          </div>
           <div className="sheet-actions">
-            <button className="btn btn-primary btn-lg" type="button" onClick={signListing} disabled={!marketOpen || !!listPause || !priceOk || selFilling || selPending || raiseBlocked || reservedCarrier || capBlocked || originBlocked || originPending || lowBlocked || sel.sats === null || smallCarrier || listBusy || !indexerOk || chainBusy}>
+            <button className="btn btn-primary btn-lg" type="button" onClick={signListing} disabled={!marketOpen || !!listPause || !priceOk || selFilling || selPending || raiseBlocked || capBlocked || originBlocked || originPending || lowBlocked || sel.sats === null || smallCarrier || listBusy || !indexerOk || chainBusy}>
               {listFlow.phase === "checking" ? "Checking…" : listFlow.phase === "signing" ? "Awaiting signature…" : listFlow.phase === "posting" ? "Publishing…" : originPending ? "Checking this UTXO…" : sel.listing ? "Sign new listing" : "Sign listing"}
             </button>
           </div>
@@ -764,7 +735,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
           <details className="split">
             <summary>Want to sell only part of it? Split first</summary>
             <p className="fineprint">
-              A listing always sells a whole UTXO. A split is a SEND to yourself: vout0 becomes a new 546-sat {ticker} carrier holding the amount you enter, vout3 (also 546 sats) keeps the rest; any BTC change comes back separately as vout4. After it confirms, list the new vout0.
+              A listing always sells a whole UTXO. A split is a SEND to yourself: vout1 becomes a new 546-sat {ticker} carrier holding the amount you enter, vout2 (also 546 sats) keeps the rest; any BTC change comes back separately as vout4. After it confirms, list the new vout1.
               {guarding && guarding.status !== "filling" ? " Splitting a listed UTXO spends it on-chain, which withdraws its listing." : ""}
             </p>
             {splitBlocked && <div className="notice">{splitBlocked}</div>}
@@ -808,11 +779,11 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
               signing: chain.kind === "cancel" ? `Awaiting signature — ${WITHDRAW_FEE_NOTE}` : undefined,
               building: chain.kind === "cancel" ? "Building the withdrawal — a SEND of the listed UTXO to yourself." : "Building the split — a SEND to yourself.",
               pending: chain.kind === "cancel" ? WITHDRAW_PENDING_TEXT : "Split broadcast. Pending confirmation — checking every 15 s.",
-              confirmed: chain.kind === "cancel" ? WITHDRAW_CONFIRMED_TEXT : "Split confirmed. The new vout0 is listable above.",
+              confirmed: chain.kind === "cancel" ? WITHDRAW_CONFIRMED_TEXT : "Split confirmed. The new vout1 is listable above.",
               final:
                 chain.kind === "cancel"
                   ? "Withdrawn on-chain and final. The old signed listing can no longer be filled. The tokens are on a new carrier (listed above once the indexer shows it) — select it to list at any price."
-                  : "Split confirmed and final. The new vout0 is listable above.",
+                  : "Split confirmed and final. The new vout1 is listable above.",
             }}
           />
           <SpeedUpSend send={sendFlow} fees={fees.data} note={chain.kind === "cancel" ? "Until it confirms, anyone who saved the listing can still fill it with a higher-fee transaction." : null} />

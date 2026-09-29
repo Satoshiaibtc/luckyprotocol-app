@@ -67,7 +67,7 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.equal(tradeRow({ ...t, self_trade: true }).self_trade, true);
   assert.equal(tradeRow({ ...t, self_trade: "yes" }).self_trade, false, "only an explicit true");
   assert.equal(tradeRow({ ...t, self_trade: 1 }).self_trade, false);
-  // §7.5: `buyer` is null when vout[TO_OUT] has no address form — the fill still counts.
+  // §7.5: `buyer` is null when vout1 has no address form — the fill still counts.
   const noBuyer = tradeRow({ ...t, buyer: null });
   assert.ok(noBuyer, "a fill with an address-less token slot is kept");
   assert.equal(noBuyer.buyer, null);

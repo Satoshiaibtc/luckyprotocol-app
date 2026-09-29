@@ -230,7 +230,7 @@ function keyFor(seed, type) {
     // nIn buyer inputs that each cover a share of the price (largest-first picks all of them)
     const each = Math.ceil(70_000 / nIn);
     const utxos = Array.from({ length: nIn }, (_, i) => ({ txid: TX(String((i % 9) + 1)), vout: i, sats: each, confirmed: true }));
-    const fill = buildFillPsbt({ listingPsbtHex: listingHex, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints: [], feeRateSatVb: rate });
+    const fill = buildFillPsbt({ listingPsbtHex: listingHex, order, sendAmount: order.amount, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints: [], feeRateSatVb: rate });
     assert.equal(fill.inputIndexes.length, nIn, "all buyer inputs used");
     const ft = btc.Transaction.fromPSBT(hex.decode(fill.psbtHex), { allowUnknownOutputs: true });
     for (const i of fill.inputIndexes) ft.signIdx(buyer.priv, i);
@@ -268,7 +268,7 @@ function keyFor(seed, type) {
   lt.updateInput(0, { partialSig: [[stranger.pub, own[1]], own] }, true); // a stranger's entry in front, ending 0x83 too
   const listingHex = hex.encode(lt.toPSBT());
   assert.equal(verifyListing({ psbtHex: listingHex, order }).ok, true, "the seller's signature is found by its key");
-  const fill = buildFillPsbt({ listingPsbtHex: listingHex, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: TX("9"), vout: 1, sats: 100_000, confirmed: true }], tokenOutpoints: [], feeRateSatVb: 2 });
+  const fill = buildFillPsbt({ listingPsbtHex: listingHex, order, sendAmount: order.amount, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: [{ txid: TX("9"), vout: 1, sats: 100_000, confirmed: true }], tokenOutpoints: [], feeRateSatVb: 2 });
   const ft = btc.Transaction.fromPSBT(hex.decode(fill.psbtHex), { allowUnknownOutputs: true });
   for (const i of fill.inputIndexes) ft.signIdx(buyer.priv, i); // signed, NOT finalized (a wallet that ignores autoFinalized)
   const raw = finalizeFill(hex.encode(ft.toPSBT()));
@@ -284,7 +284,7 @@ function keyFor(seed, type) {
   // An unsigned buyer input is still refused, in words that name no wallet brand.
   const unsigned = btc.Transaction.fromPSBT(hex.decode(fill.psbtHex), { allowUnknownOutputs: true });
   assert.throws(() => finalizeFill(hex.encode(unsigned.toPSBT())), (e) => /your wallet did not sign it/.test(e.message) && !/UniSat/.test(e.message));
-  // The same finishing step for every other broadcast (MINE, SEND, COMMIT, REVEAL).
+  // The same finishing step for every other broadcast (MINE, SEND, DEPLOY).
   const plain = new btc.Transaction();
   plain.addInput({ txid: TX("8"), index: 0, witnessUtxo: { script: buyer.script, amount: 10_000n }, tapInternalKey: pubSchnorr(buyer.priv) });
   plain.addOutputAddress(buyer.address, 9_000n, btc.NETWORK);

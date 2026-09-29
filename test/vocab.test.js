@@ -32,7 +32,9 @@ const SKIP = new Set();
 const DENY =
   /\b(bet|bets|betting|wager|wagers|win|wins|winner|winning|won|lose|loses|losing|loss|lost|jackpot|casino|slots?|dice|roulette|wheel|lottery|raffle|draws?|confetti|odds|payout|spin|spins|roll|rolls|prize|prizes|reward|rewards|chance|chances|gamble|gambling|lucky|luck)\b/i;
 
-const BRAND = /LUCKY\/\/PROTOCOL|LuckyProtocol|LUCKY-20|\bLUCKY\b/g;
+// The brand tokens, exact and case-sensitive. `lucky-20` is the brand's wire
+// id — the value of every payload's `p` key (spec §1 PROTOCOL_ID).
+const BRAND = /LUCKY\/\/PROTOCOL|LuckyProtocol|LUCKY-20|lucky-20|\bLUCKY\b/g;
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -60,6 +62,21 @@ const files = walk(SRC)
 
 // `_` is a word character for `\b`: split identifiers on it before matching.
 const words = (text) => text.replace(BRAND, "").replace(/_/g, " ");
+
+// Self-check: the exemption is the exact brand tokens only.
+for (const [sample, denied] of [
+  ['{"p":"lucky-20","op":"mine"}', false],
+  ["LUCKY-20 v1", false],
+  ["LUCKY", false],
+  ["lucky", true],
+  ["Lucky-20", true],
+  ["a lucky block", true],
+]) {
+  if (DENY.test(words(sample)) !== denied) {
+    console.error(`vocab: self-check failed for ${JSON.stringify(sample)} (expected ${denied ? "denied" : "allowed"})`);
+    process.exit(1);
+  }
+}
 
 const hits = [];
 for (const f of files) {

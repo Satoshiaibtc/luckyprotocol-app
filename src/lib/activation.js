@@ -2,9 +2,9 @@
 // below ACTIVATION_HEIGHT are ignored). Pure, no React; tested in
 // test/journeys.test.js.
 //
-// Reserve (the COMMIT step of Create) and Mine unlock one block EARLY — at
-// tip ACTIVATION_HEIGHT − 1 (969,599) — because every COMMIT, REVEAL, MINE
-// and SEND this app builds carries nLockTime = PROTOCOL_LOCKTIME (969,599):
+// Create and Mine unlock one block EARLY — at tip ACTIVATION_HEIGHT − 1
+// (969,599) — because every DEPLOY, MINE and SEND this app builds carries
+// nLockTime = PROTOCOL_LOCKTIME (969,599):
 // a node will not put such a transaction in any block below 969,600, so
 // nothing sent through the app can confirm too early and be ignored. An
 // UNKNOWN tip still counts as locked (fail closed: a gate that cannot see
@@ -18,7 +18,7 @@ import { ACTIVATION_HEIGHT, PROTOCOL_LOCKTIME } from "./payloads.js";
 export const BLOCK_MINUTES = 10;
 
 /**
- * The tip at which Reserve and Mine unlock: ACTIVATION_HEIGHT − 1. From
+ * The tip at which Create and Mine unlock: ACTIVATION_HEIGHT − 1. From
  * this tip on, the next block is ACTIVATION_HEIGHT, the first one the
  * lock time of the app's transactions allows.
  */
@@ -31,7 +31,7 @@ const at = (h) => `#${h.toLocaleString("en-US")}`;
  * height (null / undefined = unknown; so is 0 — what an indexer that has
  * not read its node yet reports, never a real tip).
  *
- *   locked              tip < UNLOCK_HEIGHT (or unknown) — Reserve and Mine stay off
+ *   locked              tip < UNLOCK_HEIGHT (or unknown) — Create and Mine stay off
  *   blocksLeft          blocks until the gate opens (tip reaches UNLOCK_HEIGHT); null while unknown
  *   active              tip ≥ ACTIVATION_HEIGHT (the protocol itself is live)
  *   blocksToActivation  blocks until ACTIVATION_HEIGHT is mined; null while unknown
@@ -69,7 +69,7 @@ export function countdownText(n) {
 }
 
 /**
- * The lock notice of a write action ("Reserving a ticker", "Mining") while
+ * The lock notice of a write action ("Creating a ticker", "Mining") while
  * the gate is closed, or null once it is open.
  */
 export function activationNotice(tip, what) {
@@ -94,12 +94,12 @@ export function activationBannerText(tip) {
   if (s.unknown || s.active) return null;
   if (!s.locked) {
     return (
-      `LUCKY-20 starts with the next block, #${ACTIVATION_HEIGHT.toLocaleString("en-US")}. Reserve and Mine are open: ` +
+      `LUCKY-20 starts with the next block, #${ACTIVATION_HEIGHT.toLocaleString("en-US")}. Create and Mine are open: ` +
       `every transaction the app sends has a lock time, so it can only be confirmed in block #${ACTIVATION_HEIGHT.toLocaleString("en-US")} or later.`
     );
   }
   return (
-    `LUCKY-20 starts at block ${at(ACTIVATION_HEIGHT)}. Reserve and Mine open at block ${at(UNLOCK_HEIGHT)}, ${countdownText(s.blocksLeft)}; ` +
+    `LUCKY-20 starts at block ${at(ACTIVATION_HEIGHT)}. Create and Mine open at block ${at(UNLOCK_HEIGHT)}, ${countdownText(s.blocksLeft)}; ` +
     `a LUCKY-20 transaction confirmed before block ${at(ACTIVATION_HEIGHT)} is ignored and only costs fees.`
   );
 }

@@ -9,7 +9,7 @@ import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
 import { autoPickCarriers, carrierNote, parseSendAmount, pendingSendsOf, pickedAmount, recipientState, sendAmountError, sendCarrierRows, sendFormHint, sendLayout, sendPendingOutpoints, sendReviewModel, sendVersions, spendableAmount, switchSendVersion } from "../src/lib/send.js";
 import { createTxRecordStore, refreshTxRecords } from "../src/lib/txrecords.js";
-import { buildSendPsbt, SEND_CHANGE_OUT, SEND_TO_OUT } from "../src/lib/psbt.js";
+import { buildSendPsbt, SEND_FEE_VOUT, SEND_OP_RETURN_VOUT, SEND_RESIDUAL_VOUT, SEND_TO_VOUT } from "../src/lib/psbt.js";
 import { PROJECT_FEE_ADDRESS, parsePayload, payloadToString } from "../src/lib/payloads.js";
 import { MOCK_WALLET } from "../src/lib/mock.js";
 import { parseHash, sendHref } from "../src/hooks/useHashRoute.js";
@@ -53,7 +53,7 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   assert.deepEqual(rows.find((r) => r.txid === TX("b")).others, [["ORE", 8]]);
   assert.equal(rows.find((r) => r.txid === TX("e")).sats, 12_000);
   assert.equal(rows.some((r) => r.txid === TX("f")), false, "ORE-only carrier is not a LUCKY row");
-  assert.match(carrierNote(rows.find((r) => r.txid === TX("b")), "LUCKY"), /also carries 8 ORE — those go to your residual carrier \(vout3\), not to the recipient/);
+  assert.match(carrierNote(rows.find((r) => r.txid === TX("b")), "LUCKY"), /also carries 8 ORE — those go to your residual carrier \(vout2\), not to the recipient/);
   assert.match(carrierNote(rows.find((r) => r.txid === TX("d")), "LUCKY"), /sending it withdraws that listing/);
   assert.match(carrierNote(rows.find((r) => r.txid === TX("c")), "LUCKY"), /already spent by one of your transactions/);
   assert.equal(carrierNote(rows.find((r) => r.txid === TX("a")), "LUCKY"), "LUCKY only");
@@ -99,18 +99,23 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
 // ---- the confirm screen's layout + pending outpoints ---------------------------------------------------------------
 {
   const keys = [`${TX("a")}:0`, `${TX("b")}:1`];
-  const L = sendLayout({ rows, keys, ticker: "LUCKY", amount: 1400, toAddress: BC1Q, self: SELF, payloadText: "LUCKY-20|SEND|LUCKY|1400|0|3" });
+  const payloadText = '{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"1400"}';
+  const L = sendLayout({ rows, keys, ticker: "LUCKY", amount: 1400, toAddress: BC1Q, self: SELF, payloadText });
   assert.deepEqual(L.map((o) => o.vout), [0, 1, 2, 3, 4]);
-  assert.equal(L[0].to, BC1Q);
-  assert.equal(L[0].carries, "1,400 LUCKY");
-  assert.equal(L[1].sats, 546);
-  assert.equal(L[3].carries, "100 LUCKY + 8 ORE", "the rest of the ticker and every other ticker → vout3");
+  assert.deepEqual([L[0].sats, L[0].to, L[0].carries], [546, "protocol fee address", "—"], "vout0: the protocol fee");
+  assert.deepEqual([L[1].sats, L[1].to, L[1].carries], [546, BC1Q, "1,400 LUCKY"], "vout1: the amount → the recipient");
+  assert.deepEqual([L[2].sats, L[2].to], [546, "you (residual carrier)"]);
+  assert.equal(L[2].carries, "100 LUCKY + 8 ORE", "the rest of the ticker and every other ticker → vout2");
+  assert.deepEqual([L[3].sats, L[3].to, L[3].carries], [0, "OP_RETURN", payloadText], "vout3: the payload bytes as broadcast");
+  assert.deepEqual([L[4].to, L[4].carries], ["you (BTC change)", "— never tokens"]);
   const split = sendLayout({ rows, keys: [`${TX("b")}:1`], ticker: "LUCKY", amount: 300, toAddress: SELF, self: SELF, payloadText: "" });
-  assert.equal(split[0].to, "you (new carrier)");
-  assert.equal(split[3].carries, "8 ORE", "a split of a multi-ticker carrier: LUCKY alone on vout0, ORE alone on vout3");
-  assert.deepEqual(sendPendingOutpoints(TX("9"), { toSelf: false }), [{ txid: TX("9"), vout: 3 }]);
-  assert.deepEqual(sendPendingOutpoints(TX("9"), { toSelf: true }), [{ txid: TX("9"), vout: 0 }, { txid: TX("9"), vout: 3 }]);
-  console.log("send layout: vout0 amount → recipient, vout3 residual + other tickers → you; pending carriers registered");
+  assert.equal(split[1].to, "you (new carrier)");
+  assert.equal(split[2].carries, "8 ORE", "a split of a multi-ticker carrier: LUCKY alone on vout1, ORE alone on vout2");
+  const whole = sendLayout({ rows, keys: [`${TX("a")}:0`], ticker: "LUCKY", amount: 1200, toAddress: BC1Q, self: SELF, payloadText: "" });
+  assert.equal(whole[2].carries, "nothing (this output is always there)", "the residual output exists even when empty");
+  assert.deepEqual(sendPendingOutpoints(TX("9"), { toSelf: false }), [{ txid: TX("9"), vout: 2 }]);
+  assert.deepEqual(sendPendingOutpoints(TX("9"), { toSelf: true }), [{ txid: TX("9"), vout: 1 }, { txid: TX("9"), vout: 2 }]);
+  console.log("send layout: vout0 fee, vout1 amount → recipient, vout2 residual + other tickers → you; pending carriers registered");
 }
 
 // ---- one message per amount problem; thousands separators accepted -------------------------------------------
@@ -139,9 +144,9 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
 // ---- the review shows what was signed, not the live rows ----------------------------------------------------------
 {
   const keys = [`${TX("a")}:0`];
-  const signed = sendReviewModel({ rows, keys, ticker: "LUCKY", amount: 500, toAddress: BC1Q, self: SELF, payloadText: "LUCKY-20|SEND|LUCKY|500|0|3", feeRateSatVb: 2 });
+  const signed = sendReviewModel({ rows, keys, ticker: "LUCKY", amount: 500, toAddress: BC1Q, self: SELF, payloadText: '{"p":"lucky-20","op":"send","tick":"LUCKY","amt":"500"}', feeRateSatVb: 2 });
   const before = JSON.stringify(signed);
-  assert.equal(signed.layout[3].carries, "700 LUCKY", "the signed tx: 1,200 − 500 back to vout3");
+  assert.equal(signed.layout[2].carries, "700 LUCKY", "the signed tx: 1,200 − 500 back to vout2");
   assert.equal(signed.feeRateSatVb, 2);
   // After the broadcast the spent carrier leaves the live rows (and the form's auto-pick moves on);
   // a model rebuilt from them would describe another transaction…
@@ -205,12 +210,14 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   const tx = btc.Transaction.fromPSBT(hex.decode(built.psbtHex), { allowUnknownOutputs: true });
   const addr = (i) => btc.Address(btc.NETWORK).encode(btc.OutScript.decode(tx.getOutput(i).script));
   assert.equal(tx.inputsLength, 3, "both carriers + one fee input");
-  assert.equal(addr(SEND_TO_OUT), LEGACY, "vout0 → the recipient");
-  assert.equal(Number(tx.getOutput(0).amount), 546);
-  assert.equal(addr(1), PROJECT_FEE_ADDRESS);
-  const p = parsePayload(payloadToString(tx.getOutput(2).script.slice(2)));
-  assert.deepEqual([p.op, p.ticker, p.amount, p.toOutIdx, p.changeOutIdx], ["SEND", "LUCKY", 1400, SEND_TO_OUT, SEND_CHANGE_OUT]);
-  assert.equal(addr(SEND_CHANGE_OUT), SELF, "vout3 (residual: 100 LUCKY + 8 ORE) → you");
+  assert.equal(addr(SEND_FEE_VOUT), PROJECT_FEE_ADDRESS, "vout0 → the protocol fee");
+  assert.equal(Number(tx.getOutput(SEND_FEE_VOUT).amount), 546);
+  assert.equal(addr(SEND_TO_VOUT), LEGACY, "vout1 → the recipient");
+  assert.equal(Number(tx.getOutput(SEND_TO_VOUT).amount), 546);
+  const p = parsePayload(payloadToString(tx.getOutput(SEND_OP_RETURN_VOUT).script.slice(2)));
+  assert.deepEqual(p, { op: "SEND", ticker: "LUCKY", amount: 1400 }, "the payload names no output");
+  assert.equal(addr(SEND_RESIDUAL_VOUT), SELF, "vout2 (residual: 100 LUCKY + 8 ORE) → you");
+  assert.equal(built.residualVout, SEND_RESIDUAL_VOUT);
   console.log("send build: 2 carriers → legacy recipient in the §2.3 layout");
 }
 
