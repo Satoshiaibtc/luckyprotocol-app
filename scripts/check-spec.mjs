@@ -1,29 +1,18 @@
 #!/usr/bin/env node
-// Spec ⇄ code gate that runs on EVERY build, including the Cloudflare Pages
-// build (npm run build → prebuild), where the indexer checkout that
-// test/web.test.js compares against byte-for-byte is not present.
+// Spec ⇄ code gate. The site serves no spec file: the rules are published
+// in the whitepaper, and the rulebook lives with the indexer. When
+// LP_INDEXER_DIR names a local indexer checkout, its PROTOCOL.md §1
+// constants table must name exactly the values src/lib/payloads.js builds
+// transactions with, and the rulebook must state rules only (no audit
+// reference, internal schema number, repository name, date or revision
+// narrative — SPEC_PROCESS_DENY). Without it (the Pages build) the
+// comparison is skipped; the local gates run it on every change.
 //
-// public/PROTOCOL.md is the spec the site serves. Its §1 constants table
-// must name exactly the values src/lib/payloads.js builds transactions with.
-// A code change that bumps a consensus constant (a fee, the activation
-// height, the finality depth) without the matching spec copy
-// — or a spec copy without the code — fails the build instead of shipping a
-// page that documents rules the app does not follow.
-//
-// The served spec must also state rules only: no audit reference, internal
-// schema number, repository name, date or revision narrative may appear in
-// it (SPEC_PROCESS_DENY), so the public text stays a timeless rulebook.
-//
-// It also checks where the footer's "Protocol spec" link will point
-// (VITE_SPEC_URL). The host answers every unknown path with the
-// app page, so a same-origin value that names no file in public/ — for
-// example a stale path left in the Pages settings — would
-// open the app instead of the spec. Such a value fails the build.
-import { existsSync, readFileSync, statSync } from "node:fs";
+// On every build it also fails when public/PROTOCOL.md exists, so a copy of
+// the rulebook is never served again by accident.
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isAllowedSpecUrl } from "../src/lib/specUrl.js";
-import { loadEnv } from "./gen-headers.mjs";
 
 /** §1 row name → payloads.js export (FINAL_DEPTH is re-exported there from finality.js). */
 export const SPEC_CONSTANTS = [
@@ -77,7 +66,7 @@ export function specConstantMismatches(md, consts) {
 }
 
 /**
- * What the served spec must never carry — it states the protocol, not the
+ * What the rulebook must never carry — it states the protocol, not the
  * project's process: [pattern, label] pairs, one hit per label per line.
  */
 export const SPEC_PROCESS_DENY = [
@@ -97,60 +86,37 @@ export function specProcessLeaks(md) {
   return out;
 }
 
-/**
- * Why a VITE_SPEC_URL value would not open the spec, or null when it is
- * fine. Empty means the default /PROTOCOL.md. A same-origin path must name
- * a file in `publicDir` (query and fragment ignored); an https URL is
- * another host and is not checked here; anything else is a value the
- * footer would ignore, reported so a typo fails the build.
- */
-export function specUrlProblem(value, publicDir) {
-  const s = String(value ?? "").trim();
-  if (!s) return null;
-  if (!isAllowedSpecUrl(s)) return `VITE_SPEC_URL="${s}" is neither an https URL nor an absolute same-origin path`;
-  if (!s.startsWith("/")) return null;
-  let segments;
-  try {
-    segments = decodeURIComponent(s.replace(/[?#].*$/, "")).split("/").filter(Boolean);
-  } catch {
-    return `VITE_SPEC_URL="${s}" is not a valid path`;
-  }
-  if (segments.includes("..")) return `VITE_SPEC_URL="${s}" leaves public/`;
-  const file = join(publicDir, ...segments);
-  if (!segments.length || !existsSync(file) || !statSync(file).isFile()) {
-    return `VITE_SPEC_URL="${s}" names no file in public/, so the footer link would open the app page instead of the spec`;
-  }
-  return null;
-}
-
 async function main() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const md = readFileSync(join(root, "public", "PROTOCOL.md"), "utf8");
+  if (existsSync(join(root, "public", "PROTOCOL.md"))) {
+    console.error("spec file: public/PROTOCOL.md exists — the site serves no spec file; delete it");
+    process.exit(1);
+  }
+  console.log("spec file: public/ carries no spec file");
+
+  const dir = String(process.env.LP_INDEXER_DIR || "").trim();
+  const specPath = dir ? join(dir, "PROTOCOL.md") : null;
+  if (!specPath || !existsSync(specPath)) {
+    console.log("spec constants: LP_INDEXER_DIR not set — the comparison runs in the local gates");
+    return;
+  }
+  const md = readFileSync(specPath, "utf8");
   const payloads = await import(pathToFileURL(join(root, "src", "lib", "payloads.js")).href);
   const bad = specConstantMismatches(md, payloads);
   if (bad.length) {
-    console.error("spec constants: public/PROTOCOL.md §1 and src/lib/payloads.js disagree:");
+    console.error("spec constants: the indexer's PROTOCOL.md §1 and src/lib/payloads.js disagree:");
     for (const b of bad) console.error(`  ${b}`);
-    console.error("Copy the indexer's PROTOCOL.md over public/PROTOCOL.md (and update payloads.js) before building.");
     process.exit(1);
   }
-  console.log(`spec constants: public/PROTOCOL.md §1 matches src/lib/payloads.js (${SPEC_CONSTANTS.length} constants)`);
+  console.log(`spec constants: the indexer's PROTOCOL.md §1 matches src/lib/payloads.js (${SPEC_CONSTANTS.length} constants)`);
 
   const leaks = specProcessLeaks(md);
   if (leaks.length) {
-    console.error("spec scope: public/PROTOCOL.md narrates internal process (the spec states rules only):");
-    for (const l of leaks) console.error(`  public/PROTOCOL.md:${l}`);
+    console.error("spec scope: the rulebook narrates internal process (it states rules only):");
+    for (const l of leaks) console.error(`  PROTOCOL.md:${l}`);
     process.exit(1);
   }
-  console.log("spec scope: public/PROTOCOL.md names no audit, schema number, repository, date or revision narrative");
-
-  const env = loadEnv(process.env.MODE || "production", root);
-  const linkProblem = specUrlProblem(env.VITE_SPEC_URL, join(root, "public"));
-  if (linkProblem) {
-    console.error(`spec link: ${linkProblem}. Unset it (the default is /PROTOCOL.md) or point it at a file that exists.`);
-    process.exit(1);
-  }
-  console.log(`spec link: ${String(env.VITE_SPEC_URL || "").trim() || "/PROTOCOL.md (default)"}`);
+  console.log("spec scope: the rulebook names no audit, schema number, repository, date or revision narrative");
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

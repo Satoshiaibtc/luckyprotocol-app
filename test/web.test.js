@@ -1,14 +1,13 @@
 // Web-hygiene tests: the generated _headers
-// CSP, the canonical-host redirect and the VITE_SPEC_URL validator. Plain
-// Node, no framework.
+// CSP, the canonical-host redirect and the rules about the spec file.
+// Plain Node, no framework.
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
 import { buildHeaders, buildMiddleware, buildRoutes, FIXED_HEADERS, SECOND_SOURCE_ORIGIN, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
 import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHost.js";
-import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/specUrl.js";
-import { parseSpecConstants, specConstantMismatches, specProcessLeaks, specUrlProblem } from "../scripts/check-spec.mjs";
+import { parseSpecConstants, specConstantMismatches, specProcessLeaks } from "../scripts/check-spec.mjs";
 import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- _headers generated from VITE_INDEXER_URL ----------------------------------------------------
@@ -97,44 +96,6 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", mock: true }), null, "mock builds never redirect");
 }
 
-// ---- VITE_SPEC_URL validated like VITE_INDEXER_URL ---------------------------------------------------
-{
-  assert.equal(DEFAULT_SPEC_URL, "/PROTOCOL.md");
-  assert.equal(isAllowedSpecUrl("/PROTOCOL.md"), true, "same-origin path");
-  assert.equal(isAllowedSpecUrl("/docs/spec.md?v=3#s7"), true);
-  assert.equal(isAllowedSpecUrl("https://docs.luckyprotocolai.com/PROTOCOL.md"), true, "https");
-  assert.equal(isAllowedSpecUrl("http://docs.example/spec.md"), false, "plain http is not allowed");
-  assert.equal(isAllowedSpecUrl("//evil.example/spec.md"), false, "protocol-relative is not a same-origin path");
-  assert.equal(isAllowedSpecUrl("javascript:alert(1)"), false);
-  assert.equal(isAllowedSpecUrl("data:text/html,hi"), false);
-  assert.equal(isAllowedSpecUrl("PROTOCOL.md"), false, "relative paths are not accepted");
-  assert.equal(isAllowedSpecUrl("/a b"), false, "no whitespace");
-  assert.equal(isAllowedSpecUrl(""), false);
-  assert.equal(isAllowedSpecUrl(undefined), false);
-  assert.equal(resolveSpecUrl("https://docs.luckyprotocolai.com/x.md"), "https://docs.luckyprotocolai.com/x.md");
-  assert.equal(resolveSpecUrl("javascript:alert(1)"), DEFAULT_SPEC_URL, "invalid → default");
-  assert.equal(resolveSpecUrl(""), DEFAULT_SPEC_URL);
-  assert.equal(resolveSpecUrl(undefined), DEFAULT_SPEC_URL);
-}
-
-// ---- a VITE_SPEC_URL that names no served file fails the build ---------------------------------------------
-// The host answers an unknown path with the app page, so a stale same-origin
-// value (a path that names no file in public/) would open the app instead of the spec.
-{
-  const pub = join(dirname(fileURLToPath(import.meta.url)), "../public");
-  assert.equal(specUrlProblem(undefined, pub), null, "unset: the default /PROTOCOL.md");
-  assert.equal(specUrlProblem("", pub), null);
-  assert.equal(specUrlProblem("/PROTOCOL.md", pub), null, "the served spec");
-  assert.equal(specUrlProblem("/PROTOCOL.md#s7", pub), null, "a fragment is fine");
-  assert.equal(specUrlProblem("https://docs.example/spec.md", pub), null, "another host is not checked");
-  assert.match(specUrlProblem("/PROTOCOL-old.md", pub), /names no file in public/, "a stale file name fails");
-  assert.match(specUrlProblem("/wallets", pub), /names no file in public/, "a directory is not the spec");
-  assert.match(specUrlProblem("/", pub), /names no file in public/);
-  assert.match(specUrlProblem("/../package.json", pub), /leaves public/);
-  assert.match(specUrlProblem("http://docs.example/spec.md", pub), /neither an https URL/);
-  assert.match(specUrlProblem("PROTOCOL.md", pub), /neither an https URL/);
-}
-
 // ---- fee-rate gates: fractional sat/vB must never be refused by an integer check ------------------------
 // The indexer's /fees returns hundredths (1.02, 2.38); every spend gate goes
 // through isUsableFeeRate (src/lib/feechoice.js). Walks src/**/*.{js,jsx}
@@ -159,37 +120,31 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   console.log("fee gates: no Number.isInteger() fee-rate check in src/");
 }
 
-// ---- the served spec is the indexer's canonical one ------------------------------------------------------
-// public/PROTOCOL.md (DEFAULT_SPEC_URL) is a byte-identical copy of the
-// indexer's PROTOCOL.md. When LP_INDEXER_DIR names a local indexer checkout,
-// a drifted copy fails the check; without it (e.g. the Pages build) the
-// check is skipped.
+// ---- the site serves no spec file ---------------------------------------------------------------------
+// The rules are published in the whitepaper; an old spec path is sent there
+// (public/_redirects), so no raw rulebook file is served.
 {
   const here = dirname(fileURLToPath(import.meta.url));
-  const served = join(here, "../public/PROTOCOL.md");
-  const canonical = process.env.LP_INDEXER_DIR ? join(process.env.LP_INDEXER_DIR, "PROTOCOL.md") : null;
-  let canon = null;
-  try {
-    if (canonical) canon = readFileSync(canonical);
-  } catch {
-    /* reported below */
-  }
-  if (!canon) console.log("spec copy: LP_INDEXER_DIR not set — byte-identity check skipped");
-  if (canon) {
-    assert.ok(readFileSync(served).equals(canon), "public/PROTOCOL.md must be a byte-identical copy of the indexer's PROTOCOL.md");
-    console.log("spec copy: public/PROTOCOL.md is byte-identical to the indexer's");
-  }
+  assert.ok(!existsSync(join(here, "../public/PROTOCOL.md")), "public/ carries no spec file");
+  const redirects = readFileSync(join(here, "../public/_redirects"), "utf8");
+  assert.ok(redirects.split("\n").includes("/PROTOCOL.md https://luckyprotocol.gitbook.io/luckyprotocol 301"), "the old spec path goes to the whitepaper");
+  console.log("spec file: not served; /PROTOCOL.md redirects to the whitepaper");
 }
+
+// The rulebook lives with the indexer. When LP_INDEXER_DIR names a local
+// indexer checkout, the checks below read it; without it they are skipped.
+const SPEC_PATH = process.env.LP_INDEXER_DIR ? join(process.env.LP_INDEXER_DIR, "PROTOCOL.md") : null;
+const SPEC = SPEC_PATH && existsSync(SPEC_PATH) ? readFileSync(SPEC_PATH, "utf8") : null;
+if (!SPEC) console.log("spec: LP_INDEXER_DIR not set — rulebook checks skipped");
 
 // ---- the served spec's §1 table is what the app builds with (every build) --------------------
 // scripts/check-spec.mjs runs in `prebuild`, so a Pages build fails when the
 // code and the served spec copy disagree on a consensus constant — the gate
 // that still holds where the byte-identity check above is skipped.
-{
-  const here = dirname(fileURLToPath(import.meta.url));
+if (SPEC) {
   const payloads = await import("../src/lib/payloads.js");
-  const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
-  assert.deepEqual(specConstantMismatches(served, payloads), [], "public/PROTOCOL.md §1 must match src/lib/payloads.js");
+  const served = SPEC;
+  assert.deepEqual(specConstantMismatches(served, payloads), [], "the rulebook's §1 must match src/lib/payloads.js");
   const parsed = parseSpecConstants(served);
   assert.equal(parsed.ACTIVATION_HEIGHT, 969_600);
   assert.ok(!("SNAPSHOT_VERSION" in parsed), "the indexer's internal state-schema number is not a protocol constant and is not in the spec");
@@ -208,9 +163,8 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 // The indexer's HTTP interface is not part of the protocol and is not
 // published (PROTOCOL.md §5): no route, HTTP header or pointer to the
 // indexer's private API notes may appear in the served spec.
-{
-  const here = dirname(fileURLToPath(import.meta.url));
-  const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
+if (SPEC) {
+  const served = SPEC;
   const DENY = [
     "GET /", "POST /", "HEAD /", "OPTIONS /", "Retry-After", "Cache-Control", "Access-Control", "CORS",
     "docs/API.md", "robots.txt", "ALLOWED_ORIGINS", "/health", "/balances", "/utxos", "/btc-utxos",
@@ -219,7 +173,7 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   ];
   const hits = [];
   served.split("\n").forEach((line, i) => {
-    for (const d of DENY) if (line.includes(d)) hits.push(`public/PROTOCOL.md:${i + 1}: ${d}`);
+    for (const d of DENY) if (line.includes(d)) hits.push(`PROTOCOL.md:${i + 1}: ${d}`);
   });
   assert.deepEqual(hits, [], "the served spec names no HTTP route or header");
   assert.ok(served.includes("\n## 5. Indexer interface\n"), "§5 keeps its number and says the interface is not part of the protocol");
@@ -230,9 +184,8 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 // A public rulebook names no audit finding, internal schema number,
 // repository, file or date, and carries no revision history.
 // scripts/check-spec.mjs applies the same list on every build.
-{
-  const here = dirname(fileURLToPath(import.meta.url));
-  const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
+if (SPEC) {
+  const served = SPEC;
   assert.deepEqual(specProcessLeaks(served), [], "the served spec narrates no internal process");
   assert.ok(!/^## 9\. /m.test(served), "no revision-history section");
   assert.ok(served.includes("\n## 8. Token avatars\n"), "§8 keeps its number and a timeless title");
@@ -248,9 +201,8 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 // count in §7.4 must be one of those (a stale number left in the conditions
 // list fails here), and the per-seller cap is the one the sell form enforces.
 // The indexer's own tests hold the same numbers to its constants.
-{
-  const here = dirname(fileURLToPath(import.meta.url));
-  const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
+if (SPEC) {
+  const served = SPEC;
   const start = served.indexOf("\n### 7.4 ");
   const end = served.indexOf("\n### 7.5 ", start);
   assert.ok(start >= 0 && end > start, "§7.4 and §7.5 exist");
@@ -332,4 +284,4 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   console.log(`robots: Googlebot, Bingbot, Baiduspider allowed; ${AI_AGENTS.length} AI agents and every other crawler refused; a static file outside the Function route`);
 }
 
-console.log("web: headers, canonical host, spec URL, spec scope, spec caps, robots ok");
+console.log("web: headers, canonical host, spec file, spec scope, spec caps, robots ok");

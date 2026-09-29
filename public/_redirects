@@ -1,2 +1,3 @@
-# Any earlier spec path (a versioned file name) now lives at /PROTOCOL.md.
-/PROTOCOL-*.md /PROTOCOL.md 301
+# The rules are published in the whitepaper; the site serves no spec file.
+/PROTOCOL.md https://luckyprotocol.gitbook.io/luckyprotocol 301
+/PROTOCOL-*.md https://luckyprotocol.gitbook.io/luckyprotocol 301

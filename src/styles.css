@@ -2825,16 +2825,55 @@ input[type="search"]::-webkit-search-decoration {
 .footer-link:focus-visible {
   text-decoration: underline;
 }
-.footer-donate {
-  flex-basis: 100%;
+/* ---- donate dialog (opened from the footer) --------------------------------------------------- */
+
+.donate-modal {
+  max-width: 440px;
+}
+.donate-copy {
+  display: grid;
+  gap: 8px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.donate-copy p {
+  margin: 0;
+}
+.donate-qr {
+  margin: 0;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+}
+.donate-qr svg {
+  display: block;
+  width: 200px;
+  height: 200px;
+  max-width: 70vw;
+  max-height: 70vw;
+  border: 1px solid var(--border-strong);
+}
+.donate-qr figcaption {
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  word-break: break-all;
+  color: var(--text);
+}
+.donate-actions {
   display: flex;
-  align-items: center;
+  justify-content: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.footer-donate code {
-  word-break: break-all;
-  color: var(--text);
+.donate-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  text-align: center;
 }
 
 /* ---- fold (collapsible panel on <details>) ---------------------------------------------------- */

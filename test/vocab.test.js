@@ -11,14 +11,13 @@
 // 2. Public naming: LUCKY-20 is published as a new protocol at version v1.
 //    No text file of this public repository (src/, public/, scripts/,
 //    test/ and the root files listed in NAMING_ROOT_FILES) may carry an
-//    older version word or a versioned spec path (the spec is served as
-//    /PROTOCOL.md). Comments are checked too. The patterns below are
+//    older version word or a versioned spec path. Comments are checked
+//    too. The patterns below are
 //    written so that they never match their own source text, so this file
 //    is scanned like every other one.
 //
 // 3. The same vocabulary rule for every text file the site serves as is:
-//    public/** (the protocol spec at /PROTOCOL.md above all) and
-//    index.html. Nothing is stripped there except the brand tokens: a
+//    public/** and index.html. Nothing is stripped there except the brand tokens: a
 //    comment in a served file is served too.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -85,10 +84,6 @@ function walkServed(dir, out = []) {
 const servedFiles = walkServed(join(ROOT, "public"))
   .map((p) => relative(ROOT, p).split(sep).join("/"))
   .concat(["index.html"]);
-if (!servedFiles.includes("public/PROTOCOL.md")) {
-  console.error("vocab: public/PROTOCOL.md is missing — the served spec must be scanned");
-  process.exit(1);
-}
 const servedHits = [];
 for (const f of servedFiles) {
   words(readFileSync(join(ROOT, f), "utf8"))
@@ -146,10 +141,10 @@ if (servedHits.length) {
   for (const h of servedHits) console.error(`  ${h}`);
   failed = true;
 } else {
-  console.log(`vocab: ${servedFiles.length} served public text files clean (public/PROTOCOL.md included)`);
+  console.log(`vocab: ${servedFiles.length} served public text files clean`);
 }
 if (namingHits.length) {
-  console.error(`naming: ${namingHits.length} version word(s) found (the protocol is published as LUCKY-20 v1; the spec is /PROTOCOL.md):`);
+  console.error(`naming: ${namingHits.length} version word(s) found (the protocol is published as LUCKY-20 v1):`);
   for (const h of namingHits) console.error(`  ${h}`);
   failed = true;
 } else {

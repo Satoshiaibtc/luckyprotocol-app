@@ -6,9 +6,8 @@
 // be: no finding or review ids, no dated decisions, no history. Every text
 // file under src/, test/ and scripts/, plus index.html, vite.config.js and
 // eslint.config.js, is scanned line by line, and every hit fails with
-// file:line. Two files are left out: this one (its patterns would match
-// their own source) and the served spec, public/PROTOCOL.md, which is
-// frozen and checked by scripts/check-spec.mjs.
+// file:line. This file is left out: its patterns would match their own
+// source.
 //
 // A calendar date is history only when the text says it, not when the code
 // handles it: fixtures feed dates (including deliberately invalid ones) to
@@ -23,7 +22,7 @@ const ROOT = join(here, "..");
 
 const DIRS = ["src", "test", "scripts"];
 const ROOT_FILES = ["index.html", "vite.config.js", "eslint.config.js"];
-const EXCLUDE = new Set(["test/internals.test.js", "public/PROTOCOL.md"]);
+const EXCLUDE = new Set(["test/internals.test.js"]);
 const TEXT_FILE = /\.(js|jsx|mjs|cjs|css|html|md|json|svg|txt)$/i;
 const PROSE_FILE = /\.(md|txt)$/i;
 
