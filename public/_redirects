@@ -1,3 +1,5 @@
 # The rules are published in the whitepaper; the site serves no spec file.
 /PROTOCOL.md https://luckyprotocol.gitbook.io/luckyprotocol 301
 /PROTOCOL-*.md https://luckyprotocol.gitbook.io/luckyprotocol 301
+# The site icon is favicon.ico; an old icon path goes there.
+/favicon.svg /favicon.ico 301
