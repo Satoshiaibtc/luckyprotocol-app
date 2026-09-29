@@ -321,7 +321,7 @@ export function originRefused(result) {
 
 /** The sell form's words for a carrier a buyer's check would refuse (originRefused). */
 export const ORIGIN_REFUSED_TEXT =
-  "Buyers cannot confirm where this UTXO's tokens came from: it was not created as a MINE's or a SEND's token output (a plain transfer, a DEPLOY's output, a listing's payment output, the output of a MINE or SEND without its fee, or a mine that also received other tokens). A buyer's check refuses such a listing, so it would never sell. Move the tokens to a fresh carrier with a send to yourself first, then list that carrier once it confirms.";
+  "Buyers cannot confirm where this UTXO's tokens came from: it was not created as a MINE's or a SEND's token output (a Bitcoin payment with no LUCKY-20 payload, a DEPLOY's output, a listing's payment output, the output of a MINE or SEND without its fee, or a mine that also received other tokens). A buyer's check refuses such a listing, so it would never sell. Move the tokens to a fresh carrier with a send to yourself first, then list that carrier once it confirms.";
 
 /**
  * The sell form's view of the origin check for the selected carrier

@@ -409,7 +409,7 @@ function mockSignPsbtAs(key, psbtHex, indexes) {
   // The site banner names every paused action.
   const sync = (x) => ({ indexed: 969_700, tip: 969_705, lag: 5, stalled: false, rebuilding: false, noPeers: false, networkLag: 0, synced: false, trustUnseen: false, ...x });
   for (const s of [sync({ rebuilding: true }), sync({ stalled: true, noPeers: true }), sync({ stalled: true }), sync({ networkLag: 3 }), sync({})]) {
-    assert.match(syncWarningText(s), /Creating, mining, sending, listing and buying (are paused|resume)/);
+    assert.match(syncWarningText(s), /Creating, mining, transferring, listing and buying (are paused|resume)/);
   }
   console.log("texts: a fill without a known block, tip 0, the paused-actions banner");
 }

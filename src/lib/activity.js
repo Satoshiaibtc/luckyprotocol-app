@@ -15,13 +15,13 @@ export const KINDS = [
   { id: "all", label: "All" },
   { id: "deploy", label: "Deploy" },
   { id: "mine", label: "Mine" },
-  { id: "send", label: "Send" },
+  { id: "send", label: "Transfer" },
   { id: "trade", label: "Trade" },
 ];
 
 export const METRICS = [
   { id: "events", label: "Events", unit: "" },
-  { id: "sends", label: "Sends", unit: "" },
+  { id: "sends", label: "Transfers", unit: "" },
   { id: "active_addresses", label: "Active addresses", unit: "" },
   { id: "volume_sats", label: "Volume", unit: "sats" },
 ];

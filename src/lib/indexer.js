@@ -1236,7 +1236,7 @@ export async function tradesByAddress(address, opts = {}, signal) {
 
 /** Renew of a listing that already left the book: what its signature still means and what to do. */
 export const RENEW_OFF_BOOK_TEXT =
-  "This listing has left the order book, so it cannot be renewed — but its signature is still valid: anyone who saved it can still complete it at its price. Withdraw it (a send to yourself) to void that signature, or sign a new listing at the same or a lower price.";
+  "This listing has left the order book, so it cannot be renewed — but its signature is still valid: anyone who saved it can still complete it at its price. Withdraw it (a transfer to yourself) to void that signature, or sign a new listing at the same or a lower price.";
 
 /**
  * Renew a listing (§7.4 TTL): GET /orders/:id for the stored PSBT, then

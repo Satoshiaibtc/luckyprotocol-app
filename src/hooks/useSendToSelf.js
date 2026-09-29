@@ -22,7 +22,7 @@ const BUSY = new Set(["building", "signing", "broadcasting", "pending"]);
 const TRACKED = new Set(["pending", "unseen", "confirmed"]);
 const outKey = (u) => `${u.txid}:${u.vout}`;
 
-const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
+const WHAT = { cancel: "withdrawal", split: "split", send: "transfer" };
 /** How often the versions a Speed up replaced are asked about while the send waits. */
 const VERSION_POLL_MS = 15_000;
 
@@ -147,7 +147,7 @@ export function useSendToSelf({ onSettled } = {}) {
     async ({ kind, ticker, amount, utxo, utxos, toAddress, order = null }) => {
       if (w.status !== "connected" || !address) return;
       // (never the word "cancel" in an error string: friendlyError reads it as a declined signature)
-      const label = kind === "cancel" ? "withdraw this listing" : kind === "send" ? "send" : "split";
+      const label = kind === "cancel" ? "withdraw this listing" : kind === "send" ? "transfer" : "split";
       const to = kind === "send" && toAddress ? String(toAddress).trim() : address;
       const picked = Array.isArray(utxos) && utxos.length ? utxos : utxo ? [utxo] : [];
       setChain({ phase: "building", kind, ticker, amount, toAddress: to, order, rule: null });

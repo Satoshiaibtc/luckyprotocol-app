@@ -93,7 +93,7 @@ export const OFF_BOOK_NOTE = "off the book · the signature is still valid until
  *   filled, no buyer         "filled" — paid, the tokens burned
  *   filled                   "filled" — sold
  *   cancelled, spent         "withdrawn" — spent on-chain without a fill (a
- *                            withdrawal, a split or a send); never "sold"
+ *                            withdrawal, a split or a transfer); never "sold"
  *   cancelled, unspent       "cancelled" — the book dropped it after a chain
  *                            reorganization; its signature may still be filled
  *   expired                  "still buyable" — it left the book, the
@@ -109,7 +109,7 @@ export function listingStatusView(o) {
   }
   if (o.status === "cancelled") {
     return o.spent_txid
-      ? { label: "withdrawn", note: "spent on-chain without a fill (a withdrawal, a split or a send)" }
+      ? { label: "withdrawn", note: "spent on-chain without a fill (a withdrawal, a split or a transfer)" }
       : { label: "cancelled", note: "dropped after a chain reorganization — its signature can still be filled until you withdraw" };
   }
   if (isOffBook(o)) return { label: "still buyable", note: OFF_BOOK_NOTE };
@@ -154,7 +154,7 @@ export function sellRowState(row, pendingSpent = null) {
 
 /** The sell form's words for a carrier below MIN_CARRIER_SATS. */
 export function smallCarrierText(sats) {
-  return `This UTXO holds ${Number(sats).toLocaleString("en-US")} sats of BTC; the order book lists only a carrier of at least ${MIN_CARRIER_SATS} sats. Move the tokens to a fresh ${MIN_CARRIER_SATS}-sat carrier (a send to yourself) and list that once it confirms.`;
+  return `This UTXO holds ${Number(sats).toLocaleString("en-US")} sats of BTC; the order book lists only a carrier of at least ${MIN_CARRIER_SATS} sats. Move the tokens to a fresh ${MIN_CARRIER_SATS}-sat carrier (a transfer to yourself) and list that once it confirms.`;
 }
 
 /**

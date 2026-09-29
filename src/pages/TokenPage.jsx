@@ -9,6 +9,7 @@ import Identicon from "../components/Identicon.jsx";
 import SupplyRing from "../components/SupplyRing.jsx";
 import MinePanel from "../components/MinePanel.jsx";
 import MarketPanel from "../components/MarketPanel.jsx";
+import SendPage from "./SendPage.jsx";
 import YieldSpectrum from "../components/YieldSpectrum.jsx";
 import TierTable from "../components/TierTable.jsx";
 import Panel from "../components/hud/Panel.jsx";
@@ -18,7 +19,7 @@ import { MinesTable, HoldersTable, AddrLink, TxLink } from "../components/Tables
 import { summarizeMix } from "../lib/mix.js";
 import { BUCKETS, probabilityPct, yieldDigit } from "../lib/yield.js";
 import { fmtAgo, fmtCompact, fmtDec, fmtInt, fmtMintedPct, blockUrl } from "../lib/format.js";
-import { ALL_TABS, TAB_LABEL, defaultTab, mintedOutFlipNotice, mintedProgressNote, resolveTab, tabsFor } from "../lib/tokenTabs.js";
+import { ALL_TABS, TAB_LABEL, defaultTab, mintedOutFlipNotice, mintedProgressNote, pinAfterPick, resolveTab, tabsFor } from "../lib/tokenTabs.js";
 import { isMarketOpen } from "../lib/marketBoard.js";
 import { syncPauseText } from "../lib/sync.js";
 import { UNLOCK_HEIGHT, activationState, countdownText } from "../lib/activation.js";
@@ -50,11 +51,11 @@ export default function TokenPage({ ticker, params, navigate }) {
   // The observed-mix stats are desktop-only; a phone never polls the 200-row feed.
   const mixQ = usePoll(mobile ? null : (s) => indexer.minesFeed({ ticker, limit: MIX_LIMIT }, s), POLL_MS, [ticker, mobile]);
 
-  // Action tabs: the mine console and — only once the token is minted out —
-  // the market, which is then the default (mines credit 0). `?tab=market` on
-  // a token that is not minted out resolves to the console with a notice
-  // (resolveTab); stale `?tab=…` links (buy / sell from the old layout)
-  // resolve to the default.
+  // Action tabs: the mine console, the transfer form and — only once the
+  // token is minted out — the market, which is then the default (mines
+  // credit 0). `?tab=market` on a token that is not minted out resolves to
+  // the console with a notice (resolveTab); stale `?tab=…` links (buy / sell
+  // from the old layout) resolve to the default.
   useEffect(() => {
     if (params.tab && !ALL_TABS.includes(params.tab)) navigate(tokenHref(ticker), { replace: true });
   }, [params.tab, ticker, navigate]);
@@ -62,11 +63,21 @@ export default function TokenPage({ ticker, params, navigate }) {
   // The tab a visit opened on stays put: without `?tab=`, a
   // token that becomes minted out mid-visit would switch its default to
   // Market on the next poll and unmount a MINE in flight. `pinned` is the
-  // default seen on the first load (and whatever tab the user picks since).
+  // default seen on the first load (and whatever default tab the user picks since).
   const [pinned, setPinned] = useState(null); // { tab, marketOpen } | null
   useEffect(() => {
     if (token && pinned === null) setPinned({ tab: defaultTab(token), marketOpen: isMarketOpen(token) });
   }, [token, pinned]);
+
+  // The Transfer tab's form stays mounted (hidden) once it has been opened,
+  // so a transfer in flight keeps its progress across a switch to Mine or
+  // Market. Its split query (`?utxo=…&to=self`) is read when it opens; a
+  // link to another carrier remounts it.
+  const [transferSeed, setTransferSeed] = useState(() => (params.tab === "transfer" ? { utxo: params.utxo, to: params.to } : null));
+  useEffect(() => {
+    if (params.tab !== "transfer") return;
+    setTransferSeed((s) => (!s || (params.utxo && params.utxo !== s.utxo) ? { utxo: params.utxo, to: params.to } : s));
+  }, [params.tab, params.utxo, params.to]);
 
   const [dataTab, setDataTab] = useState("mines");
   const [refreshKey, setRefreshKey] = useState(0);
@@ -138,7 +149,10 @@ export default function TokenPage({ ticker, params, navigate }) {
   const tabs = tabsFor(token);
   const flipNotice = tab === "mine" && !params.tab ? mintedOutFlipNotice(pinned, token) : null;
   const setTab = (id) => {
-    setPinned((p) => ({ tab: id, marketOpen: p?.marketOpen ?? isMarketOpen(token) }));
+    // The active Transfer tab stays where it is: navigating would drop a split link's query.
+    if (id === "transfer" && tab === "transfer") return;
+    if (id === "transfer") setTransferSeed((s) => s || {});
+    setPinned((p) => pinAfterPick(p, id, token));
     navigate(tokenHref(ticker, id === defaultTab(token) ? undefined : id));
   };
   const age = deployBlock.data?.time ? fmtAgo(deployBlock.data.time) : tip ? `${fmtInt(Math.max(0, tip - token.deploy_block))} blocks ago` : null;
@@ -155,6 +169,15 @@ export default function TokenPage({ ticker, params, navigate }) {
     </Panel>
   );
   const market = <MarketPanel ticker={token.ticker} token={token} onSettled={onSettled} />;
+  // The transfer form of the #/send page, without its page header. A split
+  // link's `?utxo=…&to=self` pre-selects that carrier; a new one remounts the form.
+  // It sits in the same child slot on phone and desktop, right after the
+  // tabs, so a layout switch keeps it mounted too.
+  const transfer = transferSeed && (
+    <div hidden={tab !== "transfer"}>
+      <SendPage key={`${transferSeed.utxo || ""}:${transferSeed.to || ""}`} ticker={token.ticker} params={transferSeed} embedded onSettled={onSettled} />
+    </div>
+  );
   const actionTabs = (kind) => (
     <div className="token-tabs-row">
       {tabNotice && <div className="notice">{tabNotice}</div>}
@@ -178,7 +201,7 @@ export default function TokenPage({ ticker, params, navigate }) {
   );
 
   if (mobile) {
-    // Phone order: compact header → 2×2 stats → Mine | Market segmented control →
+    // Phone order: compact header → 2×2 stats → Mine | Market | Transfer segmented control →
     // the chosen console (within the first 1.5 screens) → folded yield model →
     // segmented activity.
     return (
@@ -223,7 +246,8 @@ export default function TokenPage({ ticker, params, navigate }) {
         </dl>
 
         {actionTabs("seg")}
-        {tab === "market" ? market : mineConsole}
+        {transfer}
+        {tab === "market" ? market : tab === "transfer" ? null : mineConsole}
 
         <Fold title="Yield model" summary={TIER_SUMMARY} led="ok" aria-label="Yield model">
           {yieldModel}
@@ -299,10 +323,11 @@ export default function TokenPage({ ticker, params, navigate }) {
       </dl>
 
       {actionTabs("tabs")}
+      {transfer}
 
       {tab === "market" ? (
         market
-      ) : (
+      ) : tab === "transfer" ? null : (
         <div className="token-layout">
           <div className="col">
             <Panel title="Yield model" led="ok" aria-label="Yield model">

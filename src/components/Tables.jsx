@@ -118,7 +118,7 @@ export function TradesTable({ q, self, usd = null, showTicker = false, empty = "
   );
 }
 
-const KIND_LABEL = { deploy: "Deploy", mine: "Mine", send: "Send", trade: "Trade" };
+const KIND_LABEL = { deploy: "Deploy", mine: "Mine", send: "Transfer", trade: "Trade" };
 
 /**
  * The network ledger (GET /activity): date · block · kind · who · amount ·
@@ -154,7 +154,7 @@ export function ActivityTable({ q, self, usd = null, compact = false, empty = "N
                 <span className={`kind-tag k-${it.kind}`}>{KIND_LABEL[it.kind] || it.kind}</span>
                 {it.self_trade && <SelfTag />}
                 {it.applied === false && (
-                  <span className="status-tag s-cancelled" title={it.kind === "mine" ? "An invalid MINE — no yield was credited." : "The indexer did not apply this SEND (amount shown is what it asked for)."}>
+                  <span className="status-tag s-cancelled" title={it.kind === "mine" ? "An invalid MINE — no yield was credited." : "The indexer did not apply this transfer (amount shown is what it asked for)."}>
                     not applied
                   </span>
                 )}

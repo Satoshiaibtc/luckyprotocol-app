@@ -172,9 +172,9 @@ export default function PortfolioPage() {
                         {t?.floor_unit_price ? ` · floor ${fmtUnit(t.floor_unit_price)}` : ""}
                       </span>
                     </a>
-                    {/* Any token can be sent, market open or not. */}
-                    <a className="btn btn-sm bal-send" href={sendHref(ticker)} aria-label={`Send ${ticker}`}>
-                      Send
+                    {/* Any token can be transferred, market open or not. */}
+                    <a className="btn btn-sm bal-send" href={sendHref(ticker)} aria-label={`Transfer ${ticker}`}>
+                      Transfer
                     </a>
                   </li>
                 );
@@ -211,7 +211,7 @@ export default function PortfolioPage() {
                 })}
               </ul>
               <p className="fineprint">
-                A carrier with more than one ticker cannot be listed for sale. <strong>Split off</strong> sends that ticker to yourself: it lands alone on a new 546-sat carrier, and the other tickers stay
+                A carrier with more than one ticker cannot be listed for sale. <strong>Split off</strong> transfers that ticker to yourself: it lands alone on a new 546-sat carrier, and the other tickers stay
                 together on your residual carrier.
               </p>
             </div>

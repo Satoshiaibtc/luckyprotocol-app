@@ -86,11 +86,11 @@ const row = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted
 {
   const closed = row("LUCKY", 1_234_567);
   const opened = row("BLOK", S);
-  assert.deepEqual(ALL_TABS, ["mine", "market"]);
-  assert.deepEqual(TAB_LABEL, { mine: "Mine", market: "Market" });
-  assert.deepEqual(tabsFor(closed), ["mine"], "no Market tab until minted out");
-  assert.deepEqual(tabsFor(opened), ["market", "mine"], "minted out: Market first (the default) — mines credit 0");
-  assert.deepEqual(tabsFor(null), ["mine"]);
+  assert.deepEqual(ALL_TABS, ["mine", "market", "transfer"]);
+  assert.deepEqual(TAB_LABEL, { mine: "Mine", market: "Market", transfer: "Transfer" });
+  assert.deepEqual(tabsFor(closed), ["mine", "transfer"], "no Market tab until minted out");
+  assert.deepEqual(tabsFor(opened), ["market", "mine", "transfer"], "minted out: Market first (the default) — mines credit 0");
+  assert.deepEqual(tabsFor(null), ["mine", "transfer"]);
   assert.equal(defaultTab(closed), "mine");
   assert.equal(defaultTab(opened), "market");
 
@@ -120,7 +120,7 @@ const row = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted
   assert.deepEqual([isMintedOut(pending), isMarketOpen(pending), isMarketPending(pending)], [true, false, true]);
   assert.equal(marketOpensAt(pending), 970_103);
   assert.equal(marketOpensAt({ ...pending, market_opens_at_height: undefined }), 970_103, "derived from minted_out_height when the row does not say");
-  assert.deepEqual(tabsFor(pending), ["mine"], "no Market tab before it opens");
+  assert.deepEqual(tabsFor(pending), ["mine", "transfer"], "no Market tab before it opens");
   assert.equal(defaultTab(pending), "mine");
   const r = resolveTab("market", "DUNE", pending);
   assert.equal(r.tab, "mine");
