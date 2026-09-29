@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { createPoller, pageHidden, startPolling } from "../src/lib/poller.js";
 import * as indexer from "../src/lib/indexer.js";
-import { isAbortError } from "../src/lib/retry.js";
+import { isAbortError } from "../src/lib/abort.js";
 import { syncStateOf } from "../src/lib/sync.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

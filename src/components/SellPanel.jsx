@@ -4,6 +4,7 @@ import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { useSendToSelf } from "../hooks/useSendToSelf.js";
+import { useOutputValues } from "../hooks/useOutputValues.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { buildListingPsbt, LISTING_SIGHASH, MIN_PRICE_SATS, maxPriceSats } from "../lib/swap.js";
 import { decodeAddress, estimateSendFeeSats } from "../lib/psbt.js";
@@ -78,7 +79,9 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
   const pollOpts = { paused: !active };
 
   const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address], pollOpts);
-  const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address], pollOpts);
+  // Each carrier's BTC value (a listing commits it exactly), read once per outpoint.
+  const tickerCarriers = useMemo(() => (tokenUtxos.data || []).filter((u) => Number(u.balances?.[ticker]) > 0), [tokenUtxos.data, ticker]);
+  const values = useOutputValues(tickerCarriers, POLL_MS, pollOpts);
   // The seller's listings: the per-address history is PAGED by the indexer
   // (newest first, 200 a page, every status and ticker) and read page by
   // page; the ticker's live book (open + filling, ≤ 200 each, the same reads
@@ -113,9 +116,9 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
 
   const refreshMine = useCallback(() => {
     tokenUtxos.refresh();
-    btcUtxos.refresh();
+    values.refresh();
     myOrders.refresh();
-  }, [tokenUtxos, btcUtxos, myOrders]);
+  }, [tokenUtxos, values, myOrders]);
 
   const settled = useCallback(() => {
     refreshMine();
@@ -124,7 +127,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
 
   // ---- on-chain flows: split / withdraw (the spec's "cancel", §7.3) ------------------------
   const sendFlow = useSendToSelf({ onSettled: settled });
-  const { chain, status, run, reset, stopWaiting, busy: chainBusy } = sendFlow;
+  const { chain, status, run, reset, busy: chainBusy } = sendFlow;
 
   // This browser's own pending transactions: a `filling` listing whose
   // pending spend is one of them is the user's own withdrawal — no "a fill
@@ -139,7 +142,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
   // `offBook` = an earlier listing of it that left the book but can still be
   // filled (the by-address row with status "expired").
   const rows = useMemo(() => {
-    const sats = new Map((btcUtxos.data || []).map((u) => [outKey(u), u.sats]));
+    const sats = new Map((values.data || []).map((u) => [outKey(u), u.sats]));
     const live = new Map((myRows || []).filter((o) => o.status === "open" || o.status === "filling").map((o) => [o.id, o]));
     const off = new Map((myRows || []).filter(isOffBook).map((o) => [o.id, o]));
     return (tokenUtxos.data || [])
@@ -154,7 +157,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
       // change outputs sink to the bottom — listing one hands its BTC surplus
       // to the buyer, so they are tagged "split first".
       .sort((a, b) => (a.sats === DUST_SATS ? 0 : 1) - (b.sats === DUST_SATS ? 0 : 1) || b.amount - a.amount);
-  }, [tokenUtxos.data, btcUtxos.data, myRows, ticker, pendingSpent]);
+  }, [tokenUtxos.data, values.data, myRows, ticker, pendingSpent]);
 
   const ordersHere = useMemo(
     () => [...(myRows || [])].sort((a, b) => (a.status === "open" || a.status === "filling" ? -1 : 1) - (b.status === "open" || b.status === "filling" ? -1 : 1) || (b.updated_at ?? 0) - (a.updated_at ?? 0)),
@@ -774,7 +777,6 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
             flow={chain}
             status={status}
             onReset={reset}
-            onStopWaiting={stopWaiting}
             labels={{
               signing: chain.kind === "cancel" ? `Awaiting signature — ${WITHDRAW_FEE_NOTE}` : undefined,
               building: chain.kind === "cancel" ? "Building the withdrawal — a SEND of the listed UTXO to yourself." : "Building the split — a SEND to yourself.",

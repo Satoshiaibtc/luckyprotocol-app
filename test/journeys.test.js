@@ -14,7 +14,7 @@ import { afterConnectFailure } from "../src/hooks/useWallet.js";
 import { deployResumedLine, deployUntrackedLine, resumeDeployState } from "../src/lib/deploylog.js";
 import { creditOf, mineCaption, resumedLine, settledYoursLine, tipLine, yoursLine } from "../src/lib/minerlog.js";
 import { fmtMintedPct, fmtSatsShort, walletBalanceText } from "../src/lib/format.js";
-import { isValidBech32Address, pubkeyFromConnect } from "../src/lib/walletShapes.js";
+import { isValidBech32Address } from "../src/lib/walletShapes.js";
 import { isSearchableAddress, normalizeSearchAddress } from "../src/lib/activity.js";
 import { indexerErrorText, isIndexerOffline } from "../src/lib/errors.js";
 import { MAX_ERROR_TEXT, serverErrorText } from "../src/lib/httpError.js";
@@ -115,10 +115,13 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(fundingMessage(new Error("boom"), null), null, "not a funding error → left to the caller");
   const waiting = fundingMessage(none, { assetSafe: true, waitingSats: 5000 }, { action: "this MINE" });
   assert.equal(waiting, "Your 5,000 sats have not confirmed yet — this MINE can only spend confirmed BTC. Try again after the next block confirms them; nothing was sent.");
-  const okxNone = fundingMessage(noSpendableError(ADDR, 10_000), { assetSafe: false, waitingSats: 0 }, { action: "this MINE" });
-  assert.match(okxNone, /outputs of 10,000 sats or less are not used \(this wallet has no asset-safe UTXO list\)\. Send more than 10,000 sats/);
-  const okxWaiting = fundingMessage(noSpendableError(ADDR, 10_000), { assetSafe: false, waitingSats: 20_000 });
-  assert.match(okxWaiting, /^Your 20,000 sats have not confirmed yet/, "an OKX user who just deposited is told to wait, not to send more");
+  assert.equal(
+    fundingMessage(none, { assetSafe: true, waitingSats: 0 }, { action: "this MINE" }),
+    "No usable BTC for this MINE. Unconfirmed outputs and token carriers are not used. Send plain BTC to this address, then try again.",
+  );
+  const justDeposited = fundingMessage(none, { assetSafe: true, waitingSats: 20_000 });
+  assert.match(justDeposited, /^Your 20,000 sats have not confirmed yet/, "a user who just deposited is told to wait, not to send more");
+  assert.ok(![waiting, justDeposited].some((t) => /asset-safe|10,000|another wallet|use a wallet/.test(t)), "no text points to another wallet or a sats floor");
   const poor = insufficientFundsError(13_446, 12_000, 1);
   assert.match(poor.message, /\(1 UTXO\)$/, "no '(1 UTXOs)'");
   assert.match(insufficientFundsError(10, 5, 2).message, /\(2 UTXOs\)$/);
@@ -138,12 +141,12 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(mineIdleReason({ ...base, connected: false }), "Connect a wallet to mine.");
   assert.match(mineIdleReason({ ...base, indexerOk: false, preActivation: true }), /indexer is not answering/, "offline first (the unknown tip is why it reads locked)");
   assert.match(readyText(true, "Mine"), /^Ready\. Fee inputs are selected from spendable BTC only/);
-  const okx = readyText(false, "Mine");
-  assert.match(okx, /^Ready to mine\. This wallet has no asset-safe UTXO list/);
-  assert.match(okx, /Ordinals or Runes on larger outputs cannot be detected — use an address that holds none\.$/);
-  assert.ok(!/never spent/.test(okx), "no 'token-bearing outputs are never spent' promise without an asset-safe list");
-  assert.match(readyText("inscriptions-only", "Create"), /^Ready to create\./);
-  console.log("status: the reason MINE / Create is off; Ready warns a wallet without an asset-safe list");
+  const noList = readyText(false, "Mine");
+  assert.equal(noList, "UniSat did not offer its list of BTC outputs, which every transaction here is built from — update UniSat to mine.");
+  assert.ok(!/^Ready/.test(noList), "a UniSat without its list is not told it is ready");
+  assert.match(readyText(false, "Create"), /update UniSat to create\.$/);
+  assert.match(readyText(null, "Create"), /^Ready\./, "not known yet: no update prompt");
+  console.log("status: the reason MINE / Create is off; a UniSat without its list of BTC outputs is told to update");
 }
 
 // ---- the click-time lag error says nothing was sent ----------------------------------------------------
@@ -275,8 +278,8 @@ const ADDR = MOCK_WALLET.address;
 
 // ---- a failed or declined switch keeps the live session ------------------------------------------------------
 {
-  const live = { status: "connected", address: ADDR, pubkeyHex: "02" + "ab".repeat(32), provider: "unisat", providerName: "UniSat", balance: 5000, balanceConfirmed: 5000, switching: "okx", error: null, providers: [] };
-  const kept = afterConnectFailure(live, { attemptedId: "okx", message: "Connection declined in the wallet.", hasProvider: true });
+  const live = { status: "connected", address: ADDR, pubkeyHex: "02" + "ab".repeat(32), provider: "unisat", providerName: "UniSat", balance: 5000, balanceConfirmed: 5000, switching: "mock", error: null, providers: [] };
+  const kept = afterConnectFailure(live, { attemptedId: "mock", message: "Connection declined in the wallet.", hasProvider: true });
   assert.equal(kept.status, "connected");
   assert.equal(kept.address, ADDR, "the address every in-flight flow is keyed on survives");
   assert.equal(kept.balance, 5000);
@@ -290,18 +293,13 @@ const ADDR = MOCK_WALLET.address;
   console.log("wallet: declining 'Switch to …' keeps the working session");
 }
 
-// ---- OKX's x-only Taproot key from connect() -----------------------------------------------------------------
+// ---- the x-only Taproot key of the simulated wallet ------------------------------------------------------------
 {
   const xonly = MOCK_WALLET.pubkeyHex.slice(2);
   assert.equal(p2trAddressOfXOnly(xonly), ADDR, "fixture: the mock wallet's x-only key derives its bc1p address");
-  assert.equal(pubkeyFromConnect({ address: ADDR, publicKey: xonly }, ADDR, p2trAddressOfXOnly), `02${xonly}`);
-  assert.equal(pubkeyFromConnect({ address: ADDR, publicKey: MOCK_WALLET.pubkeyHex }, ADDR, p2trAddressOfXOnly), MOCK_WALLET.pubkeyHex, "a compressed key is used as is");
-  assert.equal(pubkeyFromConnect({ address: ADDR, publicKey: xonly, compressedPublicKey: MOCK_WALLET.pubkeyHex }, ADDR, p2trAddressOfXOnly), MOCK_WALLET.pubkeyHex);
-  assert.equal(pubkeyFromConnect({ address: ADDR, publicKey: "cd".repeat(32) }, ADDR, p2trAddressOfXOnly), null, "an x-only key that does not derive the address is refused");
-  assert.equal(pubkeyFromConnect({ address: "bc1q" + "x".repeat(38), publicKey: xonly }, "bc1q" + "x".repeat(38), p2trAddressOfXOnly), null, "x-only only for bc1p");
-  assert.equal(pubkeyFromConnect(null, ADDR, p2trAddressOfXOnly), null);
+  assert.equal(p2trAddressOfXOnly("cd".repeat(32)) === ADDR, false, "another key derives another address");
   assert.equal(p2trAddressOfXOnly("zz"), null);
-  console.log("wallet: OKX's x-only Taproot key is accepted after checking it derives the account");
+  console.log("wallet: an x-only Taproot key derives its bc1p address");
 }
 
 // ---- balance text -----------------------------------------------------------------------------------

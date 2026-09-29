@@ -23,7 +23,7 @@ const NAV = [
  * search and nav move to the board filter and the bottom tab bar. The
  * wallet control is the same on both: one "Connect Wallet" button (→ the
  * wallet dialog) or, once connected, the provider · address chip (→ the
- * same dialog with Switch wallet / Disconnect).
+ * same dialog: the wallet options, Disconnect).
  */
 export default function TopBar() {
   const { wallet, health, sync, mock, openWalletModal, route, navigate, tokens } = useApp();
@@ -183,8 +183,8 @@ function syncWordOf(h, sync) {
 
 /**
  * ONE control on every layout: "Connect Wallet" (opens the wallet dialog)
- * until a session exists, then the "OKX · bc1p…" chip, which opens the same
- * dialog with Switch wallet / Disconnect.
+ * until a session exists, then the "UniSat · bc1p…" chip, which opens the same
+ * dialog: the wallet options, Disconnect.
  */
 function WalletControl({ wallet, mobile, onOpen }) {
   switch (wallet.status) {
@@ -195,7 +195,7 @@ function WalletControl({ wallet, mobile, onOpen }) {
         </button>
       );
     case "connected": {
-      const title = `${wallet.providerName || "Wallet"} · ${wallet.address} — switch or disconnect`;
+      const title = `${wallet.providerName || "Wallet"} · ${wallet.address} — wallet options`;
       return (
         <button className="wallet-addr" type="button" onClick={onOpen} title={title} aria-label={`${wallet.providerName || "Wallet"} ${wallet.address} — open wallet options`} aria-haspopup="dialog">
           {mobile && <Led state="ok" />}

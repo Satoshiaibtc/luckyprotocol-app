@@ -6,11 +6,11 @@
 // Two jobs:
 //
 //   * Its INPUTS are excluded from fee selection until the tx confirms or
-//     drops. The indexer's /btc-utxos confirmed set only changes when a
-//     block is applied, so without this a second build (OKX path) picks
-//     an input the first tx already spends, and under full-RBF the second
-//     tx silently replaces the first — e.g. a listing withdrawal undone by
-//     the next MINE.
+//     drops. The node's confirmed UTXO set (GET /txouts) only changes when
+//     a block is mined, so without this a second build picks an input the
+//     first tx already spends, and under full-RBF the second tx silently
+//     replaces the first — e.g. a listing withdrawal undone by the next
+//     MINE.
 //   * A DEPLOY / MINE that is still pending is remembered with its ticker:
 //     the Create page refuses to offer a ticker the user already has a
 //     pending DEPLOY for (a second DEPLOY would pay the fees twice), and
@@ -240,6 +240,8 @@ export function setIndexedTip(n) {
   indexedTip = Number.isInteger(n) ? n : null;
 }
 export const isUnseenTrusted = () => unseenTrusted;
+/** The indexer's applied height as last set by the app (null = unknown). */
+export const indexedTipNow = () => indexedTip;
 
 /**
  * What a /tx-status answer means for a record: "confirmed" | "pending"

@@ -1,7 +1,7 @@
 // Pure-part tests for the write-flow safety nets: the indexer-lag gate
-// (src/lib/sync.js), the broadcast records (src/lib/txrecords.js), the
-// /btc-utxos seeding retry (src/lib/retry.js), wallet-vs-node error tagging
-// and the "did the failed broadcast land?" check (src/lib/wallet.js), the
+// (src/lib/sync.js), the broadcast records (src/lib/txrecords.js),
+// wallet-vs-node error tagging and the "did the failed broadcast land?"
+// check (src/lib/wallet.js), the
 // mock indexer's §4.1 routing and §7.5 settlement (src/lib/mockRouting.js),
 // and the mock's held-DEPLOY knob. Plain Node, no framework.
 import assert from "node:assert/strict";
@@ -20,20 +20,6 @@ import {
   refreshTxRecords,
   txRecordKey,
 } from "../src/lib/txrecords.js";
-import {
-  isAbortError,
-  isSeedBusyError,
-  isSeedingError,
-  isSeedLimitError,
-  fmtWaited,
-  retryDelayMs,
-  retryOn503,
-  retryWhileSeeding,
-  seedFailureText,
-  seedWaitNote,
-  SEED_WAIT_BUDGET_MS,
-} from "../src/lib/retry.js";
-import { seedWaitFields } from "../src/lib/httpError.js";
 import { LANDED_CHECK_WAITS_MS, landedOrThrow, nodeRefused, walletError } from "../src/lib/wallet.js";
 import { friendlyError } from "../src/hooks/useWallet.js";
 import { defaultOutIdx, deployerOf, inputSighash, isFillOf, listedScriptType, listingSignedInputs, routeDecision, settleListingSpend } from "../src/lib/mockRouting.js";
@@ -246,173 +232,6 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   await refreshTxRecords(ADDR, async () => unseen, { store, now: () => now, trustUnseen: true });
   assert.equal(store.list(ADDR).length, 0, "dropped once trusted and past the grace");
   console.log("txrecords: drops count from the last sighting, never while the node's answer cannot be trusted");
-}
-
-// ---- client side: 503 and 429 both mean "not yet", with the server's Retry-After -----------------
-{
-  const e503 = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 503"), { status: 503, retryAfter: 15 });
-  const e429 = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 429"), { status: 429, retryAfter: 60 });
-  assert.equal(isSeedingError(e503), true);
-  assert.equal(isSeedBusyError(e429), true);
-  assert.equal(isSeedBusyError(new Error("HTTP 429")), true);
-  assert.equal(retryDelayMs(e503), 15_000);
-  assert.equal(retryDelayMs(e429), 60_000, "the server's Retry-After, up to a minute");
-  assert.equal(retryDelayMs({ retryAfter: 600 }), 60_000, "clamped to the max wait");
-  assert.equal(retryDelayMs(new Error("x")), 2_000);
-  let clock = 0;
-  const waits = [];
-  const sleep = async (ms) => {
-    waits.push(ms);
-    clock += ms;
-  };
-  let calls = 0;
-  const rows = await retryWhileSeeding(async () => {
-    calls += 1;
-    if (calls === 1) throw e429;
-    if (calls < 4) throw e503;
-    return ["row"];
-  }, { sleep, now: () => clock });
-  assert.deepEqual([rows, calls, waits], [["row"], 4, [60_000, 15_000, 15_000]], "a 429 is retried like a 503, honoring Retry-After");
-  // the budget ends the wait with the last error
-  clock = 0;
-  await assert.rejects(retryWhileSeeding(async () => {
-    throw e503;
-  }, { sleep, now: () => clock }), /HTTP 503/);
-  assert.ok(clock <= SEED_WAIT_BUDGET_MS, "never waits past the budget");
-  // older callers: fixed delay
-  const fixed = [];
-  await assert.rejects(retryOn503(async () => {
-    throw e429;
-  }, { attempts: 2, delayMs: 7, sleep: async (ms) => fixed.push(ms) }), /HTTP 429/);
-  assert.deepEqual(fixed, [7]);
-  console.log("retry: 503 and 429 retried within a budget, honoring Retry-After");
-}
-
-// ---- capacity: the first-use wait is ~10 minutes, says where the wallet stands, and can be stopped ------------
-{
-  assert.equal(SEED_WAIT_BUDGET_MS, 600_000, "a first use may wait about ten minutes");
-  // The indexer's 503 / 429 bodies -> fields (JSON; an older plain-text 429 still names its reason).
-  assert.deepEqual(seedWaitFields('{"error":"scanning","queue_position":3,"eta_secs":240}'), { queuePosition: 3, etaSecs: 240, reason: null });
-  assert.deepEqual(seedWaitFields('{"queue_position":0,"eta_secs":null}'), { queuePosition: 0, etaSecs: null, reason: null });
-  assert.deepEqual(seedWaitFields('{"error":"busy","reason":"client_limit"}'), { queuePosition: null, etaSecs: null, reason: "client_limit" });
-  assert.equal(seedWaitFields('{"reason":"queue_full"}').reason, "queue_full");
-  assert.deepEqual(seedWaitFields('{"queue_position":-1,"eta_secs":"soon","reason":"other"}'), { queuePosition: null, etaSecs: null, reason: null }, "malformed fields are unknown");
-  assert.deepEqual(seedWaitFields('{"queue_position":1.5,"eta_secs":1e9}'), { queuePosition: null, etaSecs: null, reason: null });
-  assert.equal(seedWaitFields("too many new wallet scans from this client; retry later").reason, "client_limit");
-  assert.equal(seedWaitFields("the UTXO-scan queue is full; retry later").reason, "queue_full");
-  assert.deepEqual(seedWaitFields(""), { queuePosition: null, etaSecs: null, reason: null });
-  assert.deepEqual(seedWaitFields("{not json"), { queuePosition: null, etaSecs: null, reason: null });
-
-  const queued = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 503"), { status: 503, retryAfter: 15, queuePosition: 40, etaSecs: 250, reason: null });
-  const running = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 503"), { status: 503, retryAfter: 15, queuePosition: 0, etaSecs: 70, reason: null });
-  const full = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 429"), { status: 429, retryAfter: 30, reason: "queue_full" });
-  const limit = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 429"), { status: 429, retryAfter: 420, reason: "client_limit" });
-  assert.equal(isSeedLimitError(limit), true);
-  assert.equal(isSeedLimitError(full), false);
-  assert.equal(isSeedLimitError(queued), false);
-
-  // The wait hands the indexer's own queue position and estimate to the flow.
-  const seen = [];
-  let clock = 0;
-  let calls = 0;
-  const rows = await retryWhileSeeding(
-    async () => {
-      calls += 1;
-      if (calls === 1) throw full;
-      if (calls === 2) throw queued;
-      if (calls === 3) throw running;
-      return ["row"];
-    },
-    {
-      sleep: async (ms) => {
-        clock += ms;
-      },
-      now: () => clock,
-      onRetry: (_n, info) => seen.push(info),
-    },
-  );
-  assert.deepEqual(rows, ["row"]);
-  assert.deepEqual(
-    seen.map((i) => [i.busy, i.queuePosition, i.etaSecs, i.reason, i.waitMs]),
-    [
-      [true, null, null, "queue_full", 30_000],
-      [false, 40, 250, null, 15_000],
-      [false, 0, 70, null, 15_000],
-    ],
-  );
-
-  // The per-network limit is not waited out: one call, then a sentence with the minutes to wait.
-  calls = 0;
-  const limited = await retryWhileSeeding(
-    async () => {
-      calls += 1;
-      throw limit;
-    },
-    {
-      sleep: async () => {
-        throw new Error("must not wait");
-      },
-    },
-  ).catch((e) => e);
-  assert.equal(calls, 1, "a client_limit 429 is not retried");
-  assert.equal(seedFailureText(limited), "Too many new wallets from your network are being set up right now — try again in 7 min.");
-  assert.match(seedFailureText({ status: 429, reason: "client_limit" }), /try again in a few minutes\.$/, "no Retry-After, no number");
-  assert.match(seedFailureText(full), /scan queue stayed full for 10 min/, "the queue that stayed full is not the per-network limit");
-  assert.match(seedFailureText(running), /still being set up .* did not finish within 10 min/);
-  assert.equal(seedFailureText(new Error("Indexer unreachable")), null);
-
-  // Stop waiting: the pending sleep ends at once and the wait ends with an AbortError, no further call.
-  const ctrl = new AbortController();
-  calls = 0;
-  const started = Date.now();
-  const err = await retryWhileSeeding(
-    async () => {
-      calls += 1;
-      throw running;
-    },
-    { signal: ctrl.signal, onRetry: () => setTimeout(() => ctrl.abort(), 5) },
-  ).catch((e) => e);
-  assert.equal(isAbortError(err), true, String(err));
-  assert.equal(calls, 1);
-  assert.ok(Date.now() - started < 5_000, "the 15 s Retry-After sleep was cut short");
-  // Already stopped: no call at all.
-  calls = 0;
-  const pre = new AbortController();
-  pre.abort();
-  const none = await retryWhileSeeding(
-    async () => {
-      calls += 1;
-      return [];
-    },
-    { signal: pre.signal },
-  ).catch((e) => e);
-  assert.equal(isAbortError(none), true);
-  assert.equal(calls, 0);
-
-  // What the flow says: calm, with the queue position and the estimate when known.
-  assert.equal(seedWaitNote({ elapsedMs: 20_000, queuePosition: 0, etaSecs: 70 }), "Setting up this wallet: scanning the Bitcoin UTXO set, about 2 min (waiting 20 s).");
-  assert.equal(
-    seedWaitNote({ elapsedMs: 65_000, queuePosition: 40, etaSecs: 250 }),
-    "Setting up this wallet: queued to scan the Bitcoin UTXO set, 40 addresses ahead, about 5 min (waiting 1 min 05 s).",
-  );
-  assert.match(seedWaitNote({ elapsedMs: 0, queuePosition: 1, etaSecs: 10 }), /1 address ahead, about 1 min/);
-  assert.equal(seedWaitNote({ elapsedMs: 0 }), "Setting up this wallet: scanning the Bitcoin UTXO set, usually a few minutes (waiting 0 s).", "an indexer that names neither");
-  assert.match(seedWaitNote({ elapsedMs: 30_000, busy: true, reason: "queue_full" }), /^The indexer's scan queue is full right now/);
-  assert.match(seedWaitNote({ elapsedMs: 30_000, busy: true }), /^The indexer is busy right now/, "a 429 that names no reason is not called a full queue");
-  assert.match(seedFailureText({ status: 429 }), /^The indexer stayed busy for 10 min/);
-  // An estimate past the ten minutes the flow waits says so up front; the
-  // failure then names the indexer's last estimate, not "a few minutes".
-  assert.equal(
-    seedWaitNote({ elapsedMs: 30_000, queuePosition: 2_500, etaSecs: 1_000 }),
-    "Setting up this wallet: queued to scan the Bitcoin UTXO set, 2500 addresses ahead, about 17 min (waiting 30 s). This page waits up to 10 min; the scan keeps running after that.",
-  );
-  assert.match(seedWaitNote({ elapsedMs: 480_000, queuePosition: 0, etaSecs: 150 }), /about 3 min .*waits up to 10 min/, "past what is left of the wait");
-  assert.doesNotMatch(seedWaitNote({ elapsedMs: 65_000, queuePosition: 40, etaSecs: 250 }), /waits up to/);
-  assert.doesNotMatch(seedWaitNote({ elapsedMs: 590_000 }), /waits up to/, "no estimate, no promise either way");
-  assert.match(seedFailureText({ status: 503, etaSecs: 400 }), /did not finish within 10 min\. It keeps running; try again in about 7 min\.$/);
-  assert.match(seedFailureText({ status: 503, etaSecs: null }), /try again in a few minutes\.$/, "no estimate, no number");
-  assert.equal(fmtWaited(599_000), "9 min 59 s");
-  console.log("retry: ten-minute first-use wait with queue position and estimate, per-network limit said at once, Stop waiting");
 }
 
 // ---- only a WALLET refusal reads as "declined" ------------------------------------------------
@@ -682,7 +501,9 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
     writable: true,
     value: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
   });
-  const { MOCK_WALLET, mockGet, mockSignPsbt, simulateBroadcast } = await import("../src/lib/mock.js");
+  const mock = await import("../src/lib/mock.js");
+  const { MOCK_WALLET, mockGet, mockSignPsbt, simulateBroadcast } = mock;
+  const { mockSpendable } = await import("./mockspend.js");
   const { buildDeployPsbt, extractRawTxHex } = await import("../src/lib/psbt.js");
   const CONFIRM_AFTER_MS = 20_000;
   const realNow = Date.now;
@@ -690,7 +511,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   Date.now = () => now;
   try {
     const address = MOCK_WALLET.address;
-    const btcRows = (await mockGet(`/btc-utxos/${address}`)).utxos.filter((u) => u.confirmed);
+    const btcRows = (await mockSpendable(mock, address)).utxos;
     const tokenOutpoints = (await mockGet(`/utxos/${address}`)).utxos.map(({ txid, vout }) => ({ txid, vout }));
     const built = buildDeployPsbt({ address, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows, tokenOutpoints, feeRateSatVb: 2, ticker: "HELD", selectionOrder: "largest" });
     const raw = extractRawTxHex(mockSignPsbt(built.psbtHex, { toSignInputs: built.inputIndexes.map((index) => ({ index, address })) }));

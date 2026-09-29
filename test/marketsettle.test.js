@@ -41,7 +41,9 @@ Object.defineProperty(globalThis, "sessionStorage", {
   value: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
 });
 
-const { MOCK_WALLET, mockGet, mockPostJson, mockSignPsbt, simulateBroadcast, SMALL_CARRIER_LISTING_TEXT } = await import("../src/lib/mock.js");
+const mock = await import("../src/lib/mock.js");
+const { MOCK_WALLET, mockGet, mockPostJson, mockSignPsbt, simulateBroadcast, SMALL_CARRIER_LISTING_TEXT } = mock;
+const { mockSpendable } = await import("./mockspend.js");
 const { LISTING_SIGHASH, buildFillPsbt, buildListingPsbt, finalizeFill, parseListing, verifyListing } = await import("../src/lib/swap.js");
 const { buildSendPsbt } = await import("../src/lib/psbt.js");
 const { WITHDRAW_FIRST_TEXT } = await import("../src/lib/listingRules.js");
@@ -51,9 +53,9 @@ const ADDR = MOCK_WALLET.address;
 const realNow = Date.now;
 const past = () => Date.now() - 60_000; // a broadcast that has had time to confirm
 
-/** The simulated wallet's BTC UTXOs and token outpoints, as a build reads them. */
+/** The simulated wallet's spendable BTC (its own list checked with GET /txouts) and token outpoints, as a build reads them. */
 async function walletRows() {
-  const btcRows = (await mockGet(`/btc-utxos/${ADDR}`)).utxos;
+  const btcRows = (await mockSpendable(mock, ADDR)).utxos;
   const tokenRows = (await mockGet(`/utxos/${ADDR}`)).utxos;
   return { btcRows, tokenRows, tokenOutpoints: tokenRows.map(({ txid, vout }) => ({ txid, vout })) };
 }
@@ -64,7 +66,7 @@ async function withdraw(carrier, amount) {
   const built = buildSendPsbt({
     address: ADDR,
     pubkeyHex: MOCK_WALLET.pubkeyHex,
-    utxos: btcRows.filter((u) => u.confirmed),
+    utxos: btcRows,
     tokenOutpoints,
     tokenUtxos: [{ txid: carrier.txid, vout: carrier.vout, sats: 546 }],
     feeRateSatVb: 2,
@@ -80,7 +82,7 @@ async function withdraw(carrier, amount) {
 /** Fill `listing` (an OrderView with its PSBT) from the simulated wallet. */
 async function fillFromWallet(listing) {
   const { btcRows, tokenOutpoints } = await walletRows();
-  const built = buildFillPsbt({ listingPsbtHex: listing.psbt, order: listing, sendAmount: listing.amount, address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows.filter((u) => u.confirmed), tokenOutpoints, feeRateSatVb: 2 });
+  const built = buildFillPsbt({ listingPsbtHex: listing.psbt, order: listing, sendAmount: listing.amount, address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows, tokenOutpoints, feeRateSatVb: 2 });
   const signed = mockSignPsbt(built.psbtHex, { toSignInputs: built.inputIndexes.map((index) => ({ index, address: ADDR })) });
   return simulateBroadcast(finalizeFill(signed, { op: "SEND", ticker: listing.ticker, amount: listing.amount }), { at: past() });
 }
@@ -267,7 +269,7 @@ async function fillFromWallet(listing) {
   assert.equal(parseListing(listingHex).input0.tapInternalKey, null);
   assert.equal(verifyListing({ psbtHex: listingHex, order }).ok, true, "no internal key: still a valid listing");
   const { btcRows, tokenOutpoints } = await walletRows();
-  const built = buildFillPsbt({ listingPsbtHex: listingHex, order, sendAmount: order.amount, address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows.filter((u) => u.confirmed), tokenOutpoints, feeRateSatVb: 2 });
+  const built = buildFillPsbt({ listingPsbtHex: listingHex, order, sendAmount: order.amount, address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows, tokenOutpoints, feeRateSatVb: 2 });
   const signed = mockSignPsbt(built.psbtHex, { toSignInputs: built.inputIndexes.map((index) => ({ index, address: ADDR })) });
   const raw = btc.RawTx.decode(hex.decode(finalizeFill(signed, { op: "SEND", ticker: "BLOK", amount: 40 })));
   assert.deepEqual(raw.witnesses[0].map((w) => w.length), [65], "input 0: the seller's signature, nothing else");
@@ -324,7 +326,7 @@ async function fillFromWallet(listing) {
   assert.ok(open.length > 0, "an open listing");
   const target = await mockGet(`/orders/${open[0].id}`);
   const { btcRows, tokenOutpoints } = await walletRows();
-  const built = buildFillPsbt({ listingPsbtHex: target.psbt, order: target, sendAmount: target.amount, address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows.filter((u) => u.confirmed), tokenOutpoints, feeRateSatVb: 3 });
+  const built = buildFillPsbt({ listingPsbtHex: target.psbt, order: target, sendAmount: target.amount, address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, utxos: btcRows, tokenOutpoints, feeRateSatVb: 3 });
   const signed = mockSignPsbt(built.psbtHex, { toSignInputs: built.inputIndexes.map((index) => ({ index, address: ADDR })) });
   const rawHex = finalizeFill(signed, { op: "SEND", ticker: target.ticker, amount: target.amount });
   const txid = simulateBroadcast(rawHex);

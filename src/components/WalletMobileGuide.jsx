@@ -27,7 +27,7 @@ export function CopySiteUrlButton({ className = "btn btn-primary btn-sm" }) {
 /**
  * Shown (inside the wallet modal) on phones when no provider is injected:
  * mobile browsers cannot run an extension, so the way in is a wallet app's
- * built-in browser (UniSat app → Discover; OKX Wallet app → DApp browser).
+ * built-in browser (UniSat app → Discover).
  * The per-wallet "Get the app" links live on the provider cards above it;
  * this block carries the copy-URL affordance and the URL itself.
  */
@@ -35,8 +35,8 @@ export default function WalletMobileGuide({ extra = null }) {
   return (
     <div className="wallet-guide">
       <div>
-        <strong>No wallet extension on phones.</strong> Copy this page&apos;s address, open it inside the UniSat app or the OKX Wallet app (Discover / DApp browser),
-        and tap Connect Wallet there. LuckyProtocol never holds keys.
+        <strong>No wallet extension on phones.</strong> Copy this page&apos;s address, open it inside the UniSat app (Discover tab), and tap
+        Connect Wallet there. LuckyProtocol never holds keys.
       </div>
       <div className="row">
         <CopySiteUrlButton />

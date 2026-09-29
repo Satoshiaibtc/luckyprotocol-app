@@ -29,7 +29,7 @@ const tokenUtxos = [
   { txid: TX("e"), vout: 3, balances: { LUCKY: 70 } },
   { txid: TX("f"), vout: 0, balances: { ORE: 42 } },
 ];
-const btcUtxos = [
+const values = [
   { txid: TX("a"), vout: 0, sats: 546 },
   { txid: TX("b"), vout: 1, sats: 546 },
   { txid: TX("c"), vout: 0, sats: 546 },
@@ -41,7 +41,7 @@ const orders = [
   { id: `${TX("e")}:3`, status: "filling", ticker: "LUCKY", amount: 70 },
   { id: `${TX("a")}:0`, status: "filled", ticker: "LUCKY", amount: 1200 },
 ];
-const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new Set([`${TX("c")}:0`]), ticker: "LUCKY" });
+const rows = sendCarrierRows({ tokenUtxos, values, orders, pendingSpent: new Set([`${TX("c")}:0`]), ticker: "LUCKY" });
 {
   assert.deepEqual(rows.map((r) => [r.txid[0], r.amount, r.blocked]), [
     ["a", 1200, null],

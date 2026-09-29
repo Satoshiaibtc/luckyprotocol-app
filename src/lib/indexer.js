@@ -18,7 +18,7 @@
 //   GET  /                          health
 //   GET  /balances/:addr            balances
 //   GET  /utxos/:addr               tokenUtxos        (token-bearing only)
-//   GET  /btc-utxos/:addr           btcUtxos          (raw BTC UTXOs, every page)
+//   GET  /txouts?o=txid:vout,…      txouts / outputValues (the node's confirmed UTXO set, ≤ 100 a request)
 //   GET  /mines/:addr               minesByAddress
 //   GET  /mines?limit&offset&ticker minesFeed
 //   GET  /mines/by-txid/:txid       mineByTxid
@@ -46,7 +46,7 @@
 //   GET  /trades/:addr              tradesByAddress
 
 import { mockGet, mockPostText, mockPostJson } from "./mock.js";
-import { seedWaitFields, serverErrorText } from "./httpError.js";
+import { serverErrorText } from "./httpError.js";
 import { RECENT_BLOCKS_LIMIT, blockStats } from "./blocks.js";
 import { DAYS_DEFAULT, DAYS_MAX, DIGITS_DEFAULT, DIGITS_MAX } from "./digits.js";
 import { MARKET_OPEN_DELAY } from "./finality.js";
@@ -134,13 +134,11 @@ async function _httpGet(path, signal, { fresh = false } = {}) {
       const body = serverErrorText(text);
       const err = new Error(`Indexer ${path} -> HTTP ${res.status}${body ? `: ${body}` : ""}`);
       err.status = res.status;
-      // Seconds the server asked us to wait when it answers "not yet" or
-      // "busy" (retry.js waits that long before asking again).
+      // The server's own sentence, without the path (a caller that shows it alone).
+      err.detail = body;
+      // Seconds the server asked us to wait when it answers "busy".
       const ra = Number(res.headers?.get?.("Retry-After"));
       if (Number.isFinite(ra) && ra > 0) err.retryAfter = ra;
-      // A "not yet" / "busy" answer of the first-use UTXO scan also says where
-      // the wallet stands: queue position, estimate, why it was turned away.
-      if (res.status === 503 || res.status === 429) Object.assign(err, seedWaitFields(text));
       throw err;
     }
     try {
@@ -323,20 +321,6 @@ function _sanitizeTokenUtxo(u) {
   const vout = _safeInt(u.vout, 1e6);
   if (vout === null) return null;
   return { txid: String(u.txid).toLowerCase(), vout, balances: _sanitizeBalances(u.balances) };
-}
-
-function _sanitizeBtcUtxo(u) {
-  if (!u || typeof u !== "object" || !_TXID_RE.test(String(u.txid || ""))) return null;
-  const vout = _safeInt(u.vout, 1e6);
-  const sats = _safeInt(u.sats, _MAX_SATS);
-  if (vout === null || sats === null) return null;
-  return {
-    txid: String(u.txid).toLowerCase(),
-    vout,
-    sats,
-    confirmed: u.confirmed !== false,
-    block_height: _safeInt(u.block_height, 1e9) ?? 0,
-  };
 }
 
 // MineView (indexer API): identity fields must be well-formed; yield clamps to the
@@ -793,76 +777,150 @@ export async function tokenUtxos(address, signal) {
   return ((env && env.utxos) || []).map(_sanitizeTokenUtxo).filter(Boolean);
 }
 
-/**
- * GET /btc-utxos/:addr?limit&offset → `[{ txid, vout, sats, confirmed, block_height }]`,
- * EVERY page (see BTC_UTXOS_PAGE), merged by outpoint; `firstPageOnly`
- * reads just the first (enough to start the indexer's scan of a wallet).
- * The first query for an address returns 503 while the indexer's scan of
- * it is queued or running (with `queuePosition` / `etaSecs` when the
- * indexer names them), and 429 while the scan queue is full or this
- * network started too many new scans lately (`reason`); both surface as
- * thrown errors (with `retryAfter`) the caller retries or explains — see
- * src/lib/retry.js.
- */
-export async function btcUtxos(address, signal, { firstPageOnly = false } = {}) {
-  const read = () => _readBtcUtxoPages(address, signal, firstPageOnly ? 1 : BTC_UTXOS_MAX_PAGES);
-  let r = await read();
-  // Pages read while a block (or a mempool tx) changed the list can repeat
-  // or skip a row: when consecutive pages do not meet (see below) or the
-  // rows do not add up to `total`, the list is read once more.
-  if (!firstPageOnly && r.total !== null && r.complete && (!r.consistent || r.rows.length !== r.total)) r = await read();
-  const rows = r.rows;
-  // `complete: false` = some rows were not read (the page cap); `total` = the
-  // indexer's count (null when it does not say).
-  Object.defineProperty(rows, "complete", { value: r.complete, enumerable: false });
-  Object.defineProperty(rows, "total", { value: r.total, enumerable: false });
-  return rows;
+/** Most outpoints one GET /txouts request may name; longer lists are asked in chunks of this size. */
+export const TXOUTS_MAX = 100;
+/** Retries of a chunk the server answered "busy" (a 503 with a short Retry-After, or a 429). */
+export const TXOUTS_RETRIES = 2;
+const TXOUTS_RETRY_MAX_SECS = 5;
+/** A 429's Retry-After is the rest of the server's 10 s per-client window: waited out up to this long. */
+const TXOUTS_BUDGET_WAIT_MAX_SECS = 10;
+const _OUTPOINT_RE = /^([0-9a-f]{64}):(0|[1-9][0-9]{0,9})$/;
+
+/** "txid:vout" keys (lower-case) of `outpoints` (`{ txid, vout }` rows or "txid:vout" strings), distinct, in order; malformed ones dropped. */
+export function outpointKeys(outpoints) {
+  const out = [];
+  const seen = new Set();
+  for (const o of outpoints || []) {
+    const k = typeof o === "string" ? o.toLowerCase() : `${String(o?.txid || "").toLowerCase()}:${Number(o?.vout)}`;
+    const m = _OUTPOINT_RE.exec(k);
+    if (!m || Number(m[2]) > 0xffffffff || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
+// One /txouts row. `unspent` only when the server says exactly true; the
+// value, script and address only on an unspent row; `confirmations` 0
+// when missing; `tokens` only on a token carrier.
+function _sanitizeTxout(r) {
+  if (!r || typeof r !== "object" || !_TXID_RE.test(String(r.txid || ""))) return null;
+  const vout = _safeInt(r.vout, 0xffffffff);
+  if (vout === null) return null;
+  const unspent = r.unspent === true;
+  const carrier = r.token_carrier === true;
+  const tokens = carrier ? _sanitizeBalances(r.tokens) : null;
+  return {
+    txid: String(r.txid).toLowerCase(),
+    vout,
+    unspent,
+    sats: unspent ? _safeInt(r.sats, _MAX_SATS) : null,
+    script_hex: unspent ? _safeHex(r.script_hex, 20_000) : null,
+    address: unspent ? _safeAddr(r.address) : null,
+    confirmations: unspent ? (_safeInt(r.confirmations, 1e9) ?? 0) : 0,
+    coinbase: unspent && r.coinbase === true,
+    token_carrier: carrier,
+    tokens: tokens && Object.keys(tokens).length ? tokens : null,
+  };
+}
+
+/** A failed /txouts read as one plain sentence (the server's own when it gave one); `status` / `retryAfter` ride along. */
+function _txoutsError(e) {
+  if (e && e.name === "AbortError") return e;
+  const detail = String(e?.detail || "").trim();
+  const text = detail || (e?.status ? `HTTP ${e.status}` : /timeout/i.test(String(e?.message || "")) ? "no answer in time" : "the indexer could not be reached");
+  return Object.assign(new Error(text), { status: e?.status ?? null, retryAfter: e?.retryAfter ?? null, cause: e });
+}
+
+/** `ms`, cut short when `signal` aborts. */
+function _sleepUnlessAborted(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal && signal.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    if (signal) signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 /**
- * `/btc-utxos` pages: the indexer serves at most BTC_UTXOS_PAGE rows a
- * page, largest `sats` first — a wallet's small outputs (its 546-sat token
- * carriers among them) sit on the LAST pages, so a reader that stops at
- * the first page loses exactly those. Each page after the first starts at
- * the previous page's last row: when the list changed between two reads
- * (a spend or a new output above the boundary shifts every row after it),
- * that row is not where it was and the read is known to be inconsistent.
- * BTC_UTXOS_MAX_PAGES pages cover the most outputs the indexer tracks for
- * one address (20,000).
+ * GET /txouts?o=… → one row per distinct outpoint of `outpoints`, in their
+ * order: `{ txid, vout, unspent, sats, script_hex, address, confirmations,
+ * coinbase, token_carrier, tokens }` — the node's CONFIRMED UTXO set (an
+ * output a mempool tx spends is still `unspent`; one a mempool tx creates
+ * is not) with the indexer's token state. Asked TXOUTS_MAX outpoints a
+ * request, one request after another. An answer that does not cover every
+ * outpoint it was asked about is an error, never a shorter list. A chunk
+ * the server answers 503 with a short Retry-After, or 429 (the per-client
+ * budget, whose window is at most 10 s), is asked again up to
+ * TXOUTS_RETRIES times after that wait, so a long list is paced across
+ * windows instead of failing. Throws one plain sentence (with `status`,
+ * `retryAfter`); a stopped read (`signal`) throws its AbortError.
  */
-export const BTC_UTXOS_PAGE = 500;
-export const BTC_UTXOS_MAX_PAGES = 41;
-
-const _utxoKey = (u) => `${String(u?.txid || "").toLowerCase()}:${Number(u?.vout)}`;
-
-async function _readBtcUtxoPages(address, signal, maxPages) {
-  const byKey = new Map();
-  let total = null;
-  let complete = true;
-  let consistent = true;
-  let prevLast = null;
-  let prevTotal = null;
-  for (let n = 0, offset = 0; ; n++) {
-    if (n >= maxPages) {
-      complete = false;
-      break;
+export async function txouts(outpoints, signal) {
+  const keys = outpointKeys(outpoints);
+  const rows = [];
+  for (let i = 0; i < keys.length; i += TXOUTS_MAX) {
+    const chunk = keys.slice(i, i + TXOUTS_MAX);
+    let env;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        env = await _httpGet(`/txouts?o=${chunk.join(",")}`, signal, { fresh: true });
+        break;
+      } catch (e) {
+        if (signal && signal.aborted) throw e;
+        const busy = !!e && (e.status === 503 || e.status === 429);
+        const wait = Number(e?.retryAfter) || 1;
+        const cap = e?.status === 429 ? TXOUTS_BUDGET_WAIT_MAX_SECS : TXOUTS_RETRY_MAX_SECS;
+        if (!busy || attempt >= TXOUTS_RETRIES || wait > cap) throw _txoutsError(e);
+        await _sleepUnlessAborted(wait * 1000, signal);
+        if (signal && signal.aborted) throw e;
+      }
     }
-    const env = await _httpGet(`/btc-utxos/${encodeURIComponent(address)}?limit=${BTC_UTXOS_PAGE}&offset=${offset}`, signal);
-    const raw = env && Array.isArray(env.utxos) ? env.utxos : [];
-    for (const u of raw.map(_sanitizeBtcUtxo).filter(Boolean)) byKey.set(`${u.txid}:${u.vout}`, u);
-    total = _safeInt(env && env.total, 1e7);
-    // An answer without `total` is one list, not a page.
-    if (total === null) break;
-    if (prevLast !== null && (total !== prevTotal || raw.length === 0 || _utxoKey(raw[0]) !== prevLast)) consistent = false;
-    const end = offset + raw.length;
-    if (raw.length === 0 || end >= total) break;
-    // The next page starts on this page's last row (one row of overlap).
-    const overlap = raw.length > 1;
-    prevLast = overlap ? _utxoKey(raw[raw.length - 1]) : null;
-    prevTotal = total;
-    offset = overlap ? end - 1 : end;
+    if (!Array.isArray(env)) throw new Error("the indexer's answer about these outputs is unreadable");
+    const byKey = new Map();
+    for (const r of env.map(_sanitizeTxout).filter(Boolean)) byKey.set(`${r.txid}:${r.vout}`, r);
+    for (const k of chunk) {
+      const r = byKey.get(k);
+      if (!r) throw new Error("the indexer's answer about these outputs is incomplete");
+      rows.push(r);
+    }
   }
-  return { rows: [...byKey.values()], total, complete, consistent };
+  return rows;
+}
+
+// An outpoint's value never changes: once read, it is kept for the page's life.
+const _valueCache = new Map();
+const _VALUE_CACHE_MAX = 50_000;
+
+/**
+ * The BTC value of each outpoint of `outpoints` the node has unspent
+ * (GET /txouts, asked only for outpoints whose value this page has not
+ * read before) → `[{ txid, vout, sats }]` in their order; outpoints without
+ * a known value are left out. Used for token carriers, whose exact value a
+ * SEND signs.
+ */
+export async function outputValues(outpoints, signal) {
+  const keys = outpointKeys(outpoints);
+  const missing = keys.filter((k) => !_valueCache.has(k));
+  if (missing.length) {
+    if (_valueCache.size + missing.length > _VALUE_CACHE_MAX) _valueCache.clear();
+    // Chunk by chunk: a failed or stopped read keeps what it already read,
+    // and the next call asks only for the rest.
+    for (let i = 0; i < missing.length; i += TXOUTS_MAX) {
+      const rows = await txouts(missing.slice(i, i + TXOUTS_MAX), signal);
+      for (const r of rows) if (r.unspent && Number.isInteger(r.sats)) _valueCache.set(`${r.txid}:${r.vout}`, r.sats);
+    }
+  }
+  return keys
+    .filter((k) => _valueCache.has(k))
+    .map((k) => {
+      const [txid, vout] = k.split(":");
+      return { txid, vout: Number(vout), sats: _valueCache.get(k) };
+    });
 }
 
 /** GET /mines/:addr → MineView[] (sender == addr, newest first) */

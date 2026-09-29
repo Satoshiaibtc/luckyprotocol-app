@@ -7,7 +7,9 @@
 //      another one is signing or broadcasting (nor what a recorded, unfinal
 //      broadcast spends) — a Speed up names what it replaces;
 //   3. the record of a broadcast goes to the address that built it;
-//   4. a page-load restore never errors for a key only a prompt can give;
+//   4. a page-load restore never errors for a key only a prompt can give,
+//      and a session stored for a provider this site does not offer is
+//      dropped quietly (the page starts disconnected);
 //   5. coin selection runs until the fee it pays is the fee it selected
 //      for — many small outputs never read as "not enough BTC";
 //   6. the indexer answering "busy" is not "offline", and no page text
@@ -280,9 +282,9 @@ globalThis.window = { unisat: provider };
   console.log("records: a broadcast is recorded under the address that built it");
 }
 
-// ---- 4. a silent restore never errors for a key only a prompt can give -----------------------------
+// ---- 4. a silent restore never errors for a key only a prompt can give; another provider's session is dropped ----
 {
-  const okxLike = {
+  const noKey = {
     async getAccounts() {
       return [MOCK_WALLET.address];
     },
@@ -293,12 +295,26 @@ globalThis.window = { unisat: provider };
       return "livenet";
     },
   };
-  globalThis.window = { okxwallet: { bitcoin: okxLike } };
-  assert.equal(await wallet.connect("okx", { silent: true }), null, "no getPublicKey: stays disconnected, no error");
-  await assert.rejects(wallet.connect("okx"), /did not share this account's public key/, "a Connect click still says why");
+  globalThis.window = { unisat: noKey };
+  assert.equal(await wallet.connect("unisat", { silent: true }), null, "no getPublicKey: stays disconnected, no error");
+  await assert.rejects(wallet.connect("unisat"), /did not share this account's public key/, "a Connect click still says why");
+
+  // A session stored for OKX Wallet (another wallet's extension injected too): dropped quietly.
+  globalThis.window = { unisat: provider, okxwallet: { bitcoin: provider } };
+  wallet.disconnect();
+  store.set("lp.wallet", "okx");
+  assert.deepEqual((await wallet.detectProviders(0)).map((p) => p.id), ["unisat"], "only UniSat is detected");
+  assert.equal(await wallet.restoreSession(), null, "no session is restored");
+  assert.equal(store.has("lp.wallet"), false, "the stored id is removed");
+  assert.equal(wallet.isConnected(), false, "the page starts disconnected");
+  await assert.rejects(wallet.connect("okx"), /Unknown wallet "okx"/, "and it cannot be connected");
+  // A stored UniSat session is restored silently, as before.
+  store.set("lp.wallet", "unisat");
+  const restored = await wallet.restoreSession();
+  assert.deepEqual([restored?.providerId, restored?.address], ["unisat", MOCK_WALLET.address]);
   globalThis.window = { unisat: provider };
   await wallet.connect("unisat");
-  console.log("restore: a provider without getPublicKey restores to nothing, silently");
+  console.log("restore: a provider without getPublicKey restores to nothing, silently; another provider's stored session is dropped");
 }
 
 // ---- 5. coin selection converges ----------------------------------------------------------------

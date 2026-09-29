@@ -7,8 +7,7 @@ import * as wallet from "../lib/wallet.js";
 import { droppedMessage, useTxStatus } from "../hooks/useTxStatus.js";
 import { useModalFocus } from "../hooks/useModalFocus.js";
 import { friendlyError } from "../hooks/useWallet.js";
-import { useSeedWait } from "../hooks/useSeedWait.js";
-import { seedWaitNote } from "../lib/retry.js";
+import { useBuildSignal } from "../hooks/useBuildSignal.js";
 import { buildFillPsbt, fillSendAmount, finalizeFill, parseListing, verifyListing } from "../lib/swap.js";
 import { expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { isUsableFeeRate, missingFeeHint } from "../lib/feechoice.js";
@@ -62,9 +61,9 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
   const [flow, setFlow] = useState(IDLE);
   const connected = w.status === "connected";
   const busy = BUSY.has(flow.phase);
-  // The fill's wait for the indexer's scan of the wallet lives with the
-  // flow, not the sheet: hiding the sheet keeps it; leaving the tab stops it.
-  const seedWait = useSeedWait();
+  // The fill's reads live with the flow, not the sheet: hiding the sheet
+  // keeps them; leaving the tab or a wallet change stops them.
+  const reads = useBuildSignal();
 
   // The fill's confirmation is polled HERE, not in the sheet: the sheet can
   // be hidden while the fill is pending (Hide / Esc / the backdrop), and the
@@ -128,11 +127,11 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
 
   // A wallet change abandons the sheet's state.
   useEffect(() => {
-    seedWait.stop();
+    reads.stop();
     setFlow(IDLE);
     setSheetOpen(false);
     setSheetOrder(null);
-  }, [address, seedWait]);
+  }, [address, reads]);
   // A new selection while nothing is in flight replaces the snapshot.
   useEffect(() => {
     if (busy || flow.phase === "confirmed") return;
@@ -177,15 +176,13 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
                       ? flow.error
                       : flow.phase === "replaced"
                         ? flow.note
-                        : flow.phase === "building" && flow.waitNote
-                          ? flow.waitNote
-                          : flow.replacing
-                            ? flow.note
-                            : flow.phase === "unseen"
-                              ? status.watchEnded
-                                ? "Not seen by the indexer's node for over an hour — no longer checked here. Look at your Portfolio."
-                                : "Not seen by the indexer's node for a while — still checking."
-                              : "In progress — checking every 15 s."}
+                        : flow.replacing
+                          ? flow.note
+                          : flow.phase === "unseen"
+                            ? status.watchEnded
+                              ? "Not seen by the indexer's node for over an hour — no longer checked here. Look at your Portfolio."
+                              : "Not seen by the indexer's node for a while — still checking."
+                            : "In progress — checking every 15 s."}
                 </span>
                 <button className="btn btn-sm" type="button" onClick={() => setSheetOpen(true)}>
                   Show
@@ -277,7 +274,7 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
       {sheetOpen &&
         sheetOrder &&
         createPortal(
-          <BuySheet order={sheetOrder} ticker={ticker} token={token} usd={usd} flow={flow} setFlow={setFlow} status={status} seedWait={seedWait} onClose={() => setSheetOpen(false)} onReset={reset} connected={connected} />,
+          <BuySheet order={sheetOrder} ticker={ticker} token={token} usd={usd} flow={flow} setFlow={setFlow} status={status} reads={reads} onClose={() => setSheetOpen(false)} onReset={reset} connected={connected} />,
           document.body,
         )}
     </div>
@@ -287,13 +284,13 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
 /**
  * Build (never sign) the fill of verified order `full` for `addr` at `rate`
  * from the wallet's current UTXOs — the dry run and the real build share it.
- * `signal` stops the reads (and the wait for the indexer's scan of the wallet).
+ * `signal` stops the reads.
  * `sendAmount` is the SEND's AMT (fillSendAmount): the listed amount only when
  * the second source confirmed it, else 1 — every token the output holds
  * still reaches the buyer (1 on vout1, the rest on vout2).
  */
-async function buildFill(full, addr, pubkeyHex, rate, onWait, signal, sendAmount) {
-  const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { onWait, signal }), indexer.tokenUtxos(addr, signal)]);
+async function buildFill(full, addr, pubkeyHex, rate, signal, sendAmount) {
+  const [utxoRes, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { signal }), indexer.tokenUtxos(addr, signal)]);
   let built;
   try {
     built = buildFillPsbt({
@@ -328,7 +325,7 @@ const SECOND_IDLE = { state: "pending", detail: "", reasons: [], notes: [] };
  * check of the listed outpoint against mempool.space, the plain-words
  * explanation, the totals, and the sign → broadcast → confirm flow.
  */
-function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, onClose, onReset, connected }) {
+function BuySheet({ order, ticker, token, usd, flow, setFlow, status, reads, onClose, onReset, connected }) {
   const { wallet: w, fee, fees, indexerOk, mock, sync } = useApp();
   const [checks, setChecks] = useState(() => CHECK_ORDER.map((c) => ({ ...c, state: "pending", detail: "" })));
   const [second, setSecond] = useState(SECOND_IDLE);
@@ -455,7 +452,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
   // The quote assumes ONE buyer input. Once the listing
   // verified, build the fill for real (nothing is signed) so the sheet and
   // the Sign button show the exact total the wallet will be asked for.
-  const [dry, setDry] = useState(null); // { rate, loading, waitNote? } | { rate, totalSats, feeSats, inputCount } | { rate, error }
+  const [dry, setDry] = useState(null); // { rate, loading } | { rate, totalSats, feeSats, inputCount } | { rate, error }
   // The running dry run's stop handle: Sign stops it (see confirm).
   const dryCtrl = useRef(null);
   const walletAddress = w.address;
@@ -467,18 +464,13 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
       return undefined;
     }
     let alive = true;
-    // Closing the sheet (or a new rate) stops this read — and its wait for
-    // the indexer's scan of the wallet, which Sign waits for on its own.
+    // Closing the sheet (or a new rate) stops this read; Sign reads on its own.
     const ctrl = new AbortController();
     dryCtrl.current = ctrl;
     setDry({ rate, loading: true });
-    // A first-use wallet: the sheet says why the exact total takes a while.
-    const onWait = (info) => {
-      if (alive) setDry((d) => (d && d.loading && d.rate === rate ? { ...d, waitNote: seedWaitNote(info) } : d));
-    };
     (async () => {
       try {
-        const built = await buildFill(full, walletAddress, walletPubkey, rate, onWait, ctrl.signal, fillSendAmount(secondState, full.amount));
+        const built = await buildFill(full, walletAddress, walletPubkey, rate, ctrl.signal, fillSendAmount(secondState, full.amount));
         if (alive) setDry({ rate, totalSats: built.totalSats, feeSats: built.feeSats, inputCount: built.inputs.length });
       } catch (e) {
         if (!alive) return;
@@ -515,12 +507,11 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
     const { address: addr, pubkeyHex } = w;
     // The total on the button the user just pressed.
     const shownTotal = totalSats;
-    // Sign reads the wallet's UTXOs itself (and waits for the indexer's scan
-    // with a note and Stop): a dry run still running stops, so one wait
-    // asks the indexer, not two side by side.
+    // Sign reads the wallet's UTXOs itself: a dry run still running stops,
+    // so the wallet and the indexer are asked once, not twice side by side.
     dryCtrl.current?.abort();
     setFlow({ phase: "building" });
-    const signal = seedWait.begin();
+    const signal = reads.begin();
     // Signed but never handed to a relay: its inputs are released at once.
     let signedPsbt = null;
     let relayed = false;
@@ -540,11 +531,8 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
       // was emptied since the sheet opened is never signed.
       const carrier = sellerCarrierCheck(carrierRowOf(await indexer.tokenUtxos(full.seller), full.id), full);
       if (!carrier.ok) throw new Error(`Not signed: ${carrier.detail}.`);
-      // The indexer may be scanning this address first (first use, or again
-      // after a chain reorganization): say so while the build waits.
-      const onWait = (info) => setFlow((f) => (f.phase === "building" ? { ...f, waitNote: seedWaitNote(info) } : f));
-      const built = await buildFill(full, addr, pubkeyHex, rate, onWait, signal, fillSendAmount(second.state, full.amount));
-      seedWait.done(signal);
+      const built = await buildFill(full, addr, pubkeyHex, rate, signal, fillSendAmount(second.state, full.amount));
+      reads.done(signal);
       // Never open the wallet for more than the sheet showed: a build that
       // costs more (the UTXO set changed since the dry run) stops here and
       // shows the new total, and the next press signs that.
@@ -583,14 +571,14 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
       setFlow((f) => ({ ...f, phase: "pending", txid }));
     } catch (e) {
       if (signedPsbt && !relayed) wallet.releaseInputs(signedPsbt);
-      // Stop waiting (or the tab left): back to idle, nothing to report.
+      // The wallet changed (or the tab left) during the reads: back to idle, nothing to report.
       if (signal.aborted) {
         setFlow((f) => (f.phase === "building" ? IDLE : f));
         return;
       }
       setFlow((f) => ({ ...f, phase: "error", error: friendlyError(e) }));
     } finally {
-      seedWait.done(signal);
+      reads.done(signal);
     }
   };
 
@@ -729,7 +717,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
                 : exact
                   ? `(${exact.inputCount} input${exact.inputCount === 1 ? "" : "s"} @ ${exact.rate} sat/vB)`
                   : fee.satVb
-                    ? `(est. @ ${fee.satVb} sat/vB${dry?.loading ? (dry.waitNote ? ", exact total once this wallet is set up" : ", computing the exact total…") : ""})`
+                    ? `(est. @ ${fee.satVb} sat/vB${dry?.loading ? ", computing the exact total…" : ""})`
                     : "(no estimate)"}
             </dt>
             <dd className="mono">{feeSats != null ? fmtSats(feeSats) : "—"}</dd>
@@ -765,7 +753,6 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
           </div>
         )}
         {slowNote && <div className="notice">{slowNote}</div>}
-        {dry?.loading && dry.waitNote && (flow.phase === "idle" || flow.phase === "error") && <div className="fineprint">{dry.waitNote}</div>}
         {dry?.error && flow.phase === "idle" && <div className="fineprint">Exact total not available yet ({dry.error}) — it is computed again when you press Sign, and nothing is signed above the total shown.</div>}
         {token?.last_trade && (
           <div className="fineprint">
@@ -808,7 +795,6 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
         <TxProgress
           flow={flow}
           status={status}
-          onStopWaiting={seedWait.stop}
           labels={{
             building: "Building the fill — your inputs are filtered so no token-bearing UTXO is ever spent as fee.",
             signing: `Awaiting signature — ${w.providerName || "your wallet"} signs only your inputs; the seller's signature stays intact.`,

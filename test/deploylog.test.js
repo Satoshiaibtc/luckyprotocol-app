@@ -81,8 +81,8 @@ const keep = (l) => {
   const t = keep(tipLine({ height: 970_101, hash: HASH }, "deploy", null, T0));
   assert.equal(t.text, "tip #970,101", "no token info on the create page → no minted %");
   assert.equal(t.key, "tip:deploy:970101");
-  const s = keep(signLine("OKX Wallet", T0, T0));
-  assert.equal(s.text, "sign  waiting for OKX Wallet…");
+  const s = keep(signLine("UniSat", T0, T0));
+  assert.equal(s.text, "sign  waiting for UniSat…");
   assert.equal(s.key, `phase:signing:${T0}`, "keyed by the attempt");
   assert.notEqual(signLine("x", T0 + 1, T0).key, s.key);
   const b = keep(broadcastingLine(T0, T0));

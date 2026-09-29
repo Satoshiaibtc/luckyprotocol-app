@@ -21,7 +21,7 @@ import { blockUrl, fmtDec, fmtInt, fmtSats, shortTxid, txUrl } from "../lib/form
 import { blockLineKey } from "../lib/minerlog.js";
 import { DEPLOY_PHASES, blockFoundLine, deployHeartbeatLine, deployUntrackedLine, feeQuoteLine, tipLine, walletLine } from "../lib/deploylog.js";
 import TokenCard from "../components/TokenCard.jsx";
-import { ConnectPrompt, SpentInputs, StopWaitingButton } from "../components/TxProgress.jsx";
+import { ConnectPrompt, SpentInputs } from "../components/TxProgress.jsx";
 import FeeSelector from "../components/FeeSelector.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
@@ -547,7 +547,7 @@ function Review({ cr, flow }) {
         network fee <span className="mono">{fmtInt(flow.feeSats)} sats</span>
         {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}
         {flow.vsize ? ` · ${fmtInt(flow.vsize)} vB` : ""}
-        <SpentInputs inputs={flow.inputs} assetSafe={flow.assetSafe} />
+        <SpentInputs inputs={flow.inputs} />
       </div>
       <div className="notice-row">
         <label className="ack">
@@ -698,16 +698,14 @@ function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, onRet
       {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}
       {flow.vsize ? ` · ${fmtInt(flow.vsize)} vB` : ""}
       {` · protocol fee ${fmtInt(DEPLOY_PROTOCOL_FEE_SATS)} sats`}
-      {flow.utxoSource === "indexer" ? " · inputs from indexer (no wallet UTXO API)" : ""}
-      <SpentInputs inputs={flow.inputs} assetSafe={flow.assetSafe} />
+      <SpentInputs inputs={flow.inputs} />
     </>
   );
 
   switch (flow.phase) {
     case "building":
       led = "busy";
-      text = flow.waitNote || `Building the DEPLOY of ${t} — fee inputs never include token-bearing outputs.`;
-      if (flow.waitNote) actions = <StopWaitingButton onClick={cr.stopWaiting} />;
+      text = `Building the DEPLOY of ${t} — fee inputs never include token-bearing outputs.`;
       break;
     case "review":
       return null; // the Review block says it

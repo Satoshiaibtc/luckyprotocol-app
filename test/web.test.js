@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
 import { buildHeaders, buildMiddleware, buildRoutes, FIXED_HEADERS, SECOND_SOURCE_ORIGIN, isAllowedIndexerUrl, parseDotenv } from "../scripts/gen-headers.mjs";
 import { CANONICAL_HOST, canonicalRedirectTarget } from "../src/lib/canonicalHost.js";
-import { parseSpecConstants, specConstantMismatches, specProcessLeaks } from "../scripts/check-spec.mjs";
+import { parseSpecConstants, specConstantMismatches, specProcessLeaks, specWalletMismatches } from "../scripts/check-spec.mjs";
 import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- _headers generated from VITE_INDEXER_URL ----------------------------------------------------
@@ -158,7 +158,14 @@ if (SPEC) {
   assert.deepEqual(specConstantMismatches(served, { ...payloads, FINAL_DEPTH: 3 }), ["FINAL_DEPTH: spec 6, code 3"]);
   assert.deepEqual(specConstantMismatches(served.replace(/\| `FINAL_DEPTH` \| 6 \|/, "| `FINAL_DEPTH` | 12 |"), payloads), ["FINAL_DEPTH: spec 12, code 6"], "a spec edit alone fails too");
   assert.throws(() => parseSpecConstants("# no constants"), /constants section/);
-  console.log("spec constants: the served spec's §1 table matches payloads.js; a drifted constant fails the build");
+  // §6 names exactly the wallets the app offers.
+  const shapes = await import("../src/lib/walletShapes.js");
+  const offered = shapes.PROVIDER_IDS.map((id) => shapes.PROVIDER_META[id].name);
+  assert.deepEqual(offered, ["UniSat"]);
+  assert.deepEqual(specWalletMismatches(served, offered), [], "the rulebook's §6 names the app's wallets");
+  assert.deepEqual(specWalletMismatches(served.replace("Web wallet contract (UniSat)", "Web wallet contract (UniSat, Other Wallet)"), offered), ["§6 names UniSat, Other Wallet; the app offers UniSat"]);
+  assert.deepEqual(specWalletMismatches("# nothing", offered), ["no '## 6. Web wallet contract (…)' heading"]);
+  console.log("spec constants: the served spec's §1 table matches payloads.js; a drifted constant fails the build; §6 names the app's wallets");
 }
 
 // ---- the served spec states the protocol only ----------------------------------------------------------------
@@ -169,7 +176,7 @@ if (SPEC) {
   const served = SPEC;
   const DENY = [
     "GET /", "POST /", "HEAD /", "OPTIONS /", "Retry-After", "Cache-Control", "Access-Control", "CORS",
-    "docs/API.md", "robots.txt", "ALLOWED_ORIGINS", "/health", "/balances", "/utxos", "/btc-utxos",
+    "docs/API.md", "robots.txt", "ALLOWED_ORIGINS", "/health", "/balances", "/utxos", "/btc-utxos", "/txouts",
     "/mines", "/transfers", "/commits", "/tokens", "/activity", "/price", "/tx-status", "/block-",
     "/blocks", "/digits", "/fees", "/broadcast", "/orders", "/trades", "/deploys", "/avatars",
   ];

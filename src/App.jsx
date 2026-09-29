@@ -131,16 +131,6 @@ export default function App() {
   const price = usePoll((s) => indexer.price(s), 60_000, []);
   const indexerOk = !health.error && !!health.data;
 
-  // Start the indexer's UTXO scan for a wallet as soon as it connects:
-  // the first /btc-utxos query of an address queues a scan that takes a
-  // few minutes, and it is better spent while the user looks around than
-  // after they press Mine. Fire-and-forget: the 503 / 429 is expected.
-  const connectedAddress = w.connected ? w.address : null;
-  useEffect(() => {
-    if (!connectedAddress || MOCK) return;
-    indexer.btcUtxos(connectedAddress, undefined, { firstPageOnly: true }).catch(() => {});
-  }, [connectedAddress]);
-
   // Stable "refresh everything" handle for flows that settle on-chain.
   const refreshAllRef = useRef(null);
   refreshAllRef.current = () => {

@@ -8,6 +8,9 @@
 // narrative — SPEC_PROCESS_DENY). Without it (the Pages build) the
 // comparison is skipped; the local gates run it on every change.
 //
+// It also checks that the rulebook's web wallet contract (§6) names exactly
+// the wallets src/lib/walletShapes.js offers.
+//
 // On every build it also fails when public/PROTOCOL.md exists, so a copy of
 // the rulebook is never served again by accident.
 import { existsSync, readFileSync } from "node:fs";
@@ -85,6 +88,18 @@ export function specProcessLeaks(md) {
   return out;
 }
 
+/**
+ * The wallets named in a spec text's `## 6. Web wallet contract (…)`
+ * heading, compared with `names` (the app's wallets, in order) → a list of
+ * mismatch lines, empty when they agree.
+ */
+export function specWalletMismatches(md, names) {
+  const m = /^## 6\. Web wallet contract \(([^)]*)\)/m.exec(String(md || ""));
+  if (!m) return ["no '## 6. Web wallet contract (…)' heading"];
+  const spec = m[1].split(",").map((s) => s.trim()).filter(Boolean);
+  return JSON.stringify(spec) === JSON.stringify(names) ? [] : [`§6 names ${spec.join(", ")}; the app offers ${names.join(", ")}`];
+}
+
 async function main() {
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   if (existsSync(join(root, "public", "PROTOCOL.md"))) {
@@ -108,6 +123,15 @@ async function main() {
     process.exit(1);
   }
   console.log(`spec constants: the indexer's PROTOCOL.md §1 matches src/lib/payloads.js (${SPEC_CONSTANTS.length} constants)`);
+
+  const shapes = await import(pathToFileURL(join(root, "src", "lib", "walletShapes.js")).href);
+  const wallets = specWalletMismatches(md, shapes.PROVIDER_IDS.map((id) => shapes.PROVIDER_META[id].name));
+  if (wallets.length) {
+    console.error("spec wallets: the indexer's PROTOCOL.md §6 and src/lib/walletShapes.js disagree:");
+    for (const w of wallets) console.error(`  ${w}`);
+    process.exit(1);
+  }
+  console.log("spec wallets: PROTOCOL.md §6 names exactly the wallets the app offers");
 
   const leaks = specProcessLeaks(md);
   if (leaks.length) {

@@ -1,18 +1,16 @@
-// Pure-part tests for the multi-wallet layer and the fee-rate choice.
+// Pure-part tests for the wallet layer and the fee-rate choice.
 // Plain Node, no framework, no window: exercises src/lib/walletShapes.js
-// (provider argument shapes), src/lib/feechoice.js (persistence format,
-// clamping, resolution against /fees) and src/lib/retry.js (the seeding-503
-// retry wallet.getBitcoinUtxos wraps /btc-utxos in).
+// (provider argument shapes) and src/lib/feechoice.js (persistence format,
+// clamping, resolution against /fees). The funding path (the wallet's own
+// list checked with GET /txouts) is tested in test/unisat.test.js.
 import assert from "node:assert/strict";
 import {
   PROVIDER_IDS,
   PROVIDER_META,
   WALLET_STORAGE_KEY,
+  canSwitchWallet,
   chipLabel,
-  collectInscriptionOutpoints,
   defaultProviderId,
-  inscriptionOutpoints,
-  intersectConfirmed,
   firstAccount,
   isConflictError,
   isMainnetAddress,
@@ -20,7 +18,6 @@ import {
   normalizePubkey,
   normalizeTxid,
   normalizeUtxo,
-  normalizeUtxoList,
   pushTxArgs,
   shouldRestore,
   signPsbtArgs,
@@ -44,19 +41,16 @@ import {
   needsHighFeeAck,
 } from "../src/lib/feechoice.js";
 import { MAX_FEE_RATE_SAT_VB } from "../src/lib/psbt.js";
-import { isSeedingError, retryOn503 } from "../src/lib/retry.js";
 
 const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
 const TXID = "ab".repeat(32);
 const PSBT = "70736274ff01000a0200000000000000000000";
 
 // ---- provider metadata ---------------------------------------------------------------------
-assert.deepEqual(PROVIDER_IDS, ["unisat", "okx"]);
+assert.deepEqual(PROVIDER_IDS, ["unisat"], "UniSat is the one wallet offered");
 assert.equal(PROVIDER_META.unisat.installUrl, "https://unisat.io");
-assert.equal(PROVIDER_META.okx.installUrl, "https://web3.okx.com/download");
-assert.equal(PROVIDER_META.okx.name, "OKX Wallet");
+assert.deepEqual(Object.keys(PROVIDER_META).sort(), ["mock", "unisat"], "no other provider is known");
 assert.equal(WALLET_STORAGE_KEY, "lp.wallet");
-assert.equal(chipLabel("okx", "bc1p…62s"), "OKX · bc1p…62s");
 assert.equal(chipLabel("unisat", "bc1p…62s"), "UniSat · bc1p…62s");
 assert.equal(chipLabel("nope", "bc1p…62s"), "bc1p…62s");
 for (const id of PROVIDER_IDS) {
@@ -73,7 +67,7 @@ assert.equal(isMainnetAddress("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"), fal
 assert.equal(isMainnetAddress("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"), false, "regtest refused");
 assert.equal(isMainnetAddress("1BoatSLRHtKNngkdXEeobR76b53LETtpyT"), false, "legacy P2PKH refused");
 assert.equal(isMainnetAddress("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), false, "P2SH refused");
-assert.equal(isMainnetAddress("0x52908400098527886E0F7030069857D2E4169EE7"), false, "an EVM account (wrong OKX provider) refused");
+assert.equal(isMainnetAddress("0x52908400098527886E0F7030069857D2E4169EE7"), false, "an EVM account refused");
 assert.equal(isMainnetAddress("bc1Qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"), false, "mixed case refused");
 assert.equal(isMainnetAddress(""), false);
 assert.equal(isMainnetAddress(null), false);
@@ -87,15 +81,16 @@ assert.equal(isMainnetAddress(null), false);
   assert.throws(() => toSignInputs({ inputIndexes: [-1], address: ADDR }), /bad input index/);
   assert.throws(() => toSignInputs({ inputIndexes: [0], address: "" }), /address is required/);
 
-  for (const id of ["unisat", "okx", "mock"]) {
+  for (const id of ["unisat", "mock"]) {
     const [hex, opts] = signPsbtArgs(id, PSBT, { inputIndexes: [1, 2], address: ADDR });
     assert.equal(hex, PSBT, `${id}: psbt hex passed through`);
     assert.deepEqual(opts, { autoFinalized: true, toSignInputs: [{ index: 1, address: ADDR }, { index: 2, address: ADDR }] }, `${id}: default autoFinalized:true`);
   }
   // §7.1 listing shape: un-finalized, SINGLE|ANYONECANPAY declared.
-  const [, listing] = signPsbtArgs("okx", PSBT, { inputIndexes: [0], address: ADDR, autoFinalized: false, sighashTypes: [0x83] });
+  const [, listing] = signPsbtArgs("unisat", PSBT, { inputIndexes: [0], address: ADDR, autoFinalized: false, sighashTypes: [0x83] });
   assert.deepEqual(listing, { autoFinalized: false, toSignInputs: [{ index: 0, address: ADDR, sighashTypes: [0x83] }] });
   assert.throws(() => signPsbtArgs("ledger", PSBT, { inputIndexes: [0], address: ADDR }), /unknown wallet provider/);
+  assert.throws(() => signPsbtArgs("okx", PSBT, { inputIndexes: [0], address: ADDR }), /unknown wallet provider/, "a provider this site does not offer");
   assert.throws(() => signPsbtArgs("unisat", "zz", { inputIndexes: [0], address: ADDR }), /hex/);
 }
 
@@ -103,16 +98,16 @@ assert.equal(isMainnetAddress(null), false);
 {
   const raw = "0200000001" + "00".repeat(40);
   assert.deepEqual(pushTxArgs("unisat", raw), [{ rawtx: raw }], "UniSat: pushTx({ rawtx })");
-  assert.deepEqual(pushTxArgs("okx", raw), [raw], "OKX: pushTx(rawHex)");
-  assert.deepEqual(pushTxArgs("mock", raw), [raw]);
+  assert.deepEqual(pushTxArgs("mock", raw), [{ rawtx: raw }], "the simulated wallet takes UniSat's shape");
   assert.throws(() => pushTxArgs("unisat", "abc"), /even-length hex/);
   assert.throws(() => pushTxArgs("other", raw), /unknown wallet provider/);
+  assert.throws(() => pushTxArgs("okx", raw), /unknown wallet provider/);
 }
 
 // ---- result normalizers -----------------------------------------------------------------------
 {
   assert.equal(firstAccount([ADDR]), ADDR, "requestAccounts() → [address]");
-  assert.equal(firstAccount({ address: ADDR, publicKey: "02" + "ab".repeat(32) }), ADDR, "OKX connect() → { address }");
+  assert.equal(firstAccount({ address: ADDR }), null, "only UniSat's [address] shape");
   assert.equal(firstAccount([]), null);
   assert.equal(firstAccount(null), null);
   assert.equal(normalizePubkey("02" + "AB".repeat(32)), "02" + "ab".repeat(32));
@@ -125,82 +120,27 @@ assert.equal(isMainnetAddress(null), false);
   assert.deepEqual(normalizeUtxo({ txid: TXID, vout: 0, value: 700 }), { txid: TXID, vout: 0, sats: 700 });
   assert.equal(normalizeUtxo({ txid: "xx", vout: 0, satoshis: 1 }), null);
   assert.equal(normalizeUtxo({ txid: TXID, vout: -1, satoshis: 1 }), null);
-  assert.deepEqual(normalizeUtxoList({ list: [{ txid: TXID, vout: 3, satoshis: 900 }, { bogus: true }] }), [{ txid: TXID, vout: 3, sats: 900 }]);
-  assert.deepEqual(normalizeUtxoList(undefined), []);
+}
+
+// ---- the connected dialog offers a switch only when there is another wallet ------------------------
+{
+  assert.equal(canSwitchWallet("unisat"), false, "UniSat only: the account is changed in UniSat");
+  assert.equal(canSwitchWallet("unisat", { mock: true }), true, "mock mode: the simulated wallet is offered");
+  assert.equal(canSwitchWallet("mock", { mock: true }), true, "on the simulated wallet: UniSat is offered");
 }
 
 // ---- silent-restore + default-provider policy --------------------------------------------------
 {
-  assert.equal(shouldRestore("okx", ["unisat", "okx"]), true);
-  assert.equal(shouldRestore("okx", ["unisat"]), false, "stored provider not injected → no restore");
-  assert.equal(shouldRestore("ledger", ["unisat", "okx"]), false, "unknown id → no restore");
+  assert.equal(shouldRestore("unisat", ["unisat"]), true);
+  assert.equal(shouldRestore("unisat", []), false, "stored provider not injected → no restore");
+  assert.equal(shouldRestore("okx", ["unisat", "okx"]), false, "a provider this site does not offer → no restore");
+  assert.equal(shouldRestore("ledger", ["unisat"]), false, "unknown id → no restore");
   assert.equal(shouldRestore(null, ["unisat"]), false);
-  assert.equal(defaultProviderId(null, ["okx"]), "okx", "one injected → pick it");
-  assert.equal(defaultProviderId(null, ["unisat", "okx"]), null, "two injected → user must choose");
-  assert.equal(defaultProviderId("unisat", ["unisat", "okx"]), "unisat", "connected one wins");
+  assert.equal(defaultProviderId(null, ["unisat"]), "unisat", "one injected → pick it");
+  assert.equal(defaultProviderId(null, ["okx"]), null, "a provider this site does not offer is never picked");
+  assert.equal(defaultProviderId(null, ["unisat", "mock"]), null, "two present (mock mode) → user must choose");
+  assert.equal(defaultProviderId("unisat", ["unisat", "mock"]), "unisat", "connected one wins");
   assert.equal(defaultProviderId(null, []), null);
-}
-
-// ---- inscription outpoints from getInscriptions pages ------------------------------------------
-{
-  const A = "aa".repeat(32);
-  const B = "bb".repeat(32);
-  const C = "cc".repeat(32);
-  assert.deepEqual(
-    inscriptionOutpoints({ total: 3, list: [{ inscriptionId: `${A}i0`, output: `${A.toUpperCase()}:1` }, { location: `${B}:0:333` }, { utxo: { txid: C, vout: "2" } }, { output: "nope" }, null] }),
-    [`${A}:1`, `${B}:0`, `${C}:2`],
-    "output / location / utxo shapes, malformed rows skipped",
-  );
-  assert.deepEqual(inscriptionOutpoints([{ output: `${A}:0` }]), [`${A}:0`], "bare array page");
-  assert.deepEqual(inscriptionOutpoints(undefined), []);
-  // paging: 2 full pages + 1 short page, cursor advances by list length
-  const pages = [
-    { total: 5, list: [{ output: `${A}:0` }, { output: `${A}:1` }] },
-    { total: 5, list: [{ output: `${B}:0` }, { output: `${B}:1` }] },
-    { total: 5, list: [{ output: `${C}:0` }] },
-  ];
-  const calls = [];
-  const set = await collectInscriptionOutpoints((cursor, size) => { calls.push([cursor, size]); return pages[calls.length - 1]; }, { size: 2 });
-  assert.deepEqual([...set].sort(), [`${A}:0`, `${A}:1`, `${B}:0`, `${B}:1`, `${C}:0`]);
-  assert.deepEqual(calls, [[0, 2], [2, 2], [4, 2]]);
-  // total reached exactly at a page boundary → no extra call
-  const calls2 = [];
-  await collectInscriptionOutpoints((cursor) => { calls2.push(cursor); return { total: 2, list: [{ output: `${A}:0` }, { output: `${A}:1` }] }; }, { size: 2 });
-  assert.deepEqual(calls2, [0]);
-  // maxPages bounds a runaway provider
-  let n = 0;
-  await collectInscriptionOutpoints(() => { n += 1; return { total: 1e9, list: [{ output: `${A}:${n}` }, { output: `${B}:${n}` }] }; }, { size: 2, maxPages: 3 });
-  assert.equal(n, 3);
-  // a throwing pager rejects (the wallet layer then falls back to assetSafe:false)
-  await assert.rejects(collectInscriptionOutpoints(() => { throw new Error("provider down"); }), /provider down/);
-}
-
-// ---- UniSat path: provider list ∩ indexer CONFIRMED rows ----------------------------------------------
-{
-  const A = "aa".repeat(32);
-  const B = "bb".repeat(32);
-  const C = "cc".repeat(32);
-  const D = "dd".repeat(32);
-  const provider = [
-    { txid: A, vout: 0, sats: 50_000 }, // confirmed, same value → kept
-    { txid: B, vout: 1, sats: 20_000 }, // indexer: unconfirmed (a just-broadcast SEND change) → excluded
-    { txid: C, vout: 0, sats: 9_000 },  // not listed by the indexer (scan behind / spent) → excluded
-    { txid: D, vout: 2, sats: 7_000 },  // listed confirmed but at another value → excluded
-  ];
-  const rows = [
-    { txid: A, vout: 0, sats: 50_000, confirmed: true },
-    { txid: B, vout: 1, sats: 20_000, confirmed: false },
-    { txid: D, vout: 2, sats: 7_500, confirmed: true },
-    { txid: "zz", vout: 0, sats: 1, confirmed: true }, // malformed indexer row ignored
-  ];
-  const r = intersectConfirmed(provider, rows);
-  assert.deepEqual(r.utxos, [{ txid: A, vout: 0, sats: 50_000 }], "only confirmed, value-matched outputs survive");
-  assert.deepEqual(r.unconfirmedOutpoints, [{ txid: B, vout: 1 }]);
-  assert.deepEqual(r.unlistedOutpoints, [{ txid: C, vout: 0 }]);
-  assert.deepEqual(r.mismatchedOutpoints, [{ txid: D, vout: 2 }]);
-  assert.deepEqual(intersectConfirmed(provider, []).utxos, [], "no indexer rows → nothing spendable (fails closed)");
-  assert.deepEqual(intersectConfirmed([], rows).utxos, []);
-  assert.deepEqual(intersectConfirmed(undefined, undefined), { utxos: [], unconfirmedOutpoints: [], unlistedOutpoints: [], mismatchedOutpoints: [] });
 }
 
 // ---- conflict detection ------------------------------------------------------------------------
@@ -331,33 +271,4 @@ assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.lengt
   assert.match(missingFeeHint({ kind: "custom", value: 500 }, null, "mine", { awaitingAck: true }), /Confirm the high custom fee rate/);
 }
 
-// ---- 503-while-seeding retry (src/lib/retry.js) ---------------------------------------------------------
-{
-  const seeding = () => Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 503: seeding"), { status: 503 });
-  assert.equal(isSeedingError(seeding()), true);
-  assert.equal(isSeedingError(new Error("Indexer /x -> HTTP 503")), true, "status-less 503 message");
-  assert.equal(isSeedingError(new Error("HTTP 500")), false);
-  assert.equal(isSeedingError(null), false);
-  const noSleep = async () => {};
-  // two seeding answers then rows: rows returned, onRetry fired twice
-  {
-    let calls = 0;
-    const retries = [];
-    const out = await retryOn503(async () => (++calls < 3 ? (() => { throw seeding(); })() : ["row"]), { attempts: 3, sleep: noSleep, onRetry: (n) => retries.push(n) });
-    assert.deepEqual([out, calls, retries], [["row"], 3, [1, 2]]);
-  }
-  // still seeding after the last attempt → the 503 is thrown
-  {
-    let calls = 0;
-    await assert.rejects(retryOn503(async () => { calls += 1; throw seeding(); }, { attempts: 3, sleep: noSleep }), /HTTP 503/);
-    assert.equal(calls, 3);
-  }
-  // any other error is thrown at once, no retry
-  {
-    let calls = 0;
-    await assert.rejects(retryOn503(async () => { calls += 1; throw new Error("Indexer unreachable"); }, { attempts: 3, sleep: noSleep }), /unreachable/);
-    assert.equal(calls, 1);
-  }
-}
-
-console.log("wallet: provider shapes + fee choice + seeding retry ok");
+console.log("wallet: provider shapes + fee choice ok");

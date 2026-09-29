@@ -194,7 +194,7 @@ export function buildListingPsbt({ address, pubkeyHex, tokenUtxo, priceSats, amo
     throw new Error(`token UTXO ${tokenUtxo.txid}:${tokenUtxo.vout} holds ${sats} sats — the order book lists only a carrier of at least ${DUST_SATS} sats; move the tokens to a ${DUST_SATS}-sat carrier (a transfer to yourself) first`);
   }
   if (!Number.isInteger(sats) || sats < DUST_SATS) {
-    throw new Error(`token UTXO ${tokenUtxo.txid}:${tokenUtxo.vout} needs its real BTC value (≥ ${DUST_SATS} sats), and the indexer does not list it among this address's outputs right now — try again after the next block`);
+    throw new Error(`token UTXO ${tokenUtxo.txid}:${tokenUtxo.vout} needs its real BTC value (≥ ${DUST_SATS} sats), and the indexer could not read this output right now — try again in a moment`);
   }
   const price = Number(priceSats);
   if (!Number.isInteger(price) || price < MIN_PRICE_SATS) {

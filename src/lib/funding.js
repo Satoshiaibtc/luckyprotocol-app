@@ -9,8 +9,6 @@
 // `fundingMessage` turns them into one sentence with the cause and the next
 // step; anything that is not a funding error is left to the caller (null).
 
-import { MIN_FEE_INPUT_SATS_UNSAFE } from "./psbt.js";
-
 const fmt = (n) => Number(n).toLocaleString("en-US");
 
 /** Is `e` a builder's "nothing to spend" / "not enough" error? */
@@ -23,18 +21,14 @@ export function isFundingError(e) {
 /**
  * `utxoRes` is the wallet.getBitcoinUtxos result the build used (or null):
  * `waitingSats` = plain BTC that exists but was held back only because it is
- * not confirmed / not indexed yet, `assetSafe` = the list's safety flag.
+ * not confirmed / not indexed yet.
  * `action` names the transaction ("this MINE", "this DEPLOY", "this fill").
  * → string | null (null: not a funding error).
  */
 export function fundingMessage(e, utxoRes = null, { action = "this transaction" } = {}) {
   if (!isFundingError(e)) return null;
   const waiting = Number(utxoRes?.waitingSats) || 0;
-  const unsafe = utxoRes ? utxoRes.assetSafe !== true : Number(e.minSats) > 546;
-  const floor = Number(e.minSats) > 546 ? Number(e.minSats) : MIN_FEE_INPUT_SATS_UNSAFE;
-  const notUsed = unsafe
-    ? `Unconfirmed outputs, token carriers and outputs of ${fmt(floor)} sats or less are not used (this wallet has no asset-safe UTXO list).`
-    : "Unconfirmed outputs and token carriers are not used.";
+  const notUsed = "Unconfirmed outputs and token carriers are not used.";
   const waitingNote = waiting > 0 ? ` ${fmt(waiting)} sats in this wallet have not confirmed yet — they can be used once a block confirms them.` : "";
 
   if (e.code === "too-many-inputs") {
@@ -56,9 +50,6 @@ export function fundingMessage(e, utxoRes = null, { action = "this transaction" 
   // Nothing spendable at all.
   if (waiting > 0) {
     return `Your ${fmt(waiting)} sats have not confirmed yet — ${action} can only spend confirmed BTC. Try again after the next block confirms them; nothing was sent.`;
-  }
-  if (unsafe) {
-    return `No usable BTC for ${action}. ${notUsed} Send more than ${fmt(floor)} sats of plain BTC to this address (or use a wallet with an asset-safe UTXO list), then try again.`;
   }
   return `No usable BTC for ${action}. ${notUsed} Send plain BTC to this address, then try again.`;
 }

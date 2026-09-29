@@ -14,9 +14,9 @@ const IDLE_WALLET = {
   balanceConfirmed: null, // the confirmed part — fee inputs are confirmed outputs only
   switching: null, // provider id of a "Switch to …" in progress; the current session stays live meanwhile
   error: null,
-  provider: null, // "unisat" | "okx" | "mock"
+  provider: null, // "unisat" | "mock"
   providerName: null,
-  assetSafe: null, // false when UTXOs come from the indexer (no asset-aware wallet list)
+  assetSafe: null, // false when the wallet offers no list of its plain BTC outputs
   providers: [], // [{ id, name, present }] from detection
 };
 
@@ -68,7 +68,7 @@ export function afterConnectFailure(prev, { attemptedId, message, hasProvider })
 
 /**
  * Wallet state machine: detecting → absent | disconnected → connecting →
- * connected. Detects UniSat and OKX Wallet, restores the last session
+ * connected. Detects UniSat, restores the last session
  * silently (never pops the wallet on load), and reacts to the provider's
  * accountsChanged / networkChanged. `onDisconnect` lets callers reset
  * in-flight flows. A switch to another provider keeps the current session
@@ -129,7 +129,7 @@ export function useWallet({ onDisconnect } = {}) {
   }, [applySession]);
 
   /**
-   * `connect("okx")`; with no id the only injected provider (or the current
+   * `connect("unisat")`; with no id the only injected provider (or the current
    * one) is used. Resolves `true` on success, `false` on failure (the error
    * lands in `wallet.error`) — callers such as the wallet modal close on true.
    */

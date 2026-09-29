@@ -635,9 +635,8 @@ export function estimateMineFeeSats({ address, ticker, feeRateSatVb, inputCount 
 export const outpointKey = (u) => `${u.txid}:${u.vout}`;
 
 /**
- * Fee-input floor when the UTXO list is NOT asset-safe (OKX Wallet and the
- * mock have no asset-aware list; the indexer's raw BTC view cannot tell an
- * inscription or rune carrier from plain BTC). ord's default postage is
+ * Fee-input floor when the UTXO list is NOT asset-safe (a list that cannot
+ * tell an inscription or rune carrier from plain BTC). ord's default postage is
  * 10,000 sats, so anything AT or below it is treated as a possible carrier
  * and never spent as a fee input (`<=`, not `<`: an output of exactly the
  * postage is the most likely carrier of all).
@@ -696,7 +695,7 @@ export function noSpendableError(address, minSats) {
     err = new Error(
       `no usable fee input at ${address}: this wallet has no asset-safe UTXO list, so only outputs larger than ` +
       `${minSats.toLocaleString("en-US")} sats that are not token-bearing are spent (smaller ones may carry Ordinals) — ` +
-      `send more than ${minSats.toLocaleString("en-US")} sats of plain BTC to this address, or use a wallet with an asset-safe UTXO list`,
+      `send more than ${minSats.toLocaleString("en-US")} sats of plain BTC to this address`,
     );
   } else {
     err = new Error(`no spendable BTC at ${address} — every UTXO is either ≤ ${DUST_SATS} sats or token-bearing`);
@@ -1335,17 +1334,16 @@ export function buildSendPsbt({
   // rejected) and wrong fee/change math. This builder only ever makes
   // 546-sat carriers, but the indexer's settlement is index-agnostic and a
   // third-party builder may have parked tokens on a fatter output — never
-  // assume 546. Resolve each carrier's sats from the wallet's full UTXO list
-  // (the indexer's /btc-utxos includes token dust; UniSat's own list may
-  // not) and refuse to build otherwise.
+  // assume 546. Each carrier's sats come with it (the node's value, read
+  // with GET /txouts), else from `utxos`; without one the build is refused.
   const satsByKey = new Map((utxos || []).map((u) => [outpointKey(u), Number(u.sats)]));
   const carriers = (tokenUtxos || []).map((u) => {
     const own = Number(u.sats);
     const sats = Number.isInteger(own) && own > 0 ? own : satsByKey.get(outpointKey(u));
     if (!Number.isInteger(sats) || sats <= 0) {
       throw new Error(
-        `token UTXO ${u.txid}:${u.vout} has no known BTC value: the indexer does not list it among this address's outputs right now ` +
-          `(the signature commits to the exact value) — try again after the next block`,
+        `token UTXO ${u.txid}:${u.vout} has no known BTC value: the indexer could not read this output right now ` +
+          `(the signature commits to the exact value) — try again in a moment`,
       );
     }
     return { txid: u.txid, vout: u.vout, sats };

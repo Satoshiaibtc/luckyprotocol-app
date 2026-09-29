@@ -132,7 +132,7 @@ export const MIN_CARRIER_SATS = 546;
  *   "filling"   a spend of its live listing is in the mempool
  *   "listed"    it has an open listing
  *   "offbook"   an earlier listing left the book but can still be bought
- *   "unknown"   its BTC value is not known (the indexer does not list the
+ *   "unknown"   its BTC value is not known (the indexer could not read the
  *               output right now) — a listing commits the exact value
  *   "small"     it holds fewer than 546 sats of BTC: the book lists only a
  *               carrier of at least 546 (move the tokens to one first)
@@ -163,7 +163,7 @@ export function smallCarrierText(sats) {
  * commits to the exact value, so nothing can be signed for it yet).
  */
 export const UNKNOWN_VALUE_TEXT =
-  "The BTC value of this UTXO is not known: the indexer does not list it among this address's outputs right now, and a signature must commit to the exact value. Try again after the next block.";
+  "The BTC value of this UTXO is not known: the indexer could not read this output right now, and a signature must commit to the exact value. Try again in a moment.";
 
 /** The sell form's words for a carrier this browser is already spending. */
 export const OWN_PENDING_SPEND_TEXT =

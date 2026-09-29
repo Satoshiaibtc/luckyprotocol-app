@@ -3,6 +3,7 @@ import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { useSendToSelf } from "../hooks/useSendToSelf.js";
+import { useOutputValues } from "../hooks/useOutputValues.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import Identicon from "../components/Identicon.jsx";
 import TransferEmpty from "../components/TransferEmpty.jsx";
@@ -44,7 +45,9 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
   const shellClass = embedded ? "send-page send-embedded" : "page send-page";
 
   const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
-  const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
+  // Each carrier's BTC value (a SEND signs it exactly), read once per outpoint.
+  const tickerCarriers = useMemo(() => (tokenUtxos.data || []).filter((u) => Number(u.balances?.[ticker]) > 0), [tokenUtxos.data, ticker]);
+  const values = useOutputValues(tickerCarriers, POLL_MS);
   // Every page of this address's listings (newest first, 200 a page): an
   // old open listing behind many closed ones must still mark its carrier.
   const orders = usePoll(
@@ -54,10 +57,10 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
   );
   // Not every listing was read: no carrier is chosen automatically.
   const ordersIncomplete = !!orders.data && orders.data.complete === false;
-  const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({
+  const { chain, status, run, reset, busy } = useSendToSelf({
     onSettled: () => {
       tokenUtxos.refresh();
-      btcUtxos.refresh();
+      values.refresh();
       orders.refresh();
       onSettled?.();
     },
@@ -90,8 +93,8 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
   // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read the store on each poll / flow step
   const records = useMemo(() => (address ? txRecords(address) : []), [address, tokenUtxos.data, chain.phase, recTick]);
   const rows = useMemo(
-    () => sendCarrierRows({ tokenUtxos: tokenUtxos.data, btcUtxos: btcUtxos.data, orders: orders.data?.items, expired: orders.data?.expired, pendingSpent: pendingSpentOutpoints(records), ticker }),
-    [tokenUtxos.data, btcUtxos.data, orders.data, records, ticker],
+    () => sendCarrierRows({ tokenUtxos: tokenUtxos.data, values: values.data, orders: orders.data?.items, expired: orders.data?.expired, pendingSpent: pendingSpentOutpoints(records), ticker }),
+    [tokenUtxos.data, values.data, orders.data, records, ticker],
   );
   const total = rows.reduce((s, r) => s + r.amount, 0);
   const pendingSends = pendingSendsOf(records, ticker);
@@ -489,7 +492,6 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
                 flow={chain}
                 status={status}
                 onReset={done}
-                onStopWaiting={stopWaiting}
                 labels={{
                   building: "Building the transfer — your fee inputs are filtered so no other token carrier is ever spent as fee.",
                   signing: `Awaiting signature — confirm in ${w.providerName || "your wallet"}.`,

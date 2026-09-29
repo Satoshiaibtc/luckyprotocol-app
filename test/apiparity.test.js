@@ -16,19 +16,27 @@
 //   5. the depth / market-gate / health fields: every key the route table
 //      and the documented MineView / OrderView / token rows name is served
 //      by the mock on every route that serves that view;
-//   6. the first-use UTXO scan of /btc-utxos: the mock's "not yet" (503)
-//      and "turned away" (429) answers are the same errors the live
-//      transport builds from the indexer's JSON body and Retry-After —
-//      the same fields and the same sentence.
+//   6. GET /txouts: the mock's rows carry exactly the keys the route table
+//      documents, one per distinct outpoint in request order, and its
+//      refusals are the indexer's own words; the live transport shows a
+//      refusal as that sentence and asks a busy node again (a budget 429
+//      is waited out);
+//   7. the mock's /txouts follows the simulated chain like the indexer: an
+//      output a pending tx spends is still unspent, one spent in a block is
+//      not (and a spent carrier carries no tokens), and depth is counted
+//      from the indexed height (the `lp.mock.indexerLag` knob).
 //
 // Plain Node, no framework.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { mockGet, MOCK_WALLET } from "../src/lib/mock.js";
+import { hex } from "@scure/base";
+import * as btc from "@scure/btc-signer";
+import * as mock from "../src/lib/mock.js";
+import { mockGet, mockSignPsbt, mockWalletUtxos, simulateBroadcast, MOCK_WALLET, TXOUTS_REFUSALS } from "../src/lib/mock.js";
 import * as indexer from "../src/lib/indexer.js";
-import { indexerBtcRows } from "../src/lib/wallet.js";
-import { isAbortError, seedFailureText } from "../src/lib/retry.js";
+import { buildSendPsbt } from "../src/lib/psbt.js";
+import { mockSpendable } from "./mockspend.js";
 
 const INDEXER_DIR = process.env.LP_INDEXER_DIR || "";
 const API_DOC = INDEXER_DIR ? join(INDEXER_DIR, "docs", "API.md") : null;
@@ -97,7 +105,6 @@ const ROUTES = [
   ["/activity/daily?days=7", "/activity/daily?days=N"],
   [`/balances/${ADDR}`, "/balances/:addr"],
   [`/utxos/${ADDR}`, "/utxos/:addr"],
-  [`/btc-utxos/${ADDR}`, "/btc-utxos/:addr?limit&offset"],
   ["/orders", "/orders?ticker&status&limit&offset"],
   [`/orders/by-address/${ADDR}`, "/orders/by-address/:addr?limit&offset"],
   ["/trades", "/trades?ticker&limit&offset"],
@@ -223,74 +230,145 @@ if (TABLE) {
   console.log("apiparity keys: /health, /fees, /tx-status, /tokens/:ticker/market, MineView, OrderView and /tokens rows carry every documented key");
 }
 
-// ---- 6. /btc-utxos while the indexer scans a new wallet: mock and live transport agree ----------------
+// ---- 6. GET /txouts: the mock answers like the indexer — the documented row keys, request order, the refusals ----------
 {
-  const SEED_FIELDS = ["status", "retryAfter", "queuePosition", "etaSecs", "reason"];
-  const pick = (e) => Object.fromEntries(SEED_FIELDS.map((k) => [k, e[k]]));
-  const store = new Map();
-  globalThis.sessionStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
-  const addr = (n) => `bc1q${"q".repeat(37)}${n}`;
-  try {
-    // No knob: served at once, as before.
-    assert.ok(Array.isArray((await mockGet(`/btc-utxos/${addr(0)}`)).utxos));
-    // A scan of 60 s: queued first (addresses ahead), then in the running pass, then served.
-    store.set("lp.mock.seedWait", "60");
-    const first = await mockGet(`/btc-utxos/${addr(1)}`).catch((e) => e);
-    assert.equal(first.status, 503);
-    assert.ok(first.queuePosition > 0 && first.etaSecs > 30 && first.etaSecs <= 60 && first.retryAfter === 15, JSON.stringify(pick(first)));
-    // In the running pass with a second left (a 2 s scan, asked again after 1 s): still
-    // asked again in 15 s, and never estimated at under 15 s — as live.
-    store.set("lp.mock.seedWait", "2");
-    assert.equal((await mockGet(`/btc-utxos/${addr(5)}`).catch((e) => e)).status, 503);
-    await new Promise((r) => setTimeout(r, 1_000));
-    const ending = await mockGet(`/btc-utxos/${addr(5)}`).catch((e) => e);
-    assert.deepEqual([ending.status, ending.queuePosition, ending.etaSecs, ending.retryAfter], [503, 0, 15, 15], JSON.stringify(pick(ending)));
-    store.set("lp.mock.seedWait", "60");
-    // Turned away: this network's limit, and the full queue.
-    store.set("lp.mock.seedBusy", "client_limit");
-    const limited = await mockGet(`/btc-utxos/${addr(2)}`).catch((e) => e);
-    assert.deepEqual(pick(limited), { status: 429, retryAfter: 240, queuePosition: null, etaSecs: null, reason: "client_limit" });
-    store.set("lp.mock.seedBusy", "queue_full");
-    const full = await mockGet(`/btc-utxos/${addr(3)}`).catch((e) => e);
-    assert.equal(full.reason, "queue_full");
-    const started = await mockGet(`/btc-utxos/${addr(1)}`).catch((e) => e);
-    assert.equal(started.status, 503, "a scan already started is not turned away");
+  const listed = await mockWalletUtxos(ADDR);
+  const key = (u) => `${u.txid}:${u.vout}`;
+  const missing = `${"ee".repeat(32)}:7`;
+  const asked = [...listed.map(key), missing, key(listed[0])];
+  const rows = await mockGet(`/txouts?o=${asked.join(",")}`);
+  assert.ok(Array.isArray(rows), "a bare JSON array");
+  assert.deepEqual(rows.map(key), asked.slice(0, -1), "one row per distinct outpoint, in request order");
+  const gone = rows.find((r) => key(r) === missing);
+  assert.deepEqual([gone.unspent, gone.sats, gone.script_hex, gone.address, gone.confirmations, gone.coinbase, gone.token_carrier, gone.tokens], [false, null, null, null, 0, false, false, null], "an outpoint the node does not have");
+  const carrier = rows.find((r) => r.token_carrier);
+  assert.ok(carrier && carrier.unspent && carrier.sats === 546 && Object.values(carrier.tokens).every((a) => a > 0), "a token carrier says so, with its tokens");
+  const plain = rows.find((r) => r.unspent && !r.token_carrier && r.sats > 546);
+  assert.ok(plain && plain.confirmations >= 1 && plain.address === ADDR && /^5120[0-9a-f]{64}$/.test(plain.script_hex), "a confirmed plain output: its value, script, address and depth");
+  const pending = listed.find((u) => rows.find((r) => key(r) === key(u)).unspent === false);
+  assert.ok(pending, "an output the wallet lists that has not confirmed is not in the confirmed set");
+  if (TABLE) {
+    const row = TABLE.split("\n").find((l) => l.startsWith("| `GET /txouts"));
+    assert.ok(row, "the indexer's route table has a row for GET /txouts");
+    const docKeys = keysIn(row.slice(row.indexOf("`[{") + 3));
+    assert.deepEqual(docKeys, ["txid", "vout", "unspent", "sats", "script_hex", "address", "confirmations", "coinbase", "token_carrier", "tokens"]);
+    for (const r of rows) assert.deepEqual(Object.keys(r).sort(), [...docKeys].sort(), `mock /txouts row ${key(r)} carries exactly the documented keys`);
+    for (const text of [TXOUTS_REFUSALS.list, TXOUTS_REFUSALS.tooMany, TXOUTS_REFUSALS.entry("<n>")]) assert.ok(row.includes(text), `the route table names the refusal "${text}"`);
+  }
+  // Percent-encoded separators are read the same.
+  assert.deepEqual((await mockGet(`/txouts?o=${encodeURIComponent(asked.slice(0, 2).join(","))}`)).map(key), asked.slice(0, 2));
+  // The refusals, word for word.
+  const refused = async (q) => (await mockGet(`/txouts${q}`).catch((e) => e)).detail;
+  assert.equal(await refused(""), TXOUTS_REFUSALS.list, "o missing");
+  assert.equal(await refused("?o="), TXOUTS_REFUSALS.list, "o empty");
+  assert.equal(await refused(`?o=${asked[0]}&o=${asked[1]}`), TXOUTS_REFUSALS.list, "o twice");
+  assert.equal(await refused(`?o=${Array.from({ length: 101 }, () => asked[0]).join(",")}`), TXOUTS_REFUSALS.tooMany, "101 entries, repeats counted");
+  assert.equal(await refused(`?o=${asked[0]},${asked[1].toUpperCase()}`), TXOUTS_REFUSALS.entry(2), "upper-case hex");
+  assert.equal(await refused(`?o=${asked[0]},,${asked[1]}`), TXOUTS_REFUSALS.entry(2), "an empty entry");
+  assert.equal(await refused(`?o=${listed[0].txid}:4294967296`), TXOUTS_REFUSALS.entry(1), "a vout past u32");
+  assert.equal((await mockGet(`/txouts?o=${listed[0].txid}:4294967295`)).length, 1, "the largest u32 vout is a valid entry");
 
-    // The live transport builds the same errors from the indexer's answers.
-    const answers = [
-      [503, { "Retry-After": "15" }, JSON.stringify({ error: "this address's UTXO scan is queued or running; retry shortly", queue_position: first.queuePosition, eta_secs: first.etaSecs })],
-      [429, { "Retry-After": "240" }, JSON.stringify({ error: "too many new wallet scans from this client; retry later", reason: "client_limit" })],
-    ];
-    let at = 0;
-    const savedFetch = globalThis.fetch;
-    globalThis.fetch = async () => {
-      const [status, headers, body] = answers[at++ % answers.length];
-      return { ok: false, status, headers: { get: (k) => headers[k] ?? null }, text: async () => body, json: async () => JSON.parse(body) };
-    };
+  // The live transport: the server's refusal is the error's sentence, and a busy node is asked again.
+  const answers = [];
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    const [status, headers, body] = answers.shift();
+    return { ok: status === 200, status, headers: { get: (k) => headers[k] ?? null }, text: async () => body, json: async () => JSON.parse(body) };
+  };
+  try {
+    answers.push([400, {}, TXOUTS_REFUSALS.entry(1)]);
+    const e400 = await indexer.txouts([{ txid: listed[0].txid, vout: 0 }]).catch((e) => e);
+    assert.deepEqual([e400.status, e400.message], [400, TXOUTS_REFUSALS.entry(1)], "a refusal: its own sentence, no request path");
+    answers.push([503, { "Retry-After": "1" }, "node RPC busy; retry shortly"], [200, {}, JSON.stringify([rows[0]])]);
+    assert.deepEqual((await indexer.txouts([rows[0]])).map(key), [key(rows[0])], "a busy node is asked again after its Retry-After");
+    answers.push([503, { "Retry-After": "30" }, "the node did not answer in time; retry shortly"]);
+    const slow = await indexer.txouts([rows[0]]).catch((e) => e);
+    assert.deepEqual([slow.status, slow.message], [503, "the node did not answer in time; retry shortly"], "a long Retry-After is not waited out");
+    // A budget 429: its Retry-After is the rest of the 10 s client window, waited out (the waits run at once here).
+    const waits = [];
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (fn, ms, ...a) => (ms >= 1_000 && ms <= 10_000 ? (waits.push(ms), realSetTimeout(fn, 0, ...a)) : realSetTimeout(fn, ms, ...a));
     try {
-      const live503 = await indexer.btcUtxos(addr(4)).catch((e) => e);
-      assert.deepEqual(pick(live503), pick(first), "503: the same fields as the mock's");
-      const live429 = await indexer.btcUtxos(addr(4)).catch((e) => e);
-      assert.deepEqual(pick(live429), pick(limited), "429: the same fields as the mock's");
-      // And the same sentence (the addresses differ: compare what follows "HTTP <status>: ").
-      const sentence = (e) => e.message.slice(e.message.indexOf(`HTTP ${e.status}: `));
-      assert.equal(sentence(live503), sentence(first), "503: the mock's sentence is the indexer's");
-      assert.equal(sentence(live429), sentence(limited), "429: the mock's sentence is the indexer's");
-      assert.ok(!/queue_position|\{/.test(live503.message), "no JSON punctuation in the message");
-      // The flows' read says the per-network limit in one sentence, at once.
-      at = 1;
-      await assert.rejects(indexerBtcRows(addr(4)), (e) => e.message === seedFailureText(limited) && /try again in 4 min/.test(e.message));
-      // A stopped wait is an AbortError, not an error sentence.
-      const ctrl = new AbortController();
-      ctrl.abort();
-      assert.equal(isAbortError(await indexerBtcRows(addr(4), { signal: ctrl.signal }).catch((e) => e)), true);
+      answers.push([429, { "Retry-After": "7" }, "too many requests; retry shortly"], [200, {}, JSON.stringify([rows[0]])]);
+      assert.deepEqual((await indexer.txouts([rows[0]])).map(key), [key(rows[0])], "a budget 429 is waited out and asked again");
+      assert.deepEqual(waits, [7_000]);
+      answers.push(...Array.from({ length: 3 }, () => [429, { "Retry-After": "10" }, "too many requests; retry shortly"]));
+      const over = await indexer.txouts([rows[0]]).catch((e) => e);
+      assert.deepEqual([over.status, over.message, answers.length], [429, "too many requests; retry shortly", 0], "at most TXOUTS_RETRIES retries");
+      assert.deepEqual(waits, [7_000, 10_000, 10_000]);
     } finally {
-      globalThis.fetch = savedFetch;
+      globalThis.setTimeout = realSetTimeout;
     }
   } finally {
-    delete globalThis.sessionStorage;
+    globalThis.fetch = savedFetch;
   }
-  console.log("apiparity seed wait: the mock's 503 / 429 scan answers carry the live transport's fields; the limit is one sentence");
+  console.log("apiparity txouts: the mock's rows carry the documented keys in request order; the refusals are the indexer's words");
+}
+
+// ---- 7. the mock's /txouts follows the simulated chain: pending and confirmed spends, indexer lag ----------------
+{
+  const key = (u) => `${u.txid}:${u.vout}`;
+  const store = new Map();
+  const savedStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    writable: true,
+    value: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
+  });
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  const rowOf = async (u) => (await mockGet(`/txouts?o=${key(u)}`))[0];
+  try {
+    // Depth is counted from the indexed height: an indexer that lags reports 0 confirmations.
+    const plain = (await mockSpendable(mock, ADDR)).utxos[0];
+    const depth = (await rowOf(plain)).confirmations;
+    assert.ok(depth >= 1, "a listed confirmed output has depth");
+    store.set("lp.mock.indexerLag", String(depth));
+    assert.deepEqual([(await rowOf(plain)).unspent, (await rowOf(plain)).confirmations], [true, 0], "above the indexed height: 0 confirmations");
+    store.delete("lp.mock.indexerLag");
+    assert.equal((await rowOf(plain)).confirmations, depth, "the knob removed: its depth is back");
+
+    // A SEND that spends a carrier and plain BTC.
+    const spendable = (await mockSpendable(mock, ADDR)).utxos;
+    const tokenRows = (await mockGet(`/utxos/${ADDR}`)).utxos;
+    const carrier = tokenRows[0];
+    const ticker = Object.keys(carrier.balances)[0];
+    const built = buildSendPsbt({
+      address: ADDR,
+      pubkeyHex: MOCK_WALLET.pubkeyHex,
+      utxos: spendable,
+      tokenOutpoints: tokenRows.map(({ txid, vout }) => ({ txid, vout })),
+      tokenUtxos: [{ txid: carrier.txid, vout: carrier.vout, sats: 546 }],
+      feeRateSatVb: 2,
+      ticker,
+      amount: 1,
+      toAddress: ADDR,
+    });
+    const tokenKeys = new Set(tokenRows.map(key));
+    const spentPlain = built.inputs.find((u) => !tokenKeys.has(key(u)));
+    assert.ok(spentPlain, "the SEND spends plain BTC for its fee");
+    const signed = mockSignPsbt(built.psbtHex, { toSignInputs: built.inputIndexes.map((index) => ({ index, address: ADDR })) });
+    simulateBroadcast(hex.encode(btc.Transaction.fromPSBT(hex.decode(signed)).extract()));
+    // Pending: the node's confirmed set still has both (the carrier with its tokens).
+    const [pendingPlain, pendingCarrier] = [await rowOf(spentPlain), await rowOf(carrier)];
+    assert.deepEqual([pendingPlain.unspent, pendingCarrier.unspent, pendingCarrier.token_carrier], [true, true, true], "a pending spend leaves its inputs unspent");
+    assert.equal(pendingCarrier.tokens[ticker], carrier.balances[ticker]);
+    // Confirmed: both spent, and the spent carrier carries nothing any more.
+    now += 20_001;
+    const [gonePlain, goneCarrier] = [await rowOf(spentPlain), await rowOf(carrier)];
+    assert.deepEqual([gonePlain.unspent, gonePlain.confirmations], [false, 0], "spent in a block: not in the confirmed set");
+    assert.deepEqual(
+      [goneCarrier.unspent, goneCarrier.sats, goneCarrier.confirmations, goneCarrier.token_carrier, goneCarrier.tokens],
+      [false, null, 0, false, null],
+      "a carrier spent in a block carries no tokens, as the indexer answers once it applied the spend",
+    );
+  } finally {
+    Date.now = realNow;
+    if (savedStorage) Object.defineProperty(globalThis, "localStorage", savedStorage);
+    else delete globalThis.localStorage;
+  }
+  console.log("apiparity txouts: the mock follows pending and confirmed spends and the indexed height like the indexer");
 }
 
 console.log(

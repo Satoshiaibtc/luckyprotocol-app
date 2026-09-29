@@ -1,7 +1,6 @@
 // Idle status lines shared by the mine console and the Create page — pure,
 // tested in test/flows.test.js.
 
-import { MIN_FEE_INPUT_SATS_UNSAFE } from "./psbt.js";
 import { lockedHint } from "./activation.js";
 import { MINE_MIN_DEPLOY_CONFIRMATIONS } from "./finality.js";
 import { MINE_PROTOCOL_FEE_SATS } from "./payloads.js";
@@ -9,17 +8,15 @@ import { MINE_PROTOCOL_FEE_SATS } from "./payloads.js";
 const int = (n) => Number(n).toLocaleString("en-US");
 
 /**
- * The "Ready" line. A wallet without an asset-safe UTXO list (OKX, the
- * simulated wallet) is told plainly what that means BEFORE its first
- * transaction (spec §6: the app warns OKX users) — not only
- * in the signing detail, while the wallet's own popup has the attention.
+ * The "Ready" line. A UniSat that does not offer its list of BTC outputs
+ * (`assetSafe === false` from connect) cannot fund any transaction here:
+ * it is told to update UniSat BEFORE its first click, not after it.
  */
 export function readyText(assetSafe, action) {
-  if (assetSafe === true) return "Ready. Fee inputs are selected from spendable BTC only — dust and token-bearing outputs are never spent.";
-  return (
-    `Ready to ${String(action).toLowerCase()}. This wallet has no asset-safe UTXO list: LUCKY-20 carriers and outputs of ` +
-    `${MIN_FEE_INPUT_SATS_UNSAFE.toLocaleString("en-US")} sats or less are skipped, but Ordinals or Runes on larger outputs cannot be detected — use an address that holds none.`
-  );
+  if (assetSafe === false) {
+    return `UniSat did not offer its list of BTC outputs, which every transaction here is built from — update UniSat to ${String(action).toLowerCase()}.`;
+  }
+  return "Ready. Fee inputs are selected from spendable BTC only — dust and token-bearing outputs are never spent.";
 }
 
 /**

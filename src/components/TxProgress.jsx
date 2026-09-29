@@ -1,21 +1,13 @@
 import { fmtInt, txUrl, shortTxid } from "../lib/format.js";
 import { finalityText } from "../lib/finality.js";
-import { MIN_FEE_INPUT_SATS_UNSAFE } from "../lib/psbt.js";
 import { isMobileBrowser } from "../lib/wallet.js";
 import { useApp } from "../context.js";
 
-/**
- * The inputs a PSBT is about to spend, shown at signing time.
- * With an asset-safe list it is a plain listing; without one it carries
- * the warning that any of these outputs could hold Ordinals or Runes the
- * indexer cannot see (inscriptions are excluded when the wallet can list
- * them; outputs under the floor are never used).
- */
-export function SpentInputs({ inputs, assetSafe }) {
+/** The inputs a PSBT is about to spend, shown at signing time. */
+export function SpentInputs({ inputs }) {
   if (!Array.isArray(inputs) || inputs.length === 0) return null;
-  const unsafe = assetSafe !== true;
   return (
-    <div className={`spent-inputs${unsafe ? " warn" : ""}`}>
+    <div className="spent-inputs">
       <span className="label">Spending</span>{" "}
       {inputs.map((u, i) => (
         <span key={`${u.txid}:${u.vout}`} className="mono" title={`${u.txid}:${u.vout}`}>
@@ -23,11 +15,6 @@ export function SpentInputs({ inputs, assetSafe }) {
           {shortTxid(u.txid, 6, 4)}:{u.vout} ({fmtInt(u.sats)} sats)
         </span>
       ))}
-      {unsafe ? (
-        <span className="muted">
-          {" "}— this wallet has no asset-safe UTXO list: {assetSafe === "inscriptions-only" ? "inscriptions the wallet lists are excluded and Runes cannot be detected" : "Ordinals or Runes on these outputs cannot be detected"}; outputs under {fmtInt(MIN_FEE_INPUT_SATS_UNSAFE)} sats are never used.
-        </span>
-      ) : null}
     </div>
   );
 }
@@ -43,28 +30,13 @@ export function reorgNote(status) {
 }
 
 /**
- * The button that ends a flow's wait for the indexer's scan of the wallet
- * (a first use can take minutes): the flow goes back to idle, nothing is
- * signed, and the scan itself keeps running on the indexer.
- */
-export function StopWaitingButton({ onClick }) {
-  return (
-    <button className="btn btn-sm" type="button" onClick={onClick} title="Nothing has been signed. The indexer keeps scanning this wallet — start again later and it may be ready.">
-      Stop waiting
-    </button>
-  );
-}
-
-/**
  * One status line for every sign-and-broadcast flow (buy / sell / split /
- * cancel / create). `flow` = { phase, txid, error, note, feeSats, detail, inputs, assetSafe, waitNote } with
+ * cancel / create). `flow` = { phase, txid, error, note, feeSats, detail, inputs, assetSafe } with
  * phase ∈ idle | verifying | building | signing | broadcasting | pending | unseen | confirmed | error.
  * `status` (useTxStatus) adds the confirmation depth — a confirmed result is
  * provisional until FINAL_DEPTH — and any chain reorganization it saw.
- * `onStopWaiting` adds Stop waiting while the build waits for the
- * indexer's scan of the wallet (`flow.waitNote`).
  */
-export default function TxProgress({ flow, status, labels = {}, onReset, onStopWaiting, idleText }) {
+export default function TxProgress({ flow, status, labels = {}, onReset, idleText }) {
   let cls = "status";
   let text = idleText || "";
   let detail = null;
@@ -83,8 +55,7 @@ export default function TxProgress({ flow, status, labels = {}, onReset, onStopW
       break;
     case "building":
       cls += " s-busy";
-      text = flow.waitNote || labels.building || "Building transaction — selecting fee inputs, laying out outputs.";
-      if (flow.waitNote && onStopWaiting) actions = <StopWaitingButton onClick={onStopWaiting} />;
+      text = labels.building || "Building transaction — selecting fee inputs, laying out outputs.";
       break;
     case "signing":
       cls += " s-busy";
@@ -94,7 +65,7 @@ export default function TxProgress({ flow, status, labels = {}, onReset, onStopW
           network fee <span className="mono">{fmtInt(flow.feeSats)} sats</span>
           {flow.feeRateSatVb ? ` @ ${flow.feeRateSatVb} sat/vB` : ""}
           {flow.detail ? ` · ${flow.detail}` : ""}
-          <SpentInputs inputs={flow.inputs} assetSafe={flow.assetSafe} />
+          <SpentInputs inputs={flow.inputs} />
         </>
       ) : flow.detail || null;
       break;
@@ -189,8 +160,8 @@ export function ConnectPrompt({ action = "continue" }) {
     <div className="cta">
       <div>
         {phone
-          ? `No wallet detected in this browser. To ${action}, open this site inside the UniSat app or the OKX Wallet app — Connect Wallet shows how. LuckyProtocol never holds keys.`
-          : `A Bitcoin wallet (UniSat or OKX Wallet) is required to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`}
+          ? `No wallet detected in this browser. To ${action}, open this site inside the UniSat app — Connect Wallet shows how. LuckyProtocol never holds keys.`
+          : `The UniSat wallet is required to ${action}. LuckyProtocol never holds keys — every transaction is signed in your wallet.`}
       </div>
       <div className="row">
         <button className="btn btn-primary" type="button" onClick={openWalletModal} disabled={detecting} aria-haspopup="dialog">

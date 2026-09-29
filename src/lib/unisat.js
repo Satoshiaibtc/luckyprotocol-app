@@ -1,9 +1,8 @@
 // Compatibility shim over src/lib/wallet.js.
 //
-// The wallet layer grew from UniSat-only to UniSat + OKX Wallet; the
-// unified API lives in wallet.js. This module keeps the original names so
-// the (unrendered) trading panels and older imports keep working, and
-// adapts the one signature that changed (`signPsbt` positional → options).
+// The wallet API lives in wallet.js. This module keeps the original names
+// so older imports keep working, and adapts the one signature that
+// changed (`signPsbt` positional → options).
 
 import * as wallet from "./wallet.js";
 import { PROVIDER_META } from "./walletShapes.js";

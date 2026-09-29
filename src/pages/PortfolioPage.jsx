@@ -4,6 +4,7 @@ import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
 import { usePaged } from "../hooks/usePaged.js";
 import { useSendToSelf } from "../hooks/useSendToSelf.js";
+import { useOutputValues } from "../hooks/useOutputValues.js";
 import { friendlyError } from "../hooks/useWallet.js";
 import { sendHref, tokenHref } from "../hooks/useHashRoute.js";
 import { useIsMobile } from "../hooks/useMediaQuery.js";
@@ -39,13 +40,13 @@ export default function PortfolioPage() {
   // output after a spend of the listing without the protocol fee (§4 rule 6):
   // a wallet that spends one as plain BTC moves its tokens along with it.
   // Each is offered a send to yourself onto a 546-sat carrier.
-  const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
+  const values = useOutputValues(carriers.data, POLL_MS);
   const fatCarriers = useMemo(() => {
-    const sats = new Map((btcUtxos.data || []).map((u) => [`${u.txid}:${u.vout}`, u.sats]));
+    const sats = new Map((values.data || []).map((u) => [`${u.txid}:${u.vout}`, u.sats]));
     return (carriers.data || [])
       .map((u) => ({ ...u, sats: sats.get(`${u.txid}:${u.vout}`) ?? null }))
       .filter((u) => Number.isInteger(u.sats) && u.sats > DUST_SATS && Object.keys(u.balances || {}).length > 0);
-  }, [carriers.data, btcUtxos.data]);
+  }, [carriers.data, values.data]);
   // /mines/:addr is paged by the indexer (50 / page, max 200, indexer API): the
   // table pages with Load more, and the mix reads the newest 200 and says so
   // — never a silent "50 mines".
@@ -99,7 +100,7 @@ export default function PortfolioPage() {
 
   // Withdraw = SEND-to-self of the listed carrier (the spec's cancel; the replacement-fee rule lives in the hook); Renew = re-POST.
   const sendFlow = useSendToSelf({ onSettled: () => orders.refresh() });
-  const { chain, status, run, reset, stopWaiting, busy } = sendFlow;
+  const { chain, status, run, reset, busy } = sendFlow;
   // This browser's own pending transactions: a listing whose pending spend
   // is one of them is the user's own withdrawal, not a buyer's fill.
   // Re-read whenever the listings poll answers.
@@ -295,7 +296,6 @@ export default function PortfolioPage() {
                 flow={chain}
                 status={status}
                 onReset={reset}
-                onStopWaiting={stopWaiting}
                 labels={{
                   building: "Building the withdrawal — a SEND of the listed UTXO to yourself.",
                   signing: `Awaiting signature — ${WITHDRAW_FEE_NOTE}`,

@@ -54,15 +54,15 @@ export function switchSendVersion(chain, txid) {
  * The carriers of `ticker` at this address, largest amount first:
  *   { key, txid, vout, amount, balances, others: [[ticker, amount]], sats,
  *     listing, offBook, blocked: null | "listed" | "filling" | "pending", note }
- * `tokenUtxos` = /utxos/:addr rows, `btcUtxos` = /btc-utxos rows (for the
- * carrier's BTC value; every page of them), `orders` = this address's
+ * `tokenUtxos` = /utxos/:addr rows, `values` = `[{ txid, vout, sats }]`
+ * (each carrier's BTC value, indexer.outputValues), `orders` = this address's
  * OrderViews (live ones mark a carrier listed / filling), `expired` = its
  * listings that left the book but can still be filled (`offBook`: spending
  * the carrier cancels them), `pendingSpent` = Set of "txid:vout" your own
  * unconfirmed broadcasts already spend (txrecords.pendingSpentOutpoints).
  */
-export function sendCarrierRows({ tokenUtxos, btcUtxos, orders, expired = [], pendingSpent, ticker }) {
-  const sats = new Map((btcUtxos || []).map((u) => [key(u), Number(u.sats)]));
+export function sendCarrierRows({ tokenUtxos, values, orders, expired = [], pendingSpent, ticker }) {
+  const sats = new Map((values || []).map((u) => [key(u), Number(u.sats)]));
   const live = new Map((orders || []).filter((o) => o && (o.status === "open" || o.status === "filling")).map((o) => [String(o.id).toLowerCase(), o]));
   const floors = new Map((expired || []).filter((o) => o && o.id).map((o) => [String(o.id).toLowerCase(), o]));
   const spent = pendingSpent instanceof Set ? pendingSpent : new Set(pendingSpent || []);
@@ -97,7 +97,7 @@ export function carrierNote(row, ticker) {
   if (row.blocked === "pending") return "already spent by one of your transactions that has not confirmed yet";
   if (row.blocked === "filling") return "a fill of its listing is in the mempool — it cannot be spent until that confirms or drops";
   if (row.blocked === "listed") return `listed for sale — transferring it withdraws that listing (its signed listing can no longer be filled)`;
-  if (!Number.isInteger(row.sats)) return "its BTC value is not known: the indexer does not list this output right now, and a SEND signs its exact value — try again after the next block";
+  if (!Number.isInteger(row.sats)) return "its BTC value is not known: the indexer could not read this output right now, and a SEND signs its exact value — try again in a moment";
   if (row.offBook) {
     return `an earlier listing of it can still be bought at ${fmtUnit(row.offBook.unit_price)} sats per token — transferring it cancels that listing`;
   }
@@ -109,7 +109,7 @@ export function carrierNote(row, ticker) {
 /**
  * Rows that may be picked automatically: free (never a listed carrier) and
  * of a known BTC value — a SEND signs each input's exact value, so a
- * carrier the indexer does not list right now cannot be spent.
+ * carrier whose value the indexer could not read cannot be spent.
  */
 const autoEligible = (r) => !r.blocked && Number.isInteger(r.sats);
 
@@ -219,7 +219,7 @@ export function sendFormHint({ connected, indexerOk, lagText, rcptState, amount,
       ? `Your free ${ticker} carriers hold ${Number(freeTotal).toLocaleString("en-US")} — not enough for ${Number(amount).toLocaleString("en-US")}.`
       : "Tick the carriers to spend — together they must hold the amount.";
   }
-  if (unknownValue) return "A carrier you ticked has no known BTC value right now (see its line) — untick it, or try again after the next block.";
+  if (unknownValue) return "A carrier you ticked has no known BTC value right now (see its line) — untick it, or try again in a moment.";
   return feeHint || null;
 }
 

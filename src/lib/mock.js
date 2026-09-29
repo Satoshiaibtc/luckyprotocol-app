@@ -52,7 +52,7 @@ import { aggregateDaily } from "./activity.js";
 import { makeOpReturnScript } from "./psbt.js";
 import { compareSecondSource } from "./secondSource.js";
 import { isOpReturnOut, listingSignedInputs, routeDecision, settleListingSpend } from "./mockRouting.js";
-import { seedWaitFields, serverErrorText } from "./httpError.js";
+import { serverErrorText } from "./httpError.js";
 import { FINAL_DEPTH, MARKET_OPEN_DELAY, confirmationsAt } from "./finality.js";
 import { MAX_OPEN_LISTINGS_PER_ADDRESS, WITHDRAW_FIRST_TEXT, sellerCapError } from "./listingRules.js";
 
@@ -1364,36 +1364,11 @@ function mockNetworkAhead() {
 }
 
 /**
- * Dev knobs for the indexer's first-use UTXO scan behind `/btc-utxos` —
- * the live answers, same shape (503 + Retry-After + `{ error,
- * queue_position, eta_secs }` while the scan is queued or runs, 429 +
- * Retry-After + `{ error, reason }` when it is turned away):
- *
- *   `sessionStorage["lp.mock.seedWait"] = "N"` (1–900): the first query of
- *     an address in this tab starts an N-second scan — queued behind other
- *     addresses for the first half, in the running pass for the second;
- *   `sessionStorage["lp.mock.seedBusy"] = "client_limit" | "queue_full"`:
- *     every query of an address whose scan has not started is turned away.
- */
-const seedStartedAt = new Map(); // address → ms of the query that started its scan (this tab)
-
-function mockSeedKnobs() {
-  try {
-    if (typeof sessionStorage === "undefined") return { wait: 0, busy: null };
-    const n = Number(sessionStorage.getItem("lp.mock.seedWait"));
-    const b = sessionStorage.getItem("lp.mock.seedBusy");
-    return { wait: Number.isInteger(n) && n > 0 && n <= 900 ? n : 0, busy: b === "client_limit" || b === "queue_full" ? b : null };
-  } catch {
-    return { wait: 0, busy: null };
-  }
-}
-
-/**
  * Dev knob for a wallet with many outputs: `sessionStorage["lp.mock.manyUtxos"]
- * = "N"` (1–5000) adds N confirmed 546-sat plain outputs to every address's
- * `/btc-utxos` list, so its token carriers sort onto later pages (the
- * list is paged like the indexer's). Outputs of 546 sats are never spent
- * as fee inputs, so the knob changes what is listed, never what is spent.
+ * = "N"` (1–5000) adds N confirmed 546-sat plain outputs to every address
+ * (the simulated wallet lists them, GET /txouts knows them), so a wallet's
+ * check of its list runs in several requests. Outputs of 546 sats are never
+ * spent as fee inputs, so the knob changes what is listed, never what is spent.
  */
 function mockExtraBtcUtxos(addr) {
   let n = 0;
@@ -1406,30 +1381,6 @@ function mockExtraBtcUtxos(addr) {
   const count = Math.min(5000, n);
   const prefix = [...String(addr)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(8, "0");
   return Array.from({ length: count }, (_, i) => ({ txid: `${prefix}${i.toString(16).padStart(56, "0")}`, vout: 0, sats: DUST_SATS, confirmed: true, block_height: BASE_TIP - 10 }));
-}
-
-/** The live transport's error for a 503 / 429 with a JSON body (indexer.js `_httpGet`). */
-function seedHttpError(path, status, retryAfter, body) {
-  const text = JSON.stringify(body);
-  return Object.assign(new Error(`Indexer ${path} -> HTTP ${status}: ${serverErrorText(text)}`), { status, retryAfter, ...seedWaitFields(text) });
-}
-
-/** The "not yet" / "turned away" answer for `addr` at `now`, or null when its UTXOs can be served. */
-function mockSeedAnswer(addr, path, now = Date.now()) {
-  const { wait, busy } = mockSeedKnobs();
-  if (!seedStartedAt.has(addr)) {
-    if (busy === "client_limit") return seedHttpError(path, 429, 240, { error: "too many new wallet scans from this client; retry later", reason: busy });
-    if (busy === "queue_full") return seedHttpError(path, 429, 30, { error: "the UTXO-scan queue is full; retry later", reason: busy });
-    if (!wait) return null;
-    seedStartedAt.set(addr, now);
-  }
-  const left = Math.ceil((seedStartedAt.get(addr) + wait * 1000 - now) / 1000);
-  if (left <= 0) return null;
-  const half = wait / 2;
-  const ahead = left > half ? Math.max(1, Math.ceil(((left - half) / half) * 3)) : 0;
-  // As live: Retry-After is always 15 s, and an address in the running pass
-  // is never estimated at less than that.
-  return seedHttpError(path, 503, 15, { error: "this address's UTXO scan is queued or running; retry shortly", queue_position: ahead, eta_secs: ahead === 0 ? Math.max(left, 15) : left });
 }
 
 /** The mock second source's chain tip (src/lib/network.js) — nothing leaves the browser. */
@@ -1705,13 +1656,117 @@ export const MOCK_LIST_MAX_LIMIT = 500;
 /** The indexer's `/tokens` page: default 10 rows, at most 500, oldest deploy first (then ticker). */
 export const MOCK_TOKENS_DEFAULT_LIMIT = 10;
 export const MOCK_TOKENS_MAX_LIMIT = 500;
-/** The indexer's `/btc-utxos` page: default 200 rows, at most 500, largest `sats` first. */
-export const MOCK_BTC_UTXOS_DEFAULT_LIMIT = 200;
-export const MOCK_BTC_UTXOS_MAX_LIMIT = 500;
+// ---- GET /txouts and the simulated wallet's own list --------------------------------------------
 
-/** `/btc-utxos` rows in the indexer's order: sats desc, confirmed before pending, then txid, vout. */
-export function btcUtxoOrder(a, b) {
-  return b.sats - a.sats || Number(b.confirmed) - Number(a.confirmed) || (a.txid < b.txid ? -1 : a.txid > b.txid ? 1 : 0) || a.vout - b.vout;
+/** Most outpoints one GET /txouts request may name (as the indexer). */
+export const MOCK_TXOUTS_MAX = 100;
+const TXOUT_ENTRY_RE = /^[0-9a-f]{64}:[0-9]+$/;
+/** The indexer's refusals of a GET /txouts query, word for word. */
+export const TXOUTS_REFUSALS = {
+  list: "o must list 1 to 100 outpoints as txid:vout, separated by commas",
+  tooMany: "at most 100 outpoints per request",
+  entry: (n) => `outpoint ${n} is not txid:vout (64 lower-case hex characters, a colon, a whole number)`,
+};
+
+/** A 400 of the live transport (indexer.js `_httpGet`) for `path` with the server's `text`. */
+function http400(path, text) {
+  return Object.assign(new Error(`Indexer ${path} -> HTTP 400: ${text}`), { status: 400, detail: text });
+}
+
+/** Every output the mock knows by outpoint: created, registered, and the seeded rows of every seeded address. */
+function outputIndex() {
+  const w = world();
+  const index = new Map();
+  for (const addr of w.seededAddrs) {
+    for (const u of seededBtcUtxos(addr)) index.set(key(u), { ...u, address: addr });
+    for (const u of mockExtraBtcUtxos(addr)) index.set(key(u), { ...u, address: addr });
+  }
+  for (const [k, u] of w.knownUtxos) index.set(k, u);
+  for (const [k, u] of w.created) index.set(k, u);
+  return index;
+}
+
+/**
+ * One GET /txouts row, as the indexer answers it: the output in the
+ * simulated node's CONFIRMED UTXO set (a pending spend leaves it
+ * `unspent`, a pending output is not), its depth on the indexed chain (0
+ * while its block is above the indexed height — the `lp.mock.indexerLag`
+ * knob), and the token state: a carrier whose spend has confirmed (and so
+ * has been applied) carries no tokens any more.
+ */
+function txoutRow(k, index) {
+  const [txid, voutText] = k.split(":");
+  const vout = Number(voutText);
+  const u = index.get(k) || null;
+  const balances = Object.fromEntries(Object.entries(u?.balances || {}).filter(([, a]) => Number(a) > 0));
+  const spend = spendOf(k);
+  const spentInBlock = !!(spend && spend.confirmed);
+  const carrier = !spentInBlock && Object.keys(balances).length > 0;
+  const unspent = !!u && u.confirmed !== false && !spentInBlock;
+  const base = { txid, vout, token_carrier: carrier, tokens: carrier ? balances : null };
+  if (!unspent) return { txid, vout, unspent: false, sats: null, script_hex: null, address: null, confirmations: 0, coinbase: false, ...base };
+  return {
+    txid,
+    vout,
+    unspent: true,
+    sats: u.sats,
+    script_hex: scriptHexOf(u.address),
+    address: u.address || null,
+    confirmations: confirmationsAt(u.block_height, indexedHeight()) ?? 0,
+    coinbase: false,
+    ...base,
+  };
+}
+
+/** GET /txouts?o=txid:vout,… → the rows, in request order (a repeated outpoint once), or the indexer's 400. */
+function mockTxouts(path, q) {
+  const all = q.getAll("o");
+  if (all.length !== 1 || all[0] === "") throw http400(path, TXOUTS_REFUSALS.list);
+  const entries = all[0].split(",");
+  if (entries.length > MOCK_TXOUTS_MAX) throw http400(path, TXOUTS_REFUSALS.tooMany);
+  const keys = [];
+  for (const [i, e] of entries.entries()) {
+    const ok = TXOUT_ENTRY_RE.test(e) && Number(e.split(":")[1]) <= 0xffffffff;
+    if (!ok) throw http400(path, TXOUTS_REFUSALS.entry(i + 1));
+    const k = `${e.split(":")[0]}:${Number(e.split(":")[1])}`;
+    if (!keys.includes(k)) keys.push(k);
+  }
+  const index = outputIndex();
+  return keys.map((k) => txoutRow(k, index));
+}
+
+/**
+ * The simulated wallet's `getBitcoinUtxos()` answer, shaped like UniSat's:
+ * every output of `addr` the wallet sees — confirmed or not, token carriers
+ * included (a wallet knows nothing of LUCKY-20), outputs already spent by
+ * a pending transaction left out — as `{ txid, vout, satoshis, scriptPk,
+ * addressType, pubkey, inscriptions, atomicals }`.
+ */
+export async function mockWalletUtxos(addr) {
+  await sleep(LATENCY_MS);
+  settle();
+  const script = scriptHexOf(addr);
+  const addressType = String(addr).startsWith("bc1p") ? 2 : 1;
+  return [...liveUtxos(addr), ...mockExtraBtcUtxos(addr)].map((u) => ({
+    txid: u.txid,
+    vout: u.vout,
+    satoshis: u.sats,
+    scriptPk: script,
+    addressType,
+    pubkey: addr === MOCK_WALLET.address ? MOCK_WALLET.pubkeyHex : "",
+    inscriptions: [],
+    atomicals: [],
+  }));
+}
+
+/** The simulated wallet's `getBalance()`: `{ confirmed, unconfirmed, total }` in sats. */
+export async function mockWalletBalance(addr) {
+  await sleep(LATENCY_MS);
+  settle();
+  const rows = liveUtxos(addr);
+  const confirmed = rows.filter((u) => u.confirmed !== false).reduce((s, u) => s + u.sats, 0);
+  const unconfirmed = rows.filter((u) => u.confirmed === false).reduce((s, u) => s + u.sats, 0);
+  return { confirmed, unconfirmed, total: confirmed + unconfirmed };
 }
 
 /** Fake `GET path` → parsed JSON. Throws `HTTP 404` like the real transport. */
@@ -1766,14 +1821,8 @@ export async function mockGet(path) {
       .map((u) => ({ txid: u.txid, vout: u.vout, balances: u.balances }));
     return { address: addr, utxos };
   }
-  if ((m = p.match(/^\/btc-utxos\/([^/]+)$/))) {
-    const addr = decodeURIComponent(m[1]);
-    const notYet = mockSeedAnswer(addr, path);
-    if (notYet) throw notYet;
-    const all = [...liveUtxos(addr), ...mockExtraBtcUtxos(addr)].map(({ txid, vout, sats, confirmed, block_height }) => ({ txid, vout, sats, confirmed, block_height })).sort(btcUtxoOrder);
-    // Paged like the indexer: a wallet's smallest outputs (its token carriers) are on the last page.
-    const pg = page(all, q, MOCK_BTC_UTXOS_DEFAULT_LIMIT, MOCK_BTC_UTXOS_MAX_LIMIT);
-    return { address: addr, scanned_at_height: tipHeight(), utxos: pg.items, total: pg.total, limit: pg.limit, offset: pg.offset };
+  if (p === "/txouts") {
+    return mockTxouts(path, q);
   }
   if ((m = p.match(/^\/mines\/by-txid\/([^/]+)$/))) {
     const txid = decodeURIComponent(m[1]).toLowerCase();

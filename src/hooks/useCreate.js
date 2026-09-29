@@ -3,8 +3,7 @@ import * as indexer from "../lib/indexer.js";
 import * as wallet from "../lib/wallet.js";
 import { useTxStatus } from "./useTxStatus.js";
 import { friendlyError } from "./useWallet.js";
-import { useSeedWait } from "./useSeedWait.js";
-import { seedWaitNote } from "../lib/retry.js";
+import { useBuildSignal } from "./useBuildSignal.js";
 import { RBF_SEQUENCE, buildDeployPsbt, buildSpeedUpPsbt, expectPsbtPayload, minFeeInputSats } from "../lib/psbt.js";
 import { PROTOCOL_LOCKTIME } from "../lib/payloads.js";
 import { withPending } from "../lib/pending.js";
@@ -141,11 +140,11 @@ export function useCreate({ address, pubkeyHex, providerName, tip, indexed, trus
   const requestedRef = useRef(requested);
   requestedRef.current = requested;
   const reviewRef = useRef(null);
-  const seedWait = useSeedWait();
+  const reads = useBuildSignal();
 
   // ---- mount / account switch: unused keys go, the newest unsettled DEPLOY resumes ----------
   useEffect(() => {
-    seedWait.stop();
+    reads.stop();
     reviewRef.current = null;
     setSpeeding(null);
     setSpeedError(null);
@@ -164,7 +163,7 @@ export function useCreate({ address, pubkeyHex, providerName, tip, indexed, trus
       setOtherPending(resumed);
       setFlow(IDLE_CREATE);
     }
-  }, [address, emit, seedWait]);
+  }, [address, emit, reads]);
 
   // A resumed DEPLOY takes the tip it is first seen at as its send tip (missed-block notice).
   useEffect(() => {
@@ -249,7 +248,7 @@ export function useCreate({ address, pubkeyHex, providerName, tip, indexed, trus
       setSpeedError(null);
       setFlow({ phase: "building", ticker: t, startedAt, rate });
       let utxoRes = null;
-      const signal = seedWait.begin();
+      const signal = reads.begin();
       try {
         if (!isUsableFeeRate(rate)) throw new Error("No fee rate — the indexer has no estimate; pick Custom and enter a sat/vB.");
         // Re-checked at the moment of the click, not from the last poll: the
@@ -263,9 +262,8 @@ export function useCreate({ address, pubkeyHex, providerName, tip, indexed, trus
         if (row) throw new Error(`${t} is already deployed (tx ${String(row.deploy_txid).slice(0, 12)}…) — a second DEPLOY is ignored and only costs fees.`);
         const own = await ownDeployFor(address, t);
         if (own) throw new Error(ownDeployText(t, own));
-        const onWait = (info) => setFlow((f) => (f.phase === "building" && f.startedAt === startedAt ? { ...f, waitNote: seedWaitNote(info) } : f));
-        const [list, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { onWait, signal }), indexer.tokenUtxos(address, signal)]);
-        seedWait.done(signal);
+        const [list, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(address, { signal }), indexer.tokenUtxos(address, signal)]);
+        reads.done(signal);
         utxoRes = list;
         // Largest inputs first: the fewest inputs and the largest change —
         // the change is what a Speed up takes its extra fee from.
@@ -302,17 +300,17 @@ export function useCreate({ address, pubkeyHex, providerName, tip, indexed, trus
         }
         await signAndSend(ctx);
       } catch (e) {
-        // Stop waiting, an account switch or the page left: back to idle, nothing to report.
+        // An account switch or the page left during the reads: back to idle, nothing to report.
         if (signal.aborted) {
           setFlow((f) => (f.startedAt === startedAt ? IDLE_CREATE : f));
           return;
         }
         fail(e, utxoRes, startedAt);
       } finally {
-        seedWait.done(signal);
+        reads.done(signal);
       }
     },
-    [address, pubkeyHex, seedWait, signAndSend, fail],
+    [address, pubkeyHex, reads, signAndSend, fail],
   );
 
   /** Sign and broadcast the reviewed DEPLOY (its Speed up headroom was acknowledged). */
@@ -723,8 +721,7 @@ export function useCreate({ address, pubkeyHex, providerName, tip, indexed, trus
       speedUpQuote,
       dismiss,
       dismissSettling,
-      stopWaiting: seedWait.stop,
     }),
-    [flow, status, newestUnseen, unseenAt, missed, otherPending, settling, busy, speeding, speedError, canSpeedUp, create, confirmCreate, cancelReview, speedUp, speedUpQuote, dismiss, dismissSettling, seedWait],
+    [flow, status, newestUnseen, unseenAt, missed, otherPending, settling, busy, speeding, speedError, canSpeedUp, create, confirmCreate, cancelReview, speedUp, speedUpQuote, dismiss, dismissSettling],
   );
 }

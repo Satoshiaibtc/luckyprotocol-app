@@ -26,8 +26,7 @@ import {
   withDepth,
 } from "../lib/minePending.js";
 import { friendlyError } from "./useWallet.js";
-import { useSeedWait } from "./useSeedWait.js";
-import { seedWaitNote } from "../lib/retry.js";
+import { useBuildSignal } from "./useBuildSignal.js";
 
 const STATUS_POLL_MS = 15_000;
 /** A confirmed MINE is re-checked this often until its block is final. */
@@ -122,18 +121,18 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
   flowRef.current = flow;
   const trustRef = useRef(trustUnseen);
   trustRef.current = trustUnseen;
-  const seedWait = useSeedWait();
+  const reads = useBuildSignal();
 
-  // A wallet change or disconnect abandons the flow (and any wait for the
-  // indexer's scan of the old address); this ticker's MINEs whose result
-  // has not been shown are resumed from the broadcast records.
+  // A wallet change or disconnect abandons the flow (and the reads of a
+  // build for the old address); this ticker's MINEs whose result has not
+  // been shown are resumed from the broadcast records.
   const address = walletState.status === "connected" ? walletState.address : null;
   useEffect(() => {
-    seedWait.stop();
+    reads.stop();
     setFlow(IDLE_MINE);
     setSpare(null);
     setPendings(address ? resumeMinePendings(txRecords(address), ticker) : []);
-  }, [address, ticker, seedWait]);
+  }, [address, ticker, reads]);
 
   const startMine = useCallback(async () => {
     if (walletState.status !== "connected" || !tokenInfo) return;
@@ -142,16 +141,15 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
     const startedAt = Date.now(); // keys the terminal's per-attempt lines
     setFlow({ phase: "building", ticker, startedAt });
     let utxoRes = null;
-    const signal = seedWait.begin();
+    const signal = reads.begin();
     try {
       if (!isUsableFeeRate(feeRateSatVb)) {
         throw new Error("No fee rate — neither the indexer nor mempool.space has an estimate; pick Custom and enter a sat/vB.");
       }
-      const onWait = (info) => setFlow((m) => (m.phase === "building" ? { ...m, waitNote: seedWaitNote(info) } : m));
       // getBitcoinUtxos drops the inputs of every broadcast that has not
       // confirmed yet — the earlier MINEs in the pending list included.
-      const [utxoList, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { onWait, signal }), indexer.tokenUtxos(addr, signal)]);
-      seedWait.done(signal);
+      const [utxoList, tokenRows] = await Promise.all([wallet.getBitcoinUtxos(addr, { signal }), indexer.tokenUtxos(addr, signal)]);
+      reads.done(signal);
       utxoRes = utxoList;
       const tokenOutpoints = withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), addr);
       const built = buildMinePsbt({
@@ -204,7 +202,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       setPendings((l) => addPendingMine(l, item(txid)));
       setFlow(IDLE_MINE);
     } catch (e) {
-      // Stop waiting (or the page left): back to idle, nothing to report.
+      // The wallet changed (or the page left) during the reads: back to idle, nothing to report.
       if (signal.aborted) {
         setFlow((m) => (m.startedAt === startedAt ? IDLE_MINE : m));
         return;
@@ -212,9 +210,9 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
       const error = fundingMessage(e, utxoRes, { action: "this MINE" }) ?? friendlyError(e);
       setFlow((m) => ({ ...m, phase: "error", error }));
     } finally {
-      seedWait.done(signal);
+      reads.done(signal);
     }
-  }, [walletState, tokenInfo, ticker, feeRateSatVb, seedWait]);
+  }, [walletState, tokenInfo, ticker, feeRateSatVb, reads]);
 
   /** The replacement a Speed up of pending MINE `txid` at `rate` would sign, `{ error, code }` when it cannot, or null. Pure preview. */
   const speedUpQuote = useCallback(
@@ -291,8 +289,6 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
 
   /** Clear the flow's error (the pending list is untouched). */
   const resetMine = useCallback(() => setFlow((f) => (MINE_FLOW_BUSY.has(f.phase) ? f : IDLE_MINE)), []);
-  /** Stop waiting for the indexer's scan of this wallet (the flow returns to idle). */
-  const stopWaiting = seedWait.stop;
   /** Remove one finished item from the list. */
   const dismissMine = useCallback((txid) => setPendings((l) => l.filter((x) => x.txid !== txid || !isFinished(x))), []);
   /** Remove every finished item. */
@@ -482,7 +478,6 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
     spare,
     startMine,
     resetMine,
-    stopWaiting,
     dismissMine,
     clearFinished,
     speedUp,

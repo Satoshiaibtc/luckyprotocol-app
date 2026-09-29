@@ -3,7 +3,7 @@ import { useApp } from "../context.js";
 import { useModalFocus } from "../hooks/useModalFocus.js";
 import { shortAddr, walletBalanceText } from "../lib/format.js";
 import { isMobileBrowser } from "../lib/wallet.js";
-import { PROVIDER_IDS, PROVIDER_META } from "../lib/walletShapes.js";
+import { PROVIDER_IDS, PROVIDER_META, canSwitchWallet } from "../lib/walletShapes.js";
 import Led from "./hud/Led.jsx";
 import WalletMobileGuide from "./WalletMobileGuide.jsx";
 
@@ -15,7 +15,9 @@ import WalletMobileGuide from "./WalletMobileGuide.jsx";
  *                   Install (desktop) / "open in the app" guidance + copy-URL
  *                   (phones) · simulated wallet in mock mode
  *   connected     → the current session (provider · address · balance) with
- *                   Disconnect, then the same cards under "Switch wallet"
+ *                   Disconnect; then, when another wallet is offered (mock
+ *                   mode), the cards under "Switch wallet", otherwise a line
+ *                   saying the account is changed in UniSat
  *
  * Accessible: role=dialog + aria-modal, labelled by its heading, focus
  * moves in on open and back to the opener on close, Tab / Shift+Tab cycle
@@ -33,6 +35,7 @@ export default function WalletModal() {
   // A switch keeps the current session connected while the other wallet's prompt is open.
   const busy = wallet.status === "connecting" || !!wallet.switching;
   const present = new Set((wallet.providers || []).filter((p) => p.present).map((p) => p.id));
+  const canSwitch = connected && canSwitchWallet(wallet.provider, { mock });
 
   useModalFocus(dialogRef, open, onClose);
 
@@ -145,13 +148,19 @@ export default function WalletModal() {
             </button>
           </div>
         ) : (
-          <p className="wallet-modal-lead">LuckyProtocol never holds keys: every transaction is signed in your wallet, on Bitcoin mainnet.</p>
+          <p className="wallet-modal-lead">This site works with the UniSat wallet. LuckyProtocol never holds keys: every transaction is signed in UniSat, on Bitcoin mainnet.</p>
         )}
 
-        {connected && <span className="label wallet-modal-sub">Switch wallet</span>}
-        <ul className="wallet-cards" aria-label={connected ? "Switch wallet" : "Wallets"}>
-          {cards}
-        </ul>
+        {connected && !canSwitch ? (
+          <p className="wallet-modal-lead">To use another address, switch the account in UniSat.</p>
+        ) : (
+          <>
+            {connected && <span className="label wallet-modal-sub">Switch wallet</span>}
+            <ul className="wallet-cards" aria-label={connected ? "Switch wallet" : "Wallets"}>
+              {cards}
+            </ul>
+          </>
+        )}
 
         {phone && present.size === 0 && !detecting && <WalletMobileGuide />}
 

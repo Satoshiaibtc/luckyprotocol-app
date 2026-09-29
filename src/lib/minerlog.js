@@ -86,7 +86,7 @@ const secondBucket = (ms) => Math.floor(Number(ms) / 1000);
 /** `wallet connected  bc1p…62s (UniSat)` / `wallet disconnected`. */
 export function walletLine(wallet, at = Date.now()) {
   if (wallet && wallet.status === "connected" && wallet.address) {
-    const floor = wallet.assetSafe === false ? " · no asset-aware UTXO list: 10,000-sat floor applies" : "";
+    const floor = wallet.assetSafe === false ? " · UniSat offers no list of its BTC outputs: update UniSat" : "";
     return line({
       key: `wallet:connected:${wallet.address}:${secondBucket(at)}`,
       kind: "sys",

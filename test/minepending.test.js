@@ -23,7 +23,6 @@ import {
   withDepth,
 } from "../src/lib/minePending.js";
 import { resumeMineState } from "../src/hooks/useMine.js";
-import { seedWaitNote } from "../src/lib/retry.js";
 import { blockFoundLine, blockLineKey, finalLine, mempoolLine, reconcileLine, reorgLine, settledYoursLine } from "../src/lib/minerlog.js";
 import { FINAL_DEPTH } from "../src/lib/finality.js";
 import * as btc from "@scure/btc-signer";
@@ -236,14 +235,6 @@ const GRACE = 180_000;
   assert.deepEqual([fromRow.phase, fromRow.reconcile, fromRow.indexed.yield_smallest, fromRow.serverConfirmations], ["confirmed", "done", 500, 2]);
   assert.equal(confirmedFromRow(p, null), p);
   console.log("minepending unseen: never dropped while the node's answer cannot be trusted; dropped MINEs are watched and come back");
-}
-
-// ---- finality: the scan wait after a reorganization is not called a first use ----------------------------------------
-{
-  assert.match(seedWaitNote({ elapsedMs: 5_000 }), /^Setting up this wallet: /);
-  const again = seedWaitNote({ elapsedMs: 5_000, rescan: true });
-  assert.ok(/^Setting up this wallet again \(after a chain reorganization or an indexer restart\): /.test(again), again);
-  console.log("minepending seed wait: a rescan after a reorganization is said as such");
 }
 
 // ---- a pending MINE whose OP_RETURN is not a LUCKY-20 payload credits nothing: no Speed up ----------------

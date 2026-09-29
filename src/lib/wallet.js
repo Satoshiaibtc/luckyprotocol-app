@@ -1,54 +1,52 @@
-// Multi-wallet provider layer (PROTOCOL.md §6): UniSat + OKX Wallet,
-// plus the simulated provider in mock mode.
+// Wallet provider layer (PROTOCOL.md §6): the UniSat wallet, plus the
+// simulated provider in mock mode.
 //
-// The app holds no keys. Every key operation is delegated to whichever
-// provider the user picked:
+// The app holds no keys. Every key operation is delegated to the wallet:
 //
 //   unisat  window.unisat               (extension on desktop; injected in the UniSat app's browser)
-//   okx     window.okxwallet.bitcoin    (extension on desktop; injected in the OKX app's DApp browser)
 //   mock    in-memory provider          (VITE_MOCK=1 only; REALLY signs with the public-seed mock key)
 //
-// The per-provider API differences (argument shapes, missing methods) are
-// isolated in src/lib/walletShapes.js and in `connect()` below. Everything
-// the rest of the app sees is one uniform surface:
+// The provider's argument shapes live in src/lib/walletShapes.js. What the
+// rest of the app sees is one surface:
 //
 //   detectProviders() → [{ id, name, present }]
 //   connect(id) / restoreSession() / disconnect()
-//   getBalance() / getBitcoinUtxos(addr) → { source, assetSafe, utxos }
+//   getBalance() / getBitcoinUtxos(addr) → { source, assetSafe, utxos, waitingSats, … }
 //   signPsbt(hex, { inputIndexes, address, autoFinalized, sighashTypes })
 //   pushPsbt(hex) / pushTx(rawHex) / broadcastSignedPsbt / broadcastRawTx
 //   on(event, handler) / providerName() / providerId()
 //
 // The chosen provider id is the ONLY thing persisted ('lp.wallet'), and a
 // page load reconnects silently only when the provider already reports an
-// authorized account (`getAccounts()`), never by popping the wallet.
+// authorized account (`getAccounts()`), never by popping the wallet. A
+// stored id of a provider this site does not offer is dropped.
 
+import { hex } from "@scure/base";
 import * as indexer from "./indexer.js";
-import { MOCK_WALLET, mockSignPsbt } from "./mock.js";
-import { MIN_FEE_INPUT_SATS_UNSAFE, assertSingleOpReturn, extractRawTxHex, p2trAddressOfXOnly, psbtInputKeys, rawTxSummary, signedTxMismatch } from "./psbt.js";
-import { DUST_SATS } from "./payloads.js";
+import { MOCK_WALLET, mockSignPsbt, mockWalletBalance, mockWalletUtxos } from "./mock.js";
+import { assertSingleOpReturn, decodeAddress, extractRawTxHex, psbtInputKeys, rawTxSummary, signedTxMismatch } from "./psbt.js";
 import { signedSighashMismatch } from "./sighash.js";
-import { isAbortError, retryWhileSeeding, seedFailureText } from "./retry.js";
-import { pendingSpentOutpoints, recordBroadcastTx, refreshTxRecords, txRecords } from "./txrecords.js";
+import { abortError, isAbortError } from "./abort.js";
+import { indexedTipNow, pendingSpentOutpoints, recordBroadcastTx, refreshTxRecords, txRecords } from "./txrecords.js";
 import {
   PROVIDER_IDS,
   PROVIDER_META,
   WALLET_STORAGE_KEY,
-  collectInscriptionOutpoints,
+  WALLET_UTXO_MAX_PAGES,
+  WALLET_UTXO_PAGE,
+  collectWalletUtxos,
   defaultProviderId,
   firstAccount,
-  intersectConfirmed,
   isConflictError,
   isMainnetAddress,
   normalizeBalance,
   normalizePubkey,
   normalizeTxid,
-  normalizeUtxoList,
   providerMeta,
-  pubkeyFromConnect,
   pushTxArgs,
   shouldRestore,
   signPsbtArgs,
+  verifyWalletUtxos,
 } from "./walletShapes.js";
 
 export { PROVIDER_IDS, PROVIDER_META, providerMeta, isConflictError, WALLET_STORAGE_KEY };
@@ -74,21 +72,8 @@ export function isMobileBrowser() {
 
 // ---- injected objects ------------------------------------------------------------------
 
-/**
- * OKX injects several providers under `window.okxwallet`: the EVM one
- * (`window.okxwallet` itself / `.ethereum`), Solana, and the BITCOIN
- * MAINNET one at `window.okxwallet.bitcoin` (`.bitcoinTestnet` /
- * `.bitcoinSignet` exist too). Only `.bitcoin` is ever used — never the
- * EVM provider, never a testnet one — and connect() re-checks that the
- * returned account is a mainnet bc1q/bc1p address.
- */
 const INJECTED = {
   unisat: () => (typeof window !== "undefined" && window.unisat ? window.unisat : null),
-  okx: () => {
-    if (typeof window === "undefined" || !window.okxwallet) return null;
-    const p = window.okxwallet.bitcoin;
-    return p && typeof p === "object" && p !== window.okxwallet ? p : null;
-  },
 };
 
 let mockProvider = null; // set by enableMockWallet()
@@ -106,10 +91,10 @@ function snapshot() {
 }
 
 /**
- * Poll for the injected providers (extensions and in-app browsers inject
- * asynchronously after the document loads). Returns once both are present,
- * or `timeoutMs` after start, or ~400 ms after the first one shows up (so a
- * second, slower injector still gets a chance). → [{ id, name, present }]
+ * Poll for the injected provider (extensions and in-app browsers inject
+ * asynchronously after the document loads). Returns once every provider is
+ * present, or `timeoutMs` after start, or ~400 ms after the first one shows
+ * up. → [{ id, name, present }]
  */
 export async function detectProviders(timeoutMs = 2000) {
   const start = Date.now();
@@ -179,13 +164,12 @@ function makeMockProvider() {
       return "livenet";
     },
     async getBalance() {
-      const rows = await indexer.btcUtxos(MOCK_WALLET.address);
-      const confirmed = rows.filter((u) => u.confirmed).reduce((s, u) => s + u.sats, 0);
-      const unconfirmed = rows.filter((u) => !u.confirmed).reduce((s, u) => s + u.sats, 0);
-      return { confirmed, unconfirmed, total: confirmed + unconfirmed };
+      return mockWalletBalance(MOCK_WALLET.address);
     },
-    // Deliberately absent: getBitcoinUtxos — exercises the indexer fallback
-    // (and the "no asset-safe UTXO list" notice) exactly like OKX does.
+    // As UniSat's current builds: the whole list, whatever cursor / size say.
+    async getBitcoinUtxos() {
+      return mockWalletUtxos(MOCK_WALLET.address);
+    },
     async signPsbt(psbtHex, opts = {}) {
       await sleep(900); // stands in for the extension's approval popup
       return mockSignPsbt(psbtHex, opts);
@@ -193,8 +177,8 @@ function makeMockProvider() {
     async pushPsbt(psbtHex) {
       return indexer.broadcast(extractRawTxHex(psbtHex));
     },
-    async pushTx(rawHex) {
-      return indexer.broadcast(rawHex);
+    async pushTx(arg) {
+      return indexer.broadcast(typeof arg === "string" ? arg : arg?.rawtx);
     },
     on(event, fn) {
       if (!listeners.has(event)) listeners.set(event, new Set());
@@ -244,13 +228,14 @@ function nameOf(id) {
 }
 
 /**
- * Connect to `id` ("unisat" | "okx" | "mock"; omitted → the connected one
- * or the only injected one). Requests accounts, reads the public key and
+ * Connect to `id` ("unisat" | "mock"; omitted → the connected one or the
+ * only injected one). Requests accounts, reads the public key and
  * ensures mainnet. With `silent: true` (page-load restore) nothing may pop
  * up: accounts come from `getAccounts()` and a wrong network is an error
  * instead of a switch prompt.
  *
  * → { address, pubkeyHex, network, providerId, providerName, assetSafe }
+ * (`assetSafe`: the wallet offers its own list of plain BTC outputs)
  */
 export async function connect(id, { silent = false } = {}) {
   const pid = typeof id === "string" && id ? id : defaultProviderId(providerId(), presentIds());
@@ -262,26 +247,10 @@ export async function connect(id, { silent = false } = {}) {
   if (!p) throw new Error(`${name} is not installed in this browser`);
 
   let address = null;
-  let pubkeyHex = null;
   if (silent) {
     if (typeof p.getAccounts !== "function") return null;
     address = firstAccount(await p.getAccounts());
     if (!address) return null;
-  } else if (typeof p.connect === "function" && pid === "okx") {
-    // OKX: connect() → { address, publicKey } in one prompt.
-    let res;
-    try {
-      res = await p.connect();
-    } catch (e) {
-      throw walletError(e, "connect");
-    }
-    address = firstAccount(res);
-    // OKX answers a Taproot account with the 32-byte x-only key (and, in
-    // newer builds, `compressedPublicKey`). Use whichever it gave — the
-    // x-only one only after checking that it derives the returned address —
-    // so the in-app browser, whose provider documents no getPublicKey(),
-    // connects with this one prompt.
-    pubkeyHex = pubkeyFromConnect(res, address, p2trAddressOfXOnly);
   } else {
     try {
       address = firstAccount(await p.requestAccounts());
@@ -328,7 +297,7 @@ export async function connect(id, { silent = false } = {}) {
   }
   // Defence in depth: whatever the provider says about its network, the
   // account must be a mainnet bc1q / bc1p address (a `tb1…` testnet
-  // account, or an EVM `0x…` from the wrong OKX provider, stops here).
+  // account stops here).
   if (!isMainnetAddress(address)) {
     throw new Error(
       `${name} returned "${address}", which is not a Bitcoin mainnet Native SegWit (bc1q) or Taproot (bc1p) address — ` +
@@ -336,18 +305,17 @@ export async function connect(id, { silent = false } = {}) {
     );
   }
 
-  if (!pubkeyHex) {
-    if (typeof p.getPublicKey !== "function") {
-      // A page-load restore never errors for what only a prompt can give:
-      // it stays disconnected and Connect asks for the key.
-      if (silent) return null;
-      throw new Error(`${name} did not share this account's public key, which is needed to build transactions — update the ${name} app or extension and connect again`);
-    }
-    try {
-      pubkeyHex = normalizePubkey(await p.getPublicKey());
-    } catch (e) {
-      throw walletError(e, "connect");
-    }
+  if (typeof p.getPublicKey !== "function") {
+    // A page-load restore never errors for what only a prompt can give:
+    // it stays disconnected and Connect asks for the key.
+    if (silent) return null;
+    throw new Error(`${name} did not share this account's public key, which is needed to build transactions — update the ${name} app or extension and connect again`);
+  }
+  let pubkeyHex = null;
+  try {
+    pubkeyHex = normalizePubkey(await p.getPublicKey());
+  } catch (e) {
+    throw walletError(e, "connect");
   }
   if (!pubkeyHex) throw new Error(`${name} returned an unexpected public key format`);
 
@@ -359,7 +327,8 @@ export async function connect(id, { silent = false } = {}) {
 /**
  * Page-load reconnect: only when 'lp.wallet' names a provider that is
  * injected right now AND it already reports an authorized account. Never
- * opens the wallet. → session | null
+ * opens the wallet. A stored id of a provider this site does not offer is
+ * removed, and the page starts disconnected. → session | null
  */
 export async function restoreSession() {
   const stored = readStored();
@@ -369,6 +338,9 @@ export async function restoreSession() {
       return null;
     }
     enableMockWallet();
+  } else if (stored && !providerMeta(stored)) {
+    writeStored(null);
+    return null;
   } else if (!shouldRestore(stored, presentIds())) {
     return null;
   }
@@ -388,156 +360,113 @@ export async function getBalance() {
   return normalizeBalance(await need().getBalance());
 }
 
+// GET /txouts rows of wallet outputs that passed every check, for the
+// indexer height `_checkedTip` (see getBitcoinUtxos). Bounded by the most
+// outputs one wallet list can hold.
+const _checked = new Map();
+let _checkedTip = null;
+const _CHECKED_MAX = WALLET_UTXO_PAGE * WALLET_UTXO_MAX_PAGES;
+const _outpointKey = (o) => `${String(o.txid).toLowerCase()}:${o.vout}`;
+
 /**
- * Spendable BTC UTXOs as `{ source, assetSafe, utxos: [{ txid, vout, sats }], excludedOutpoints }`.
+ * Spendable BTC of the connected wallet for `address`:
  *
- * `assetSafe:true` when the provider offers its own asset-aware list
- * (UniSat `getBitcoinUtxos()` excludes inscription / rune carriers). That
- * list is then INTERSECTED with the indexer's `/btc-utxos/:addr` rows and
- * only outputs the indexer lists as confirmed (at the same value) survive
- * (walletShapes.intersectConfirmed): a just-broadcast SEND's change output
- * — unconfirmed, and unknown to /utxos until the tx confirms — can never be
- * picked as a fee input. The indexer being unreachable fails the build
- * rather than trusting the wallet's list alone.
+ *   { source, assetSafe: true, utxos: [{ txid, vout, sats }], waitingSats,
+ *     excludedOutpoints, waitingOutpoints, mismatchedOutpoints,
+ *     carrierOutpoints, assetOutpoints, pendingSpentOutpoints }
  *
- * OKX has no such method (the mock omits it on purpose), so the rows come
- * from the indexer's `/btc-utxos/:addr` CONFIRMED set. On that path:
- *   * if the provider has `getInscriptions`, every inscription outpoint is
- *     paged out and dropped → `assetSafe:"inscriptions-only"` (runes are
- *     still not covered — no provider exposes a runes UTXO list and the
- *     indexer is bitcoind-only); a failing pager degrades to `false`
- *   * otherwise `assetSafe:false`
- * Either way the builders apply the §4 filter (≤ 546 sats + token
- * outpoints) and, for any `assetSafe !== true` list, the fee-input floor
- * and largest-first selection (psbt.minFeeInputSats / selectionOrderFor);
- * the UI shows the notice and lists the inputs at signing time.
+ * The list is the wallet's own: UniSat's `getBitcoinUtxos`, which leaves
+ * inscription and rune outputs out, read in full (collectWalletUtxos). Every
+ * listed output is then checked with the indexer's GET /txouts — the node's
+ * confirmed UTXO set, TXOUTS_MAX outpoints a request — and only outputs
+ * verifyWalletUtxos allows are kept: unspent with at least one confirmation
+ * (a coinbase output: 100), no LUCKY-20 tokens on it, paying this
+ * address's script with exactly the value the wallet listed. An output the
+ * node does not have as confirmed is waiting (`waitingSats`), so a flow
+ * that finds nothing to spend says "wait for a confirmation" instead of
+ * "no BTC". Nothing is scanned: a wallet is ready in seconds.
  *
- * On EVERY path, the inputs of transactions this browser broadcast that
- * have not confirmed yet are dropped (src/lib/txrecords.js): the
- * indexer's confirmed set only changes per block, so
- * without this a second build would re-spend them and — full-RBF — replace
- * the first transaction (a listing withdrawal undone by the next MINE).
+ * /txouts reads the confirmed set, whose answer only changes when a block
+ * is applied, so a row that passed every check is remembered for the
+ * indexer height it was read at (`indexedTipNow()`, kept by the app): the
+ * next build at that height asks only for outpoints it has not checked yet,
+ * and a new (or unknown) height forgets them all. Waiting, mismatched,
+ * carrier and missing outputs are never remembered, and the rules above run
+ * again on every build against the wallet's current list.
  *
- * The first query of an address makes the indexer scan the UTXO set for
- * it (a few minutes) — and so does the next query after an indexer
- * restart (every address) or a chain reorganization that touched this
- * address's outputs. `onWait({ waitMs, busy, elapsedMs, queuePosition, etaSecs,
- * reason, rescan })` fires before each retry so the flow can say so
- * (src/lib/retry.js seedWaitNote); `rescan` is true when this browser has
- * read the address's UTXOs before, so the wait is not a first use.
- * `signal` stops the wait (the flow's Stop waiting): the AbortError is
- * thrown as is.
+ * Fails closed: a wallet without the list, a list that cannot be read, or
+ * a /txouts read that fails throws one plain sentence and nothing is
+ * built — never a fallback to outputs nobody checked.
+ *
+ * On top of that, the inputs of this address's own broadcasts that are not
+ * final yet (src/lib/txrecords.js) and those of a signature in progress on
+ * this page are dropped (excludePendingSpends): the confirmed UTXO set
+ * only changes per block, so without this a second build would re-spend
+ * them and — full-RBF — replace the first transaction (a listing
+ * withdrawal undone by the next MINE).
+ *
+ * `signal` stops the reads: the AbortError is thrown as is.
  */
-export async function getBitcoinUtxos(address, { onWait, signal } = {}) {
+export async function getBitcoinUtxos(address, { signal } = {}) {
   const p = need();
+  const id = current.id;
   const name = providerName();
-  let res;
-  if (typeof p.getBitcoinUtxos === "function") {
-    let raw;
-    try {
-      raw = await p.getBitcoinUtxos();
-    } catch (e) {
-      throw new Error(`${name} getBitcoinUtxos failed: ${e?.message || e}`);
-    }
-    const rows = await indexerBtcRows(address, {
-      onWait,
-      signal,
-      failure: (e) =>
-        `Could not confirm your UTXOs with the indexer (${_msg(e)}) — a fee input must be an output the indexer lists as confirmed, so nothing is built until it answers; ` +
-        `${SCAN_NOTE} — try again shortly`,
-    });
-    const listed = normalizeUtxoList(raw);
-    const { utxos, unconfirmedOutpoints, unlistedOutpoints, mismatchedOutpoints } = intersectConfirmed(listed, rows);
-    res = {
-      source: current.id,
-      assetSafe: true,
-      utxos,
-      excludedOutpoints: [...unconfirmedOutpoints, ...unlistedOutpoints, ...mismatchedOutpoints],
-      unconfirmedOutpoints,
-      unlistedOutpoints,
-      mismatchedOutpoints,
-      // Plain BTC held back only because it has not confirmed (or the
-      // indexer has not listed it) yet — a flow that finds nothing to spend
-      // says "wait for a confirmation" instead of "no spendable BTC".
-      waitingSats: waitingSatsOf(listed, [...unconfirmedOutpoints, ...unlistedOutpoints], DUST_SATS),
-    };
-  } else {
-    const rows = await indexerBtcRows(address, {
-      onWait,
-      signal,
-      failure: (e) => `Could not read your UTXOs from the indexer (${_msg(e)}) — ${SCAN_NOTE}; try again shortly`,
-    });
-    let utxos = rows.filter((u) => u.confirmed).map(({ txid, vout, sats }) => ({ txid, vout, sats }));
-    let assetSafe = false;
-    let excludedOutpoints = [];
-    if (typeof p.getInscriptions === "function") {
-      try {
-        const inscribed = await collectInscriptionOutpoints((cursor, size) => p.getInscriptions(cursor, size));
-        excludedOutpoints = utxos.filter((u) => inscribed.has(`${u.txid}:${u.vout}`)).map(({ txid, vout }) => ({ txid, vout }));
-        utxos = utxos.filter((u) => !inscribed.has(`${u.txid}:${u.vout}`));
-        assetSafe = "inscriptions-only";
-      } catch {
-        assetSafe = false; // the pager failed: treat the whole list as unsafe
-      }
-    }
-    // Unconfirmed rows above the fee-input floor become usable once they confirm.
-    const waitingSats = rows.filter((u) => !u.confirmed && Number(u.sats) > MIN_FEE_INPUT_SATS_UNSAFE).reduce((s, u) => s + Number(u.sats), 0);
-    res = { source: "indexer", assetSafe, utxos, excludedOutpoints, waitingSats };
+  if (typeof p.getBitcoinUtxos !== "function") {
+    throw new Error(`${name} did not offer its list of BTC outputs, which every transaction here is built from — update ${name} and try again.`);
   }
+  const scriptHex = hex.encode(decodeAddress(address).script);
+  let listed;
+  try {
+    listed = await collectWalletUtxos((cursor, size) => p.getBitcoinUtxos(cursor, size));
+  } catch (e) {
+    throw new Error(`${name} could not list this wallet's BTC outputs (${_msg(e)}) — try again.`);
+  }
+  if (signal && signal.aborted) throw abortError();
+  const tip = indexedTipNow();
+  if (tip === null || tip !== _checkedTip) {
+    _checked.clear();
+    _checkedTip = tip;
+  }
+  const ask = listed.filter((u) => !_checked.has(_outpointKey(u)));
+  let rows = [];
+  if (ask.length) {
+    try {
+      rows = await indexer.txouts(
+        ask.map(({ txid, vout }) => ({ txid, vout })),
+        signal,
+      );
+    } catch (e) {
+      if (isAbortError(e) || (signal && signal.aborted)) throw isAbortError(e) ? e : abortError();
+      throw new Error(txoutsFailureText(e));
+    }
+  }
+  const remembered = listed.map((u) => _checked.get(_outpointKey(u))).filter(Boolean);
+  const v = verifyWalletUtxos(listed, [...rows, ...remembered], { scriptHex });
+  // Remember what passed, only while the height it was read at still holds.
+  if (tip !== null && indexedTipNow() === tip && _checkedTip === tip) {
+    if (_checked.size + v.utxos.length > _CHECKED_MAX) _checked.clear();
+    const ok = new Set(v.utxos.map(_outpointKey));
+    for (const r of rows) if (ok.has(_outpointKey(r))) _checked.set(_outpointKey(r), r);
+  }
+  const res = {
+    source: id,
+    assetSafe: true,
+    utxos: v.utxos,
+    excludedOutpoints: [...v.waitingOutpoints, ...v.mismatchedOutpoints, ...v.carrierOutpoints, ...v.assetOutpoints],
+    waitingOutpoints: v.waitingOutpoints,
+    mismatchedOutpoints: v.mismatchedOutpoints,
+    carrierOutpoints: v.carrierOutpoints,
+    assetOutpoints: v.assetOutpoints,
+    // Plain BTC held back only because the node has not confirmed it yet.
+    waitingSats: v.waitingSats,
+  };
   return excludePendingSpends(address, res);
 }
 
-/**
- * The indexer's `/btc-utxos/:addr` rows, waiting out its scan of the
- * address (retryWhileSeeding, `onWait` / `signal` as getBitcoinUtxos). A
- * stopped wait throws its AbortError as is; a wait that ended without the
- * rows throws one plain sentence — this network's new-scan limit, a queue
- * that stayed full, a scan still running (seedFailureText) — and any other
- * failure `failure(e)`'s sentence (by default the indexer's own message).
- */
-export async function indexerBtcRows(address, { onWait, signal, failure } = {}) {
-  const rescan = scannedBefore(address);
-  const onRetry = onWait ? (_n, info) => onWait({ ...info, rescan }) : undefined;
-  let rows;
-  try {
-    rows = await retryWhileSeeding(() => indexer.btcUtxos(address, signal), { onRetry, signal });
-  } catch (e) {
-    if (isAbortError(e) || (signal && signal.aborted)) throw e;
-    const seed = seedFailureText(e);
-    if (seed) throw new Error(seed);
-    throw failure ? new Error(failure(e)) : e;
-  }
-  markScanned(address);
-  return rows;
-}
-
-// The indexer scans an address's UTXOs on its first use and again after a
-// restart or a chain reorganization that touched the address; this browser
-// remembers which addresses it has read before, so a later wait is not
-// called a "first use".
-const SCAN_NOTE = "the indexer scans an address's UTXOs on its first use and again after a chain reorganization, which can take a few minutes";
-const SCANNED_KEY_PREFIX = "lp.scanned.";
-
-function scannedBefore(address) {
-  try {
-    return typeof localStorage !== "undefined" && localStorage.getItem(`${SCANNED_KEY_PREFIX}${String(address).toLowerCase()}`) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function markScanned(address) {
-  try {
-    if (typeof localStorage !== "undefined") localStorage.setItem(`${SCANNED_KEY_PREFIX}${String(address).toLowerCase()}`, "1");
-  } catch {
-    /* no storage — a later wait is simply called a first use */
-  }
-}
-
-/** Sum of the `sats` of the rows in `list` whose outpoint is in `outpoints` and worth more than `floor`. */
-function waitingSatsOf(list, outpoints, floor) {
-  const keys = new Set((outpoints || []).map((o) => `${o.txid}:${o.vout}`));
-  return (list || []).filter((u) => keys.has(`${u.txid}:${u.vout}`) && Number(u.sats) > floor).reduce((s, u) => s + Number(u.sats), 0);
+/** The sentence when the indexer could not check the wallet's outputs (GET /txouts failed): retryable, nothing built. */
+export function txoutsFailureText(e) {
+  const why = String(e?.message || e || "").trim();
+  return `Could not check this wallet's BTC with the indexer right now${why ? ` (${why})` : ""}. Nothing was signed — try again in a moment.`;
 }
 
 /**

@@ -92,8 +92,8 @@ const keep = (l) => {
   const w = keep(walletLine({ status: "connected", address: ADDR, providerName: "UniSat", assetSafe: true }, T0));
   assert.equal(w.kind, "sys");
   assert.equal(w.text, "wallet connected  bc1p…62s (UniSat)");
-  const wf = keep(walletLine({ status: "connected", address: ADDR, providerName: "OKX Wallet", assetSafe: false }, T0));
-  assert.equal(wf.text, "wallet connected  bc1p…62s (OKX Wallet) · no asset-aware UTXO list: 10,000-sat floor applies");
+  const wf = keep(walletLine({ status: "connected", address: ADDR, providerName: "UniSat", assetSafe: false }, T0));
+  assert.equal(wf.text, "wallet connected  bc1p…62s (UniSat) · UniSat offers no list of its BTC outputs: update UniSat");
   assert.equal(walletLine({ status: "connected", address: ADDR }, T0).key, walletLine({ status: "connected", address: ADDR }, T0 + 400).key, "same second → same key");
   const wd = keep(walletLine({ status: "disconnected" }, T0));
   assert.equal(wd.text, "wallet disconnected");
