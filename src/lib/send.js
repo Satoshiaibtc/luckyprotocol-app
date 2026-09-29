@@ -1,4 +1,4 @@
-// The Send page's pure logic — unit-tested in test/send.test.js.
+// The transfer form's pure logic (src/pages/SendPage.jsx) — unit-tested in test/send.test.js.
 //
 // A SEND moves `AMT` of ONE ticker from the tx's input pool (the carriers
 // it spends) to vout0; the residual of that ticker AND every other ticker
@@ -95,10 +95,10 @@ export function sendCarrierRows({ tokenUtxos, btcUtxos, orders, expired = [], pe
 export function carrierNote(row, ticker) {
   if (row.blocked === "pending") return "already spent by one of your transactions that has not confirmed yet";
   if (row.blocked === "filling") return "a fill of its listing is in the mempool — it cannot be spent until that confirms or drops";
-  if (row.blocked === "listed") return `listed for sale — sending it withdraws that listing (its signed listing can no longer be filled)`;
+  if (row.blocked === "listed") return `listed for sale — transferring it withdraws that listing (its signed listing can no longer be filled)`;
   if (!Number.isInteger(row.sats)) return "its BTC value is not known: the indexer does not list this output right now, and a SEND signs its exact value — try again after the next block";
   if (row.offBook) {
-    return `an earlier listing of it can still be bought at ${fmtUnit(row.offBook.unit_price)} sats per token — sending it cancels that listing`;
+    return `an earlier listing of it can still be bought at ${fmtUnit(row.offBook.unit_price)} sats per token — transferring it cancels that listing`;
   }
   if (row.others.length) return `also carries ${row.others.map(([t, a]) => `${Number(a).toLocaleString("en-US")} ${t}`).join(", ")} — those go to your residual carrier (vout3), not to the recipient`;
   if (Number.isInteger(row.sats) && row.sats > DUST_SATS) return `also holds ${row.sats.toLocaleString("en-US")} sats of BTC — they come back to you as change`;
@@ -170,7 +170,7 @@ export function sendAmountError(text, max, ticker) {
   const t = String(text ?? "").trim();
   if (t === "") return null;
   const cap = Number(max) || 0;
-  if (cap < 1) return `No ${ticker} available to send right now.`;
+  if (cap < 1) return `No ${ticker} available to transfer right now.`;
   const range = `Enter a whole number of ${ticker} from 1 to ${cap.toLocaleString("en-US")}`;
   const n = parseSendAmount(t);
   if (n === null) {
@@ -206,12 +206,12 @@ export function recipientState(text, self) {
  */
 export function sendFormHint({ connected, indexerOk, lagText, rcptState, amount, amountErr, keysCount, pickedTotal, mode, freeTotal, ticker, feeHint, unknownValue = false, ordersIncomplete = false }) {
   if (!connected) return null;
-  if (!indexerOk) return "The indexer is not answering right now — sending is paused until it does.";
+  if (!indexerOk) return "The indexer is not answering right now — transfers are paused until it does.";
   if (lagText) return lagText;
   if (rcptState === "empty") return "Enter the recipient's address.";
   if (rcptState === "invalid") return null;
   if (amountErr) return null;
-  if (!amount) return `Enter how many ${ticker} to send.`;
+  if (!amount) return `Enter how many ${ticker} to transfer.`;
   if (mode === "auto" && ordersIncomplete) return ORDERS_INCOMPLETE_TEXT;
   if (!keysCount || pickedTotal < amount) {
     return mode === "auto"
@@ -227,7 +227,7 @@ export function sendFormHint({ connected, indexerOk, lagText, rcptState, amount,
  * is listed may not be marked, so none is chosen automatically.
  */
 export const ORDERS_INCOMPLETE_TEXT =
-  "Not all of your listings could be read, so carriers are not chosen automatically — tick the ones to send (a listed carrier's listing is withdrawn when it is spent).";
+  "Not all of your listings could be read, so carriers are not chosen automatically — tick the ones to transfer (a listed carrier's listing is withdrawn when it is spent).";
 
 /**
  * Which carriers the page spends: the automatic pick — only while every

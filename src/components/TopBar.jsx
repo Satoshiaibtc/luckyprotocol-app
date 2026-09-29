@@ -142,7 +142,7 @@ export default function TopBar() {
         {!mobile && (
           <nav className="nav" aria-label="Primary">
             {NAV.map((n) => {
-              // the Send page is part of the portfolio
+              // the transfer page (#/send, #/transfer) is part of the portfolio
               const on = route.name === n.name || (n.name === "me" && route.name === "send");
               return (
                 <a key={n.name} href={n.href} className={`nav-link${on ? " active" : ""}`} aria-current={on ? "page" : undefined}>

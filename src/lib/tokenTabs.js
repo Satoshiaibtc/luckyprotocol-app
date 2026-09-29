@@ -3,21 +3,33 @@
 // token is minted out AND the block that completed the supply has
 // FINAL_DEPTH confirmations. Until then `?tab=market` resolves to the mine
 // console with a one-line notice. A token with an open market opens on
-// Market by default — its mines credit 0.
+// Market by default — its mines credit 0. The Transfer tab (the transfer
+// form of src/pages/SendPage.jsx) is always there, last, and never the
+// default.
 import { isMarketOpen, isMintedOut } from "./marketBoard.js";
 import { FINAL_DEPTH, marketOpensAt, marketPendingText } from "./finality.js";
 import { fmtInt, fmtMintedPct } from "./format.js";
 
-export const ALL_TABS = ["mine", "market"];
-export const TAB_LABEL = { mine: "Mine", market: "Market" };
+export const ALL_TABS = ["mine", "market", "transfer"];
+export const TAB_LABEL = { mine: "Mine", market: "Market", transfer: "Transfer" };
 
 /** The tabs a token page shows, default first. */
 export function tabsFor(token) {
-  return isMarketOpen(token) ? ["market", "mine"] : ["mine"];
+  return isMarketOpen(token) ? ["market", "mine", "transfer"] : ["mine", "transfer"];
 }
 
 export function defaultTab(token) {
   return isMarketOpen(token) ? "market" : "mine";
+}
+
+/**
+ * The token page's pinned view after the user picks tab `id`. A pick of the
+ * token's default tab is pinned (the page then shows it without `?tab=`);
+ * any other pick lives in `?tab=` only, so Back to the plain URL returns to
+ * the pinned tab. `pinned` is { tab, marketOpen } or null.
+ */
+export function pinAfterPick(pinned, id, token) {
+  return id === defaultTab(token) ? { tab: id, marketOpen: pinned?.marketOpen ?? isMarketOpen(token) } : pinned;
 }
 
 /**
@@ -60,9 +72,10 @@ export function mintedProgressNote(token) {
 
 /**
  * Resolve the requested `?tab=` against the token's state:
- *   { tab: "mine" | "market", notice: string | null }
+ *   { tab: "mine" | "market" | "transfer", notice: string | null }
  * An unknown or absent tab is the default; `market` on a token whose market
- * is not open is the mine console plus the "Market opens…" notice.
+ * is not open is the mine console plus the "Market opens…" notice;
+ * `transfer` always opens the transfer form.
  */
 export function resolveTab(requested, ticker, token) {
   const tabs = tabsFor(token);

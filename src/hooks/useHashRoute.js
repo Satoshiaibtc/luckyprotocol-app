@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 
 // Lightweight hash router. Routes:
 //   #/              board
-//   #/t/<TICKER>    token page   (?tab=mine|market)
+//   #/t/<TICKER>    token page   (?tab=mine|market|transfer; with transfer, ?utxo=…&to=self too)
 //   #/market        open markets (minted-out tokens) + next to open
 //   #/create        deploy form
 //   #/me            portfolio
-//   #/send/<TICKER> send / split a token   (?utxo=<txid:vout>&to=self)
+//   #/send/<TICKER> transfer / split a token   (?utxo=<txid:vout>&to=self)
+//   #/transfer/<TICKER>  the same page
 //   #/activity      network ledger
 //   #/probability   probability board (block-hash last digits, descriptive)
 // Anything else → "notfound" (the shell renders the board with a notice).
@@ -33,7 +34,7 @@ export function parseHash(hash) {
     const ticker = segs[1].toUpperCase();
     return TICKER_RE.test(ticker) ? { ...base, name: "token", ticker } : { ...base, name: "notfound" };
   }
-  if (segs[0] === "send" && segs.length === 2) {
+  if ((segs[0] === "send" || segs[0] === "transfer") && segs.length === 2) {
     const ticker = segs[1].toUpperCase();
     return TICKER_RE.test(ticker) ? { ...base, name: "send", ticker } : { ...base, name: "notfound" };
   }
@@ -49,7 +50,7 @@ export function tokenHref(ticker, tab) {
   return `#/t/${encodeURIComponent(String(ticker).toUpperCase())}${tab ? `?tab=${tab}` : ""}`;
 }
 
-/** The Send page of a ticker; `utxo` ("txid:vout") + `toSelf` pre-fill a split of that carrier. */
+/** The transfer page of a ticker; `utxo` ("txid:vout") + `toSelf` pre-fill a split of that carrier. */
 export function sendHref(ticker, { utxo = null, toSelf = false } = {}) {
   const q = new URLSearchParams();
   if (utxo) q.set("utxo", utxo);

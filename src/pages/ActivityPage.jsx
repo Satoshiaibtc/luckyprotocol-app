@@ -70,7 +70,7 @@ export default function ActivityPage() {
                 "connecting…"
               )}
             </span>
-            <span className="muted">every DEPLOY, MINE, SEND and fill the indexer has applied · a fill is a SEND and a trade</span>
+            <span className="muted">every DEPLOY, MINE, TRANSFER and fill the indexer has applied · a fill is a transfer and a trade</span>
           </div>
         </div>
       </header>
@@ -82,7 +82,7 @@ export default function ActivityPage() {
           <span className="sub">{totals.days !== null ? `${fmtInt(totals.days)} active day${totals.days === 1 ? "" : "s"}` : ""}</span>
         </div>
         <div>
-          <dt>Sends · 30d</dt>
+          <dt>Transfers · 30d</dt>
           <dd>{totals.sends !== null ? fmtCompact(totals.sends) : "—"}</dd>
         </div>
         <div>
@@ -148,7 +148,7 @@ export default function ActivityPage() {
             Showing rows where <span className="mono">{shortAddr(addrFilter, 8, 6)}</span> is a party.
           </div>
         )}
-        <ActivityTable q={ledger} self={address} usd={usd} compact={mobile} empty={addrFilter ? "No activity for this address." : kind === "all" ? "Nothing indexed yet." : `No ${kind} rows yet.`} />
+        <ActivityTable q={ledger} self={address} usd={usd} compact={mobile} empty={addrFilter ? "No activity for this address." : kind === "all" ? "Nothing indexed yet." : `No ${(KINDS.find((k) => k.id === kind)?.label ?? kind).toLowerCase()} rows yet.`} />
       </Panel>
     </main>
   );

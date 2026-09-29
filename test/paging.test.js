@@ -237,7 +237,7 @@ async function withFetch(fetch, fn) {
   const off = sendCarrierRows({ tokenUtxos, btcUtxos: btc, orders: [], expired: [floor], pendingSpent: new Set(), ticker: "LUCKY" });
   const o = off.find((r) => r.txid === txidOf("f2", 1));
   assert.equal(o.offBook, floor);
-  assert.match(carrierNote(o, "LUCKY"), /can still be bought at 50.00 sats per token — sending it cancels that listing/);
+  assert.match(carrierNote(o, "LUCKY"), /can still be bought at 50.00 sats per token — transferring it cancels that listing/);
   const review = sendReviewModel({ rows: off, keys: [o.key], ticker: "LUCKY", amount: 100, toAddress: ADDR, self: ADDR, payloadText: "" });
   assert.equal(review.offBook.length, 1);
   console.log("send page: every listing page read; an old open listing marks its carrier; incomplete reads and unknown values are never picked automatically");

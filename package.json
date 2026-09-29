@@ -21,7 +21,7 @@
     "test:swap": "node test/swap.test.js",
     "test:wallet": "node test/wallet.test.js && node test/walletflows.test.js && node test/paging.test.js",
     "test:pending": "node test/pending.test.js && node test/minepending.test.js && node test/minespeedup.test.js && node test/send.test.js",
-    "test:market": "node test/market.test.js && node test/secondsource.test.js && node test/activity.test.js && node test/views.test.js && node test/marketpage.test.js && node test/listingrules.test.js && node test/listingcap.test.js && node test/marketsettle.test.js && node test/sellbuy.test.js",
+    "test:market": "node test/market.test.js && node test/secondsource.test.js && node test/activity.test.js && node test/views.test.js && node test/marketpage.test.js && node test/transfer.test.js && node test/listingrules.test.js && node test/listingcap.test.js && node test/marketsettle.test.js && node test/sellbuy.test.js",
     "check": "npm run lint && npm run build"
   },
   "dependencies": {

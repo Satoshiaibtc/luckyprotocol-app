@@ -5,6 +5,7 @@ import { usePoll } from "../hooks/usePoll.js";
 import { useSendToSelf } from "../hooks/useSendToSelf.js";
 import { tokenHref } from "../hooks/useHashRoute.js";
 import Identicon from "../components/Identicon.jsx";
+import TransferEmpty from "../components/TransferEmpty.jsx";
 import FeeSelector from "../components/FeeSelector.jsx";
 import TxProgress, { ConnectPrompt } from "../components/TxProgress.jsx";
 import Panel from "../components/hud/Panel.jsx";
@@ -24,7 +25,7 @@ const SEND_TO_OUT = 0;
 const SEND_CHANGE_OUT = 3;
 
 /**
- * Send any LUCKY-20 token: to another address, or to
+ * Transfer any LUCKY-20 token: to another address, or to
  * yourself — which is how a carrier is split, including a carrier that
  * holds several tickers. One SEND in the
  * §2.3 reference layout: vout0 546 sats → recipient with the amount,
@@ -32,12 +33,17 @@ const SEND_CHANGE_OUT = 3;
  * this ticker and every other ticker on the carriers spent), vout4 BTC
  * change. Form → confirm screen → sign → pending → confirmed.
  *
- * Route: #/send/<TICKER>[?utxo=<txid:vout>&to=self] — the portfolio's
- * "Split" link pre-selects one carrier and your own address.
+ * Route: #/send/<TICKER> or #/transfer/<TICKER>[?utxo=<txid:vout>&to=self]
+ * — the portfolio's "Split" link pre-selects one carrier and your own
+ * address. `embedded`: the token page's Transfer tab (#/t/<TICKER>?tab=transfer,
+ * the same query), without the page shell and header; `onSettled` is
+ * called when a transfer settles.
  */
-export default function SendPage({ ticker, params = {} }) {
+export default function SendPage({ ticker, params = {}, embedded = false, onSettled = null }) {
   const { wallet: w, address, fee, indexerOk, sync } = useApp();
   const connected = w.status === "connected";
+  const Shell = embedded ? "div" : "main";
+  const shellClass = embedded ? "send-page send-embedded" : "page send-page";
 
   const tokenUtxos = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
   const btcUtxos = usePoll(address ? (s) => indexer.btcUtxos(address, s) : null, POLL_MS, [address]);
@@ -55,12 +61,13 @@ export default function SendPage({ ticker, params = {} }) {
       tokenUtxos.refresh();
       btcUtxos.refresh();
       orders.refresh();
+      onSettled?.();
     },
   });
 
-  // This browser's own unconfirmed sends are re-checked on the page's poll:
+  // This browser's own unconfirmed transfers are re-checked on the page's poll:
   // a confirmed or dropped one leaves the store, so the
-  // "unconfirmed sends" list clears and its carriers are free again.
+  // "unconfirmed transfers" list clears and its carriers are free again.
   const [recTick, setRecTick] = useState(0);
   useEffect(() => {
     if (!address) return undefined;
@@ -128,7 +135,7 @@ export default function SendPage({ ticker, params = {} }) {
   const picked = rows.filter((r) => keys.includes(r.key));
   // A SEND signs each input's exact BTC value: a carrier without one cannot be sent yet.
   const unknownPicked = picked.some((r) => !Number.isInteger(r.sats));
-  const lagText = indexerOk ? syncPauseText(sync, "sending") : null;
+  const lagText = indexerOk ? syncPauseText(sync, "transferring") : null;
 
   const est = useMemo(() => {
     if (!address || !amount) return null;
@@ -159,7 +166,7 @@ export default function SendPage({ ticker, params = {} }) {
     mode,
     freeTotal,
     ticker,
-    feeHint: !fee.satVb ? missingFeeHint(fee.choice, fee.satVb, "send", { awaitingAck: !!fee.highFee?.pending }) : null,
+    feeHint: !fee.satVb ? missingFeeHint(fee.choice, fee.satVb, "transfer", { awaitingAck: !!fee.highFee?.pending }) : null,
     unknownValue: unknownPicked,
     ordersIncomplete,
   });
@@ -194,14 +201,22 @@ export default function SendPage({ ticker, params = {} }) {
 
   if (!connected) {
     return (
-      <main className="page send-page">
+      <Shell className={shellClass}>
         <div className="empty-state">
-          <Identicon ticker={ticker} size={48} />
-          <h2>Send {ticker}</h2>
-          <p className="muted">Send tokens to any Bitcoin address, or to yourself to split a carrier.</p>
-          <ConnectPrompt action={`send ${ticker}`} />
+          {!embedded && <Identicon ticker={ticker} size={48} />}
+          {!embedded && <h2>Transfer {ticker}</h2>}
+          <p className="muted">Transfer tokens to any Bitcoin address, or to yourself to split a carrier.</p>
+          <ConnectPrompt action={`transfer ${ticker}`} />
         </div>
-      </main>
+      </Shell>
+    );
+  }
+
+  if (tokenUtxos.data && rows.length === 0 && pendingSends.length === 0 && chain.phase === "idle") {
+    return (
+      <Shell className={shellClass}>
+        <TransferEmpty ticker={ticker} embedded={embedded} />
+      </Shell>
     );
   }
 
@@ -215,25 +230,32 @@ export default function SendPage({ ticker, params = {} }) {
   const btcOut = carrierOut + SEND_PROTOCOL_FEE_SATS + (est?.feeSats ?? 0);
 
   return (
-    <main className="page send-page">
-      <header className="token-head">
-        <div className="token-head-main">
-          <Identicon ticker={ticker} size={40} />
-          <div>
-            <h1 className="ticker">Send {ticker}</h1>
-            <div className="meta">
-              <span className="mono">
-                {tokenUtxos.data ? `${fmtInt(total)} ${ticker} on ${fmtInt(rows.length)} carrier${rows.length === 1 ? "" : "s"}` : "Loading your carriers…"}
-              </span>
-              <a href="#/me">← Portfolio</a>
-              <a href={tokenHref(ticker)}>{ticker} page</a>
+    <Shell className={shellClass}>
+      {!embedded && (
+        <header className="token-head">
+          <div className="token-head-main">
+            <Identicon ticker={ticker} size={40} />
+            <div>
+              <h1 className="ticker">Transfer {ticker}</h1>
+              <div className="meta">
+                <span className="mono">
+                  {tokenUtxos.data ? `${fmtInt(total)} ${ticker} on ${fmtInt(rows.length)} carrier${rows.length === 1 ? "" : "s"}` : "Loading your carriers…"}
+                </span>
+                <a href="#/me">← Portfolio</a>
+                <a href={tokenHref(ticker)}>{ticker} page</a>
+              </div>
             </div>
           </div>
-        </div>
-      </header>
+        </header>
+      )}
 
       <div className="send-grid">
-        <Panel title="Recipient and amount" led={rcpt.state === "invalid" || amountErr ? "err" : formOk ? "ok" : "idle"} aria-label="Recipient and amount">
+        <Panel
+          title="Recipient and amount"
+          led={rcpt.state === "invalid" || amountErr ? "err" : formOk ? "ok" : "idle"}
+          right={embedded ? <span className="label">{tokenUtxos.data ? `${fmtInt(total)} ${ticker} on ${fmtInt(rows.length)} carrier${rows.length === 1 ? "" : "s"}` : tokenUtxos.error ? "—" : "Loading…"}</span> : undefined}
+          aria-label="Recipient and amount"
+        >
           <div className="send-form">
             <label className="send-field">
               <span className="label">Recipient address</span>
@@ -263,7 +285,7 @@ export default function SendPage({ ticker, params = {} }) {
               {rcpt.state === "invalid" && <div className="err">{rcpt.error.replace(/^./, (c) => c.toUpperCase())}.</div>}
               {toSelf && (
                 <div className="notice">
-                  This is your own address. Sending to yourself moves the {ticker} onto a new 546-sat carrier (vout0) — that is how a carrier is split; the tokens stay yours. It still costs the protocol
+                  This is your own address. Transferring to yourself moves the {ticker} onto a new 546-sat carrier (vout0) — that is how a carrier is split; the tokens stay yours. It still costs the protocol
                   fee and the network fee.
                 </div>
               )}
@@ -329,7 +351,7 @@ export default function SendPage({ ticker, params = {} }) {
                           </span>
                           <span className="utxo-tag">
                             {r.others.length > 0 && !r.blocked ? (
-                              <button className="btn btn-sm" type="button" onClick={(e) => { e.preventDefault(); splitOff(r); }} disabled={busy} title={`Send its ${fmtInt(r.amount)} ${ticker} to yourself: they land alone on a new carrier, the other tickers on your residual carrier`}>
+                              <button className="btn btn-sm" type="button" onClick={(e) => { e.preventDefault(); splitOff(r); }} disabled={busy} title={`Transfer its ${fmtInt(r.amount)} ${ticker} to yourself: they land alone on a new carrier, the other tickers on your residual carrier`}>
                                 Split off
                               </button>
                             ) : r.blocked === "listed" ? (
@@ -353,7 +375,7 @@ export default function SendPage({ ticker, params = {} }) {
                 </ul>
               )}
               {mode === "auto" && rows.some((r) => r.blocked === "listed") && (
-                <p className="fineprint">Listed carriers are never picked automatically — tick one to send it anyway (that withdraws its listing).</p>
+                <p className="fineprint">Listed carriers are never picked automatically — tick one to transfer it anyway (that withdraws its listing).</p>
               )}
               {ordersIncomplete && <p className="notice">{ORDERS_INCOMPLETE_TEXT}</p>}
             </div>
@@ -394,7 +416,7 @@ export default function SendPage({ ticker, params = {} }) {
           <Panel title="Review and sign" led={chain.phase === "error" ? "err" : chain.phase === "confirmed" ? "ok" : inFlight ? "busy" : "idle"} aria-label="Review and sign">
             <div className="send-review">
               <p className="send-summary">
-                Send <strong>{fmtInt(review.amount)} {ticker}</strong> to{" "}
+                Transfer <strong>{fmtInt(review.amount)} {ticker}</strong> to{" "}
                 {reviewSelf ? (
                   <strong>yourself</strong>
                 ) : (
@@ -432,16 +454,16 @@ export default function SendPage({ ticker, params = {} }) {
               )}
               {review.listed.length > 0 && (
                 <div className="notice">
-                  {review.listed.length === 1 ? "One carrier is" : `${review.listed.length} carriers are`} listed for sale. Sending spends {review.listed.length === 1 ? "it" : "them"} on-chain, which withdraws the listing{review.listed.length === 1 ? "" : "s"} — the signed listing can no longer be filled.
+                  {review.listed.length === 1 ? "One carrier is" : `${review.listed.length} carriers are`} listed for sale. Transferring spends {review.listed.length === 1 ? "it" : "them"} on-chain, which withdraws the listing{review.listed.length === 1 ? "" : "s"} — the signed listing can no longer be filled.
                 </div>
               )}
               {review.offBook?.length > 0 && (
                 <div className="notice">
-                  {review.offBook.length === 1 ? "An earlier listing of a carrier you spend" : "Earlier listings of carriers you spend"} can still be bought, although {review.offBook.length === 1 ? "it has" : "they have"} left the book. Sending cancels {review.offBook.length === 1 ? "it" : "them"} for good.
+                  {review.offBook.length === 1 ? "An earlier listing of a carrier you spend" : "Earlier listings of carriers you spend"} can still be bought, although {review.offBook.length === 1 ? "it has" : "they have"} left the book. Transferring cancels {review.offBook.length === 1 ? "it" : "them"} for good.
                 </div>
               )}
               {!reviewSelf && !inFlight && rcpt.state === "ok" && (
-                <div className="fineprint">Check the address character by character: a SEND cannot be reversed. The recipient needs a wallet that shows LUCKY-20 balances (any wallet holds them; this site shows them).</div>
+                <div className="fineprint">Check the address character by character: a transfer cannot be reversed. The recipient needs a wallet that shows LUCKY-20 balances (any wallet holds them; this site shows them).</div>
               )}
               <dl className="totals">
                 <div>
@@ -457,7 +479,7 @@ export default function SendPage({ ticker, params = {} }) {
                 {chain.phase === "idle" && (
                   <>
                     <button className="btn btn-primary btn-lg" type="button" onClick={sign} disabled={!formOk || busy}>
-                      Sign with {w.providerName || "your wallet"} · send {fmtInt(amount ?? 0)} {ticker}
+                      Sign with {w.providerName || "your wallet"} · transfer {fmtInt(amount ?? 0)} {ticker}
                     </button>
                     <button className="btn" type="button" onClick={() => setStep("form")}>
                       Back
@@ -471,13 +493,13 @@ export default function SendPage({ ticker, params = {} }) {
                 onReset={done}
                 onStopWaiting={stopWaiting}
                 labels={{
-                  building: "Building the SEND — your fee inputs are filtered so no other token carrier is ever spent as fee.",
+                  building: "Building the transfer — your fee inputs are filtered so no other token carrier is ever spent as fee.",
                   signing: `Awaiting signature — confirm in ${w.providerName || "your wallet"}.`,
-                  pending: `${chain.toAddress === address ? "Split" : "Send"} broadcast. Pending confirmation — checking every 15 s.`,
+                  pending: `${chain.toAddress === address ? "Split" : "Transfer"} broadcast. Pending confirmation — checking every 15 s.`,
                   confirmed:
                     chain.toAddress === address
                       ? `Done. ${fmtInt(chain.amount ?? 0)} ${ticker} are on a new carrier of yours (vout0); the rest is on your residual carrier (vout3).`
-                      : `Sent. ${fmtInt(chain.amount ?? 0)} ${ticker} are on ${shortAddr(chain.toAddress || "", 8, 6)}'s new carrier.`,
+                      : `Transferred. ${fmtInt(chain.amount ?? 0)} ${ticker} are on ${shortAddr(chain.toAddress || "", 8, 6)}'s new carrier.`,
                 }}
               />
             </div>
@@ -487,7 +509,7 @@ export default function SendPage({ ticker, params = {} }) {
       </div>
 
       {pendingSends.length > 0 && (
-        <Panel title={`Your unconfirmed ${ticker} sends`} led="busy" aria-label="Unconfirmed sends">
+        <Panel title={`Your unconfirmed ${ticker} transfers`} led="busy" aria-label="Unconfirmed transfers">
           <ul className="mine-pending-list">
             {pendingSends.map((r) => (
               <li key={r.txid} className="mine-pending-row t-busy">
@@ -495,12 +517,12 @@ export default function SendPage({ ticker, params = {} }) {
                 <a className="mono" href={txUrl(r.txid)} target="_blank" rel="noopener noreferrer" title={r.txid}>
                   {shortTxid(r.txid, 6, 4)}
                 </a>
-                <span className="mine-pending-text">waiting for a block — its carriers are left out of new sends until it confirms or drops</span>
+                <span className="mine-pending-text">waiting for a block — its carriers are left out of new transfers until it confirms or drops</span>
               </li>
             ))}
           </ul>
         </Panel>
       )}
-    </main>
+    </Shell>
   );
 }

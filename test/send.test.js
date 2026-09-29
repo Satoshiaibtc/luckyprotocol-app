@@ -54,7 +54,7 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   assert.equal(rows.find((r) => r.txid === TX("e")).sats, 12_000);
   assert.equal(rows.some((r) => r.txid === TX("f")), false, "ORE-only carrier is not a LUCKY row");
   assert.match(carrierNote(rows.find((r) => r.txid === TX("b")), "LUCKY"), /also carries 8 ORE — those go to your residual carrier \(vout3\), not to the recipient/);
-  assert.match(carrierNote(rows.find((r) => r.txid === TX("d")), "LUCKY"), /sending it withdraws that listing/);
+  assert.match(carrierNote(rows.find((r) => r.txid === TX("d")), "LUCKY"), /transferring it withdraws that listing/);
   assert.match(carrierNote(rows.find((r) => r.txid === TX("c")), "LUCKY"), /already spent by one of your transactions/);
   assert.equal(carrierNote(rows.find((r) => r.txid === TX("a")), "LUCKY"), "LUCKY only");
   assert.equal(spendableAmount(rows), 1200 + 500 + 300, "pending / filling rows can never be spent now");
@@ -129,7 +129,7 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
     assert.ok(amountErr, text);
     assert.equal(sendFormHint({ ...base, amount: parseSendAmount(text), amountErr }), null, `no second line for ${text}`);
   }
-  assert.equal(sendFormHint({ ...base, amount: null, amountErr: null }), "Enter how many LUCKY to send.", "an EMPTY field asks for an amount");
+  assert.equal(sendFormHint({ ...base, amount: null, amountErr: null }), "Enter how many LUCKY to transfer.", "an EMPTY field asks for an amount");
   assert.equal(sendFormHint({ ...base, amount: 1000, amountErr: null }), null);
   assert.match(sendFormHint({ ...base, amount: 1000, amountErr: null, pickedTotal: 10 }), /hold 1,800 — not enough for 1,000/);
   assert.equal(sendFormHint({ ...base, rcptState: "empty", amount: 5, amountErr: null }), "Enter the recipient's address.");

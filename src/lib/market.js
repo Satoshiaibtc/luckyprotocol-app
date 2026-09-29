@@ -533,7 +533,7 @@ export function splitAmountError(text, max, holds, ticker) {
  * in plain words — the sell form's notice and the book's 409 both say it.
  */
 export const RAISE_PRICE_TEXT =
-  "To raise the price, withdraw this listing first. Your earlier listing is already signed at the lower price, and anyone who saved it can still complete it on-chain at that price — so the order book keeps the cheaper one. Withdraw moves these tokens to a new carrier of yours on-chain (a send to yourself), which voids the old signature for good; then list the new carrier at the higher price.";
+  "To raise the price, withdraw this listing first. Your earlier listing is already signed at the lower price, and anyone who saved it can still complete it on-chain at that price — so the order book keeps the cheaper one. Withdraw moves these tokens to a new carrier of yours on-chain (a transfer to yourself), which voids the old signature for good; then list the new carrier at the higher price.";
 
 /**
  * The order book could not save a listing to disk (a 503 that says so): it

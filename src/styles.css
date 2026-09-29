@@ -3930,7 +3930,7 @@ button.wallet-addr:focus-visible {
   text-shadow: none;
 }
 
-/* ---- token page action tabs (Mine | Market) --------------------------------------------------- */
+/* ---- token page action tabs (Mine | Market | Transfer) ----------------------------------------- */
 
 .token-tabs {
   gap: 22px;
@@ -4328,9 +4328,14 @@ button.wallet-addr:focus-visible {
   /* phones (332px inner at 390px): MM-DD · kind · who · amount · tx — the
      amount cell is the one quantitative column, so it gets the larger share
      and may wrap ("1,000" / "LUCKY", the BTC line under it) instead of
-     ellipsizing to "1,0…". */
+     ellipsizing to "1,0…". The kind column fits the longest tag, TRANSFER,
+     set a little tighter than on desktop. */
   .cols-activity-c .tr {
-    grid-template-columns: 44px 56px minmax(0, 1.1fr) minmax(0, 1.2fr) 50px;
+    grid-template-columns: 44px 66px minmax(0, 1.1fr) minmax(0, 1.2fr) 50px;
+  }
+  .cols-activity-c .kind-tag {
+    padding: 2px 4px;
+    letter-spacing: 0.04em;
   }
   .cols-activity-c .tr > :nth-child(2),
   .cols-activity-c .tr > .num.right,
@@ -5647,7 +5652,7 @@ button.wallet-addr:focus-visible {
   color: var(--danger);
 }
 
-/* ---- portfolio: Send per ticker, multi-ticker carriers ------------------------------------------ */
+/* ---- portfolio: Transfer per ticker, multi-ticker carriers ------------------------------------- */
 
 .bal-item {
   display: grid;
@@ -5658,7 +5663,7 @@ button.wallet-addr:focus-visible {
 .bal-send {
   flex: none;
 }
-/* phones: the share / floor line drops under the ticker so the Send button fits */
+/* phones: the share / floor line drops under the ticker so the Transfer button fits */
 @media (max-width: 560px) {
   .bal-item .bal-row {
     grid-template-columns: 28px auto minmax(0, 1fr);
@@ -5702,7 +5707,7 @@ button.wallet-addr:focus-visible {
   gap: 6px;
 }
 
-/* ---- send page --------------------------------------------------------------------------------- */
+/* ---- transfer page (#/send, and the token page's Transfer tab) --------------------------------- */
 
 .send-grid {
   display: grid;
@@ -5724,6 +5729,15 @@ button.wallet-addr:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
+}
+/* the Transfer tab: the form without the page shell, spaced like the page */
+.send-embedded {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.send-embedded .empty-state {
+  padding: 32px 16px;
 }
 .send-form,
 .send-review {

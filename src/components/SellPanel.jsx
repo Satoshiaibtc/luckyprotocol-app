@@ -499,7 +499,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
         )}
         {rows.some((r) => sellRowState(r, pendingSpent) === "small") && (
           <p className="fineprint utxo-note">
-            <span className="status-tag s-cancelled">under 546 sats</span> — the order book lists only a carrier of at least 546 sats. Select it and move the tokens to a fresh 546-sat carrier (a send to yourself), then list that.
+            <span className="status-tag s-cancelled">under 546 sats</span> — the order book lists only a carrier of at least 546 sats. Select it and move the tokens to a fresh 546-sat carrier (a transfer to yourself), then list that.
           </p>
         )}
         {rows.some((r) => sellRowState(r, pendingSpent) === "offbook") && (
@@ -565,7 +565,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
                   Withdraw
                 </button>
                 <span className="muted">
-                  A send to yourself: leaves your wallet the {SEND_PROTOCOL_FEE_SATS}-sat protocol fee + the network fee{fee.satVb ? ` at ${fee.satVb} sat/vB` : ""}. The tokens move to a new carrier of yours, which you can list at any price.
+                  A transfer to yourself: leaves your wallet the {SEND_PROTOCOL_FEE_SATS}-sat protocol fee + the network fee{fee.satVb ? ` at ${fee.satVb} sat/vB` : ""}. The tokens move to a new carrier of yours, which you can list at any price.
                 </span>
               </div>
             </div>
