@@ -36,7 +36,7 @@ export default function WalletModal() {
 
   useModalFocus(dialogRef, open, onClose);
 
-  // Opening the dialog re-reads the balance it shows (audit wallet-5).
+  // Opening the dialog re-reads the balance it shows.
   useEffect(() => {
     if (open && connected) refreshBalance();
   }, [open, connected, refreshBalance]);

@@ -1,5 +1,5 @@
 // The token page's action tabs. The Market tab exists only once the
-// token's market is open (owner's rules, 2026-09-27 / 2026-09-28): the
+// token's market is open: the
 // token is minted out AND the block that completed the supply has
 // FINAL_DEPTH confirmations. Until then `?tab=market` resolves to the mine
 // console with a one-line notice. A token with an open market opens on
@@ -36,7 +36,7 @@ export function marketClosedNotice(ticker, token) {
 
 /**
  * The notice for a token whose market opened while this visit showed its
- * Mine tab (the tab stays put — audit mine-3): null unless the pinned view
+ * Mine tab (the tab stays put): null unless the pinned view
  * was opened before the market opened.
  */
 export function mintedOutFlipNotice(pinned, token) {

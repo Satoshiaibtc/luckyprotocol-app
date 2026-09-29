@@ -60,8 +60,8 @@ export default function TopBar() {
         </>
       );
     } else if (!sync.synced) {
-      // "synced" is said only when the indexer has applied the tip block
-      // (audit usertx-1) — during a cold scan it can be thousands behind.
+      // "synced" is said only when the indexer has applied the tip block —
+      // during a cold scan it can be thousands behind.
       pillClass += " pill-warn";
       led = "busy";
       pillText = (

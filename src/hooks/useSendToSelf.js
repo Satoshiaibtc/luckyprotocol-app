@@ -33,8 +33,8 @@ const WHAT = { cancel: "withdrawal", split: "split", send: "send" };
  *             can be listed — or a multi-ticker carrier's ticker moved onto
  *             its own carrier
  *   cancel  — spend a LISTED carrier back to yourself: the only real cancel
- *             (§7.3). When the order is `filling` (a fill sits in the mempool,
- *             audit M-9) the fee rate is raised to the BIP125 replacement
+ *             (§7.3). When the order is `filling` (a fill sits in the
+ *             mempool) the fee rate is raised to the BIP125 replacement
  *             floor from src/lib/market.js cancelFeeRate and the reason is
  *             surfaced in `chain.rule`.
  *   send    — `amount` of `ticker` from the carriers in `utxos` to
@@ -87,7 +87,7 @@ export function useSendToSelf({ onSettled } = {}) {
   }, [status.final, address, chain.txid]);
 
   // The node has not seen the tx for a while: say so, keep checking — it may
-  // still confirm (audit usertx-6); seen again, it is pending again.
+  // still confirm; seen again, it is pending again.
   useEffect(() => {
     if (status.dropped) setChain((c) => (c.phase === "pending" ? { ...c, phase: "unseen", note: droppedMessage(c.txid, WHAT[c.kind] || "send") } : c));
     else setChain((c) => (c.phase === "unseen" ? { ...c, phase: "pending", note: null } : c));
@@ -108,7 +108,7 @@ export function useSendToSelf({ onSettled } = {}) {
         const chosen = fee.satVb;
         if (!isUsableFeeRate(chosen)) throw new Error(missingFeeHint(fee.choice, chosen, label, { awaitingAck: !!fee.highFee?.pending }));
         // The cancel's own size (one carrier + one fee input) — the absolute-fee
-        // floor of the M-9 rule needs it; the real build may add inputs, which
+        // floor of the replacement rule needs it; the real build may add inputs, which
         // only raises the absolute fee further.
         const est = estimateSendFeeSats({ address, toAddress: to, ticker, amount, feeRateSatVb: chosen, carrierCount: picked.length });
         const rule = kind === "cancel" ? cancelFeeRate({ chosenSatVb: chosen, order, incrementalRelayFee: fees.data?.incrementalrelayfee ?? null, vsize: est.vsize }) : null;
@@ -145,10 +145,10 @@ export function useSendToSelf({ onSettled } = {}) {
           ticker,
           amount,
           toAddress: to,
-          minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8
+          minInputSats: minFeeInputSats(utxoRes.assetSafe), // 10,000-sat floor on non-asset-safe lists
         });
         setChain({ phase: "signing", kind, ticker, amount, toAddress: to, order, rule, feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, inputs: built.inputs, assetSafe: utxoRes.assetSafe });
-        // Sign-time guard (M-1): exactly one OP_RETURN and it is a SEND of this ticker/amount.
+        // Sign-time guard: exactly one OP_RETURN and it is a SEND of this ticker/amount.
         expectPsbtPayload(built.psbtHex, { op: "SEND", ticker, amount });
         const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
         setChain((c) => ({ ...c, phase: "broadcasting" }));

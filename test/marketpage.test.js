@@ -113,7 +113,7 @@ const row = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted
   console.log("marketpage tabs: Market tab only when minted out; ?tab=market resolves to Mine with the notice");
 }
 
-// ---- reorg audit: minted out, but the market opens only when the completing block is 6 deep ---------------
+// ---- finality: minted out, but the market opens only when the completing block is 6 deep ---------------
 {
   const pending = row("DUNE", S, { minted_out_height: 969_798, market_open: false, market_opens_at_height: 969_803 });
   assert.equal(MARKET_OPEN_DELAY, 5, "opens at minted_out_height + 5: that block then has 6 confirmations");

@@ -1,4 +1,4 @@
-// Concurrent MINEs (owner decision F, audit mine-5): the pure pending-list
+// Concurrent MINEs: the pure pending-list
 // model behind the mine console — resume, append / cap, status folding
 // (confirmed / seen / dropped), the indexer's credit, which MINE the
 // terminal follows, the button label, the row wording. Plain Node.
@@ -126,7 +126,7 @@ const GRACE = 180_000;
   assert.equal(mineFocus({ phase: "idle" }, []).phase, "idle");
   assert.equal(mineFocus({ phase: "error", error: "x" }, [b]).phase, "error");
   assert.equal(mineButtonLabel("idle", 0), "Mine");
-  assert.equal(mineButtonLabel("idle", 2), "Mine again", "not 'Awaiting block': the button is free while MINEs wait (mine-5)");
+  assert.equal(mineButtonLabel("idle", 2), "Mine again", "not 'Awaiting block': the button is free while MINEs wait");
   assert.equal(mineButtonLabel("signing", 2), "Awaiting signature");
   assert.equal(mineButtonLabel("building", 0), "Assembling…");
   assert.equal(mineButtonLabel("broadcasting", 0), "Broadcasting…");
@@ -149,7 +149,7 @@ const GRACE = 180_000;
   const provisional = pendingMineRow({ ...conf, reconcile: "done", indexed: { status: "settled", yield_smallest: 1000, cap_exhausted: false }, confirmations: 1, final: false }, "LUCKY");
   assert.deepEqual([provisional.tone, provisional.text], ["busy", "block #969,802 · digit f (tier 1,000) · +1,000 LUCKY · provisional · 1/6 confirmations"]);
   assert.equal(pendingMineRow({ ...conf, reconcile: "done", indexed: { status: "invalid" }, final: true }, "LUCKY").tone, "err");
-  assert.match(pendingMineRow({ ...conf, reconcile: "done", indexed: { status: "invalid", reason: "deploy_same_block" }, final: true }, "LUCKY").text, /invalid MINE, 0 credited \(it confirmed in the same block as the ticker's creation — mining starts in the next block\)/, "D1: the reason is said");
+  assert.match(pendingMineRow({ ...conf, reconcile: "done", indexed: { status: "invalid", reason: "deploy_same_block" }, final: true }, "LUCKY").text, /invalid MINE, 0 credited \(it confirmed in the same block as the ticker's creation — mining starts in the next block\)/, "the reason is said");
   assert.equal(pendingMineRow({ ...conf, reconcile: "timeout" }, "LUCKY").tone, "idle");
   const dropped = pendingMineRow({ ...p, phase: "dropped" }, "LUCKY");
   assert.equal(dropped.tone, "err");
@@ -162,7 +162,7 @@ const GRACE = 180_000;
   console.log("minepending rows: plain words per state; the mempool line counts concurrent MINEs");
 }
 
-// ---- reorg audit: a confirmed MINE is provisional until final, and a chain reorganization is followed ---------------
+// ---- finality: a confirmed MINE is provisional until final, and a chain reorganization is followed ---------------
 {
   const t0 = 5_000_000;
   const HF = "0".repeat(63) + "f"; // tier 1,000
@@ -214,7 +214,7 @@ const GRACE = 180_000;
   console.log("minepending reorg: provisional until 6 confirmations; a moved MINE is re-credited from its new block and said so");
 }
 
-// ---- reorg audit: no drop while the node's "unknown" means nothing; a dropped MINE can come back -----------------------
+// ---- finality: no drop while the node's "unknown" means nothing; a dropped MINE can come back -----------------------
 {
   const t0 = 9_000_000;
   const p = newPendingMine({ txid: TX("b"), ticker: "LUCKY", broadcastAt: t0 });
@@ -233,7 +233,7 @@ const GRACE = 180_000;
   console.log("minepending unseen: never dropped while the node's answer cannot be trusted; dropped MINEs are watched and come back");
 }
 
-// ---- reorg audit: the scan wait after a reorganization is not called a first use ----------------------------------------
+// ---- finality: the scan wait after a reorganization is not called a first use ----------------------------------------
 {
   assert.match(seedWaitNote({ elapsedMs: 5_000 }), /^Setting up this wallet: /);
   const again = seedWaitNote({ elapsedMs: 5_000, rescan: true });

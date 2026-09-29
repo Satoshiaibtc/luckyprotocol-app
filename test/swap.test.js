@@ -11,7 +11,7 @@
 //   * output0 is byte-identical to the listing, OP_RETURN payload is
 //     LUCKY-20|SEND|<T>|<AMT>|1|4, vout1 (token slot) and vout4 (residual
 //     slot) are ALWAYS 546-sat outputs, vout5 BTC change is optional and
-//     folds into the fee when sub-dust (H-1(A)), inputs − outputs == feeSats
+//     folds into the fee when sub-dust, inputs − outputs == feeSats
 import assert from "node:assert/strict";
 import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
@@ -59,7 +59,7 @@ assert.equal(FILL_CHANGE_OUT, 4);
 assert.equal(FILL_BTC_CHANGE_VOUT, 5);
 assert.equal(FILL_FIXED_SATS, 546 * 3, "token output + protocol fee + residual output");
 
-/** Assert the H-1(A) fill layout on a PSBT / tx: 5 outputs (change folded) or 6. */
+/** Assert the §7.2 fill layout on a PSBT / tx: 5 outputs (change folded) or 6. */
 function checkFillOutputs(label, tx, fill, { seller, buyer, price, payload }) {
   const o = (i) => tx.getOutput(i);
   assert.ok(tx.outputsLength === 5 || tx.outputsLength === 6, `${label}: 5 or 6 outputs, got ${tx.outputsLength}`);
@@ -183,7 +183,7 @@ function runScenario(label, sellerType, buyerType) {
     const r = verifyListing({ psbtHex: signedListing, order: { ...order, id: `${T(9)}:0` } });
     assert.equal(r.checks.find((c) => c.id === "shape").ok, false);
   }
-  // H-3: a carrier worth more than the price hands its surplus to the buyer.
+  // a carrier worth more than the price hands its surplus to the buyer.
   {
     const fat = { txid: T(6), vout: 3, sats: 12_345 };
     assert.throws(
@@ -194,7 +194,7 @@ function runScenario(label, sellerType, buyerType) {
     // price == carrier is the floor and builds
     const atFloor = buildListingPsbt({ address: seller.address, pubkeyHex: seller.pubkeyHex, tokenUtxo: fat, priceSats: 12_345, amount: 700 });
     assert.equal(parse(atFloor.psbtHex).getOutput(0).amount, 12_345n);
-    // buyer side: a listing built under the old rule (output0 < witnessUtxo) fails check 4, even when the order agrees with it
+    // buyer side: a listing whose output0 is below its witnessUtxo value fails check 4, even when the order agrees with it
     const tx = new btc.Transaction({ lockTime: 0 });
     const input = { txid: T(6), index: 3, witnessUtxo: { script: seller.script, amount: 12_345n }, sighashType: 0x83 };
     if (sellerType === "tr") input.tapInternalKey = pubSchnorr(seller.priv);
@@ -291,7 +291,7 @@ function runScenario(label, sellerType, buyerType) {
       else assert.equal(inp.tapInternalKey, undefined);
     }
     assert.equal(tx.inputsLength, 1 + fill.inputIndexes.length);
-    // §7.2 layout (H-1(A)): 6 outputs here — the 30,000 / 90,000-sat inputs leave real change
+    // §7.2 layout: 6 outputs here — the 30,000 / 90,000-sat inputs leave real change
     checkFillOutputs(label, tx, fill, { seller: seller.address, buyer: buyer.address, price: 60_000, payload: "LUCKY-20|SEND|LUCKY|1200|1|4" });
     assert.equal(tx.outputsLength, 6, "vout5 BTC change present when ≥ dust");
     assert.ok(payloadToString(tx.getOutput(3).script.slice(2)).endsWith("|1|4"), "TO_OUT=1, CHANGE_OUT=4 (distinct — equal indices do not parse)");
@@ -338,7 +338,7 @@ function runScenario(label, sellerType, buyerType) {
   // finalizeFill is idempotent on an already-finalized input0
   assert.equal(finalizeFill(hex.encode(fin.toPSBT())), rawHex);
 
-  // M-1: a fill whose OP_RETURN is not the SEND is never extracted, even
+  // a fill whose OP_RETURN is not the SEND is never extracted, even
   // when every input is signed (the seller's bearer signature would
   // otherwise ride on e.g. a MINE that default-routes their tokens).
   {
@@ -367,7 +367,7 @@ function runScenario(label, sellerType, buyerType) {
     () => buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos: utxos.slice(0, 2), tokenOutpoints, feeRateSatVb: 8 }),
     /no spendable BTC/,
   );
-  // M-8: on a non-asset-safe list the fee-input floor applies to the buyer's inputs too
+  // on a non-asset-safe list the fee-input floor applies to the buyer's inputs too
   {
     const floored = buildFillPsbt({ listingPsbtHex: signedListing, order, address: buyer.address, pubkeyHex: buyer.pubkeyHex, utxos, tokenOutpoints, feeRateSatVb: 8, minInputSats: 50_000 });
     assert.deepEqual(floored.inputs, [{ txid: T(5), vout: 2, sats: 90_000 }], `${label}: only the 90,000-sat output clears a 50,000-sat floor`);
@@ -376,7 +376,7 @@ function runScenario(label, sellerType, buyerType) {
       /no asset-safe UTXO list/,
     );
   }
-  // Audit trading-3: sixty 800-sat outputs next to one large one — the fill
+  // sixty 800-sat outputs next to one large one — the fill
   // spends the large one alone (largest-first, uneconomic outputs skipped),
   // so the one-input quote the sheet shows is what is built.
   {
@@ -471,7 +471,7 @@ runScenario("wpkh-seller/tr-buyer", "wpkh", "tr");
   console.log("swap mock signer: toSignInputs / sighashTypes / autoFinalized honored");
 }
 
-// ---- M-3: decodeRawTx follows the indexer's OP_RETURN rule ---------------------------------------
+// ---- decodeRawTx follows the indexer's OP_RETURN rule ---------------------------------------
 {
   const enc2 = (s) => new TextEncoder().encode(s);
   const opret = (bytes) => makeOpReturnScript(bytes);

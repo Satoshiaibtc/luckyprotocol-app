@@ -119,7 +119,7 @@ function Height({ h }) {
  * One block. `narrow` (the ~54 px desktop strip): the fullness reads
  * "70% full" in a smaller face; the phone grid has room for "70.0% full".
  * Never a bare percentage under the yield — on a phone (no hover title) it
- * read as a chance for that yield (audit visit-10).
+ * read as a chance for that yield.
  */
 function Tile({ t, narrow = false }) {
   if (t.pending) {

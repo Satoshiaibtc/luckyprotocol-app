@@ -42,7 +42,7 @@ export default function ActivityPage() {
 
   const addrValid = addrText.trim() === "" || isSearchableAddress(addrText);
   // Lower-cased before it is applied: bech32 from a QR code is often upper
-  // case, and the indexer compares addresses byte for byte (audit portfolio-6).
+  // case, and the indexer compares addresses byte for byte.
   const submitAddr = (e) => {
     e.preventDefault();
     const t = addrText.trim();
@@ -128,7 +128,7 @@ export default function ActivityPage() {
               maxLength={90}
             />
             {/* Not "Mine": that is the kind chip beside it (and the verb to mine) —
-                one word for two controls, and the same word after translation (audit visit-9). */}
+                one word for two controls, and the same word after translation. */}
             {address && !addrFilter && (
               <button className="btn btn-ghost btn-sm" type="button" onClick={() => { setAddrText(address); setAddrFilter(normalizeSearchAddress(address)); }}>
                 My address

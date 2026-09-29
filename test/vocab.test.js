@@ -19,7 +19,7 @@
 // 3. The same vocabulary rule for every text file the site serves as is:
 //    public/** (the protocol spec at /PROTOCOL.md above all) and
 //    index.html. Nothing is stripped there except the brand tokens: a
-//    comment in a served file is served too (audit F2).
+//    comment in a served file is served too.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";

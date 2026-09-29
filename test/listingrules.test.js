@@ -1,7 +1,6 @@
 // Order-book acceptance rules the app checks before signing / publishing a
-// listing (owner decision D, audits trading-1 / trading-4), the buyer's
-// carrier-amount check (trading-2), and the mock order book applying the
-// same rules so the preview walks them. Plain Node.
+// listing, the buyer's carrier-amount check, and the mock order book
+// applying the same rules so the preview walks them. Plain Node.
 import assert from "node:assert/strict";
 import * as btc from "@scure/btc-signer";
 import { hex } from "@scure/base";
@@ -28,7 +27,7 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
   return hex.encode(tx.toPSBT());
 }
 
-// ---- trading-1: a listing no fill could relay ---------------------------------------------------------------------
+// ---- a listing no fill could relay ---------------------------------------------------------------------
 {
   assert.deepEqual(LISTING_VERSIONS, [1, 2]);
   assert.equal(SEQUENCE_DISABLE_FLAG, 0x80000000);
@@ -54,10 +53,10 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
   assert.equal(shape(ours.psbtHex).ok, true);
   assert.equal(shape(listingWith({ version: 3 })).ok, false);
   assert.match(shape(listingWith({ sequence: 10 })).detail, /no fill of it could be relayed/);
-  console.log("listing rules trading-1: version 1/2 + sequence ≥ 0x80000000 + lock time 0, on the seller's and the buyer's side");
+  console.log("listing rules: version 1/2 + sequence ≥ 0x80000000 + lock time 0, on the seller's and the buyer's side");
 }
 
-// ---- trading-4: raising the price needs Withdraw first ------------------------------------------------------------
+// ---- raising the price needs Withdraw first ------------------------------------------------------------
 {
   const open = { id: "x:0", status: "open", amount: 100, price_sats: 5_000, unit_price: 50 };
   assert.deepEqual(relistDecision(null, 6_000, 100), { ok: true, kind: "new" });
@@ -76,7 +75,7 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
   assert.match(listingRefusalText(eVer), /no buyer could ever complete it \(listing nVersion must be 1 or 2 \(got 3\)\)/);
   const eSeq = orderHttpError("/orders", 400, JSON.stringify({ error: "listing input 0 nSequence 0x0000000a enables a relative lock-time" }));
   assert.match(listingRefusalText(eSeq), /no buyer could ever complete it/);
-  // rvs-5 / ux-8: the order book's EXACT texts (spec §7.4) map to the trading-1 explanation.
+  // the order book's EXACT texts (spec §7.4) map to the "no fill could relay" explanation.
   const liveVer = "listing tx version must be 1 or 2 (got 3): a listing with any other version can never be filled";
   const liveSeq = "input0 nSequence 0x0000000a sets a relative timelock: use 0xfffffffd, 0xfffffffe or 0xffffffff (any value >= 0x80000000) so the listing can be filled";
   for (const text of [liveVer, liveSeq]) {
@@ -85,10 +84,10 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
     assert.ok(out.includes(text.replace(/\.$/, "")), "the book's own words are kept");
   }
   assert.equal(WITHDRAW_FIRST_TEXT, "withdraw first: the cheaper signed listing stays fillable on-chain");
-  console.log("listing rules trading-4: same / lower replaces, higher → Withdraw first (plain words, and the book's 409 maps to them)");
+  console.log("listing rules: same / lower replaces, higher → Withdraw first (plain words, and the book's 409 maps to them)");
 }
 
-// ---- rvs-2: the first output of an open reservation is never listed ------------------------------------------------
+// ---- the first output of an open reservation is never listed ------------------------------------------------
 {
   const open = { txid: TX("c"), status: "open", height: 969_400, expires_at_height: 971_416 };
   assert.equal(commitCarrierProblem(0, open), COMMIT_CARRIER_PLAIN_TEXT);
@@ -101,10 +100,10 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
   // the book's exact refusal maps to the same plain words
   const e = orderHttpError("/orders", 409, JSON.stringify({ error: COMMIT_CARRIER_LISTING_TEXT }));
   assert.equal(listingRefusalText(e), COMMIT_CARRIER_PLAIN_TEXT);
-  console.log("listing rules rvs-2: the first output of an open reservation (COMMIT) is refused, in plain words; the book's 409 maps to them");
+  console.log("listing rules: the first output of an open reservation (COMMIT) is refused, in plain words; the book's 409 maps to them");
 }
 
-// ---- trading-2: the indexer's own carrier amount must be > 0 -------------------------------------------------------
+// ---- the indexer's own carrier amount must be > 0 -------------------------------------------------------
 {
   const order = { id: `${TX("a")}:1`, ticker: "LUCKY", amount: 300 };
   const row = (balances) => ({ txid: TX("a"), vout: 1, balances });
@@ -118,7 +117,7 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
   assert.match(sellerCarrierCheck(null, order).detail, /no longer holds/);
   assert.equal(sellerCarrierCheck(row({ LUCKY: 299 }), order).ok, false);
   assert.equal(sellerCarrierCheck(row({ LUCKY: 300, ORE: 1 }), order).ok, false, "whole-UTXO, single ticker");
-  console.log("buy checks trading-2: the indexer's carrier row must hold exactly { TICKER: amount }, amount > 0");
+  console.log("buy checks: the indexer's carrier row must hold exactly { TICKER: amount }, amount > 0");
 }
 
 // ---- the mock order book applies the same rules (what the preview walks) -----------------------------------------------
@@ -145,7 +144,7 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
     return hex.encode(t.toPSBT());
   };
   await assert.rejects(mockPostJson("/orders", { psbt: sign(row.price_sats + 1), ticker: "BLOK", amount: row.amount, price_sats: row.price_sats + 1 }), (e) => e.status === 409 && e.message === WITHDRAW_FIRST_TEXT, "higher → 409 withdraw first (the book's exact text)");
-  // trading-1 in the mock: the indexer's exact 400 texts (rvs-5 / ux-8) — checked before the signature.
+  // the shape rules in the mock: the indexer's exact 400 texts — checked before the signature.
   const unsignedWith = ({ version = 2, sequence = 0xffffffff }) => {
     const { script } = decodeAddress(seller.address);
     const tx = new btc.Transaction({ version, lockTime: 0 });

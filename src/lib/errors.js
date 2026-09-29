@@ -4,7 +4,7 @@
 // The transport (src/lib/indexer.js) builds precise messages such as
 // "Indexer unreachable: https://…/tokens?limit=200 — Failed to fetch".
 // Those are right for a log, not for a page: the raw URL and the fetch
-// wording do not translate, and pages used to add their own
+// wording do not translate, and a page would otherwise add its own
 // "Indexer unreachable:" prefix in front of it. Pages show `indexerErrorText`
 // and keep the raw message in a `title` (see `indexerErrorTitle`).
 

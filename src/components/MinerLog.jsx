@@ -83,7 +83,7 @@ function Line({ line, last }) {
  * labels), `lit` (LEDs done; default litCount(mine)), `ledStates` (per-LED
  * override of the default derivation), `busy` (default from mine.phase),
  * `clearable` (default !busy — the mine console keeps Clear available while
- * its MINEs wait for a block, decision F), `showDigits` (false hides the
+ * its MINEs wait for a block), `showDigits` (false hides the
  * 16-digit chip row and renders `footer` under the terminal instead).
  */
 export default function MinerLog({
@@ -140,7 +140,7 @@ export default function MinerLog({
 
   const d = typeof litDigit === "string" ? litDigit.toLowerCase() : null;
   // The tier while the indexer has not answered, the credit once it has
-  // (near the cap they differ — audit mine-1).
+  // (near the cap they differ).
   const cap = mineCaption(d, mine, ticker);
 
   return (

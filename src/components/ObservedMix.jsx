@@ -12,7 +12,7 @@ const MIN_N = 16;
  * `showTotal` (portfolio) relaxes the n ≥ 16 rule: the user's own record
  * always shows percentages. `of` = how many rows exist in all (the
  * indexer's `total`) when `rows` is only the newest page of them — the foot
- * then says the mix covers the newest n of that many (audit portfolio-4).
+ * then says the mix covers the newest n of that many.
  */
 export default function ObservedMix({ rows, loading = false, error = null, meanLabel = "Observed mean", help, showTotal = false, ticker = "", of = null }) {
   const mix = useMemo(() => summarizeMix(rows || []), [rows]);

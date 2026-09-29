@@ -14,8 +14,7 @@ import { useIsMobile } from "../hooks/useMediaQuery.js";
 export default function OrderBook({ ticker, rows, loading, error, address, selectedId, onSelect, usd = null }) {
   const asks = sortAsks(rows || []);
   // Phones: the seller moves under the amount and the total is shown in
-  // sats, so every column fits — a 41 px "0.00…" total told a buyer nothing
-  // (audit market-7).
+  // sats, so every column fits — a 41 px "0.00…" total told a buyer nothing.
   const compact = useIsMobile();
   return (
     <div className={`table cols-book${compact ? " cols-book-c" : ""}`} role="listbox" aria-label={`${ticker} listings`}>

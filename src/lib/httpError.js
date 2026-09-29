@@ -3,9 +3,9 @@
 // in test/views.test.js.
 //
 // Trading routes answer `{ "error": "…" }`; /broadcast answers plain text.
-// Showing the raw body put JSON punctuation and an HTTP prefix in front of
-// a seller, and cutting it at 200 characters broke longer refusals
-// mid-sentence (audit market-6).
+// Showing the raw body would put JSON punctuation and an HTTP prefix in
+// front of a seller, and cutting it at 200 characters would break longer
+// refusals mid-sentence.
 
 /** Longest error text kept; longer bodies are cut at a word boundary with "…". */
 export const MAX_ERROR_TEXT = 600;

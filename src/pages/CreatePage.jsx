@@ -47,7 +47,7 @@ const PENDING_PHASES = new Set(["reserve-pending", "reserve-unsent", "reserve-un
 
 /**
  * This browser's own earlier DEPLOY of `ticker` from `address` that has not
- * been seen to settle (src/lib/txrecords.js, audit usertx-2), re-checked
+ * been seen to settle (src/lib/txrecords.js), re-checked
  * against /tx-status: `{ txid, state }` or null.
  */
 async function ownDeployFor(address, ticker) {
@@ -75,8 +75,8 @@ export default function CreatePage({ params, navigate }) {
   const connected = walletState.status === "connected";
   const providerName = walletState.providerName;
   // Reserving is locked below UNLOCK_HEIGHT (969,299); an UNKNOWN tip counts
-  // as locked — the gate fails closed (audit L-12). The app's lock time
-  // keeps anything sent from confirming before ACTIVATION_HEIGHT (decision B).
+  // as locked — the gate fails closed. The app's lock time keeps anything
+  // sent from confirming before ACTIVATION_HEIGHT.
   const tipNow = health.data?.tip_height ?? null;
   const preActivation = activationState(tipNow).locked;
 
@@ -97,7 +97,7 @@ export default function CreatePage({ params, navigate }) {
   const rec = cr.rec;
   const phase = cr.phase;
   // Step 2 pays with its own fee choice, "fast" by default: while a publish
-  // waits in the mempool its ticker is public (owner decision A).
+  // waits in the mempool its ticker is public.
   const revealFee = useFeeRate(fees.error ? null : fees.data, { preset: "fast", persist: false });
 
   // `params.ticker` seeds the field; App keys this page on it.
@@ -140,7 +140,7 @@ export default function CreatePage({ params, navigate }) {
   }, [typed]);
 
   // Live availability of the TYPED ticker (no reservation open): /tokens/:ticker
-  // → null is "free" only while the indexer has applied the tip (audit usertx-1).
+  // → null is "free" only while the indexer has applied the tip.
   const [avail, setAvail] = useState({ ticker: "", state: "idle" });
   const indexedHeight = sync.indexed;
   useEffect(() => {
@@ -169,7 +169,7 @@ export default function CreatePage({ params, navigate }) {
       clearTimeout(id);
     };
   }, [typed, rec, address, indexedHeight]);
-  // A reservation that can no longer be published says so here too (ux-6).
+  // A reservation that can no longer be published says so here too.
   const availState = rec ? (DEAD_END_PHASES.has(phase) ? "reserved-dead" : "reserved") : avail.ticker === typed ? (avail.state === "free" && !sync.synced ? "lagging" : avail.state) : TICKER_RE.test(typed) ? "checking" : "idle";
   const availFree = !rec && availState === "free";
 
@@ -370,7 +370,7 @@ export default function CreatePage({ params, navigate }) {
       <div className="create-layout">
         <Panel title="Deploy // new ticker" led={AVAIL_LED[availState] || "idle"} right={<span className="label">RESERVE → PUBLISH · §2.1</span>} aria-label="Deploy a new ticker">
           {/* Before the ticker field: on a phone the lock must be read before
-              a green "not in the registry" invites a reservation (audit visit-3). */}
+              a green "not in the registry" invites a reservation. */}
           {preActivation && !rec && <div className="notice">{activationNotice(tipNow, "Reserving a ticker")}</div>}
           {otherRequested && (
             <div className="notice">
@@ -384,7 +384,7 @@ export default function CreatePage({ params, navigate }) {
             <span className="label">Ticker</span>
             <span className="ticker-field">
               {/* No maxLength of 8: the browser would cut a paste BEFORE the
-                  spaces / symbols are removed (audit create-5). */}
+                  spaces / symbols are removed. */}
               <input
                 ref={inputRef}
                 className="input mono ticker-input"

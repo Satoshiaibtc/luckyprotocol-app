@@ -92,7 +92,7 @@ export function useRecentBlocks({ ceiling, count = 16, fallbackRows = null }) {
       // The whole window, not only the heights asked for: the common chain
       // reorganization replaces block h AND adds h+1 in one step, so the
       // ceiling only moves up and h — already cached — would keep showing
-      // the replaced block's hash and digit (audit: stale tape digit).
+      // the replaced block's hash and digit.
       if (hashesDisagree(cache, byHeight)) reorg = true;
       const rest = [];
       for (const h of heights) {

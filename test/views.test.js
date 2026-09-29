@@ -45,7 +45,7 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.equal(filling.pending_vsize, 99_000);
   assert.equal(filling.pending_feerate, 0.1);
   const junk = orderRow({ ...base, status: "filling", pending_spend_txid: "nope", pending_fee_sats: -1, pending_vsize: 5e6, pending_feerate: "fast" });
-  assert.deepEqual([junk.pending_spend_txid, junk.pending_fee_sats, junk.pending_vsize, junk.pending_feerate], [null, null, null, null], "out-of-range pending fields → null (the M-9 rule then falls back to the rate floor)");
+  assert.deepEqual([junk.pending_spend_txid, junk.pending_fee_sats, junk.pending_vsize, junk.pending_feerate], [null, null, null, null], "out-of-range pending fields → null (the cancel fee rule then falls back to the rate floor)");
   const leak = orderRow({ ...base, status: "open", pending_feerate: 0.1, pending_fee_sats: 100 });
   assert.equal(leak.pending_feerate, null, "pending_* on a non-filling order are dropped");
   assert.equal(orderRow({ ...base, status: "expired" }), null, "unknown status → row dropped");
@@ -167,7 +167,7 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   console.log("views /market: every field bounded, negatives allowed for change_pct, unknown → null; minted_out strict");
 }
 
-// ---- reorg audit: depth on every view (the indexer API: confirmations / final / market_open / health) ----------------
+// ---- finality: depth on every view (the indexer API: confirmations / final / market_open / health) ----------------
 {
   // OrderView.market_open: false while the ticker's market is not open (the book then offers no fill)
   const o = { id: `${TX}:1`, ticker: "LUCKY", amount: 10, price_sats: 1_000, seller: P2TR, carrier_sats: 546, status: "open" };

@@ -1,7 +1,7 @@
 // LuckyProtocol yield function — the ONLY settlement authority on the JS side.
 //
 // Deliberately dependency-free (no fetch, no wallet, no PSBT) so it can be
-// unit-tested in plain Node against the golden vectors shared with the Rust
+// unit-tested in plain Node against the golden vectors shared with the
 // indexer (PROTOCOL.md §3). Any drift in case handling or digit
 // bucketing fails `npm test`.
 //

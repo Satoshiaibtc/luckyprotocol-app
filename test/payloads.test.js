@@ -1,9 +1,9 @@
 // Grammar tests for src/lib/payloads.js — the JS mirror of the indexer's
-// parser (protocol.rs). The SEND vectors below are the same four cases the
-// Rust parser tests carry (audit M-2): the two grammars MUST agree byte for
-// byte, because a payload one side accepts and the other rejects is a
-// permanent state fork (the rejecting side default-routes the input pool to
-// the tx's first output instead of settling the SEND).
+// parser. The SEND vectors below are the same four cases the indexer's own
+// parser tests carry: the two grammars MUST agree byte for byte, because a
+// payload one side accepts and the other rejects is a permanent state fork
+// (the rejecting side default-routes the input pool to the tx's first
+// output instead of settling the SEND).
 import assert from "node:assert/strict";
 import {
   ACTIVATION_HEIGHT,
@@ -28,12 +28,12 @@ import {
 } from "../src/lib/payloads.js";
 
 assert.equal(PROTOCOL_PREFIX, "LUCKY-20");
-assert.equal(ACTIVATION_HEIGHT, 969_300, "activation height per the 2026-09-26 owner decision (must match the indexer)");
+assert.equal(ACTIVATION_HEIGHT, 969_300, "activation height (must match the indexer)");
 assert.equal(MIN_COMMIT_AGE, 1, "a REVEAL needs its COMMIT in an EARLIER block");
 assert.equal(MAX_COMMIT_AGE, 2_016, "a REVEAL must confirm within 2,016 blocks of its COMMIT");
-assert.equal(PROTOCOL_LOCKTIME, 969_299, "every COMMIT / REVEAL / MINE / SEND the app builds has nLockTime ACTIVATION_HEIGHT − 1 (decision B)");
+assert.equal(PROTOCOL_LOCKTIME, 969_299, "every COMMIT / REVEAL / MINE / SEND the app builds has nLockTime ACTIVATION_HEIGHT − 1");
 
-// ---- commit-reveal: the four spec vectors (§2.1) — identical in protocol.rs ----------------------
+// ---- commit-reveal: the four spec vectors (§2.1) — identical on the indexer's side ----------------------
 // H = SHA-256( UTF-8 bytes of the exact REVEAL payload ‖ raw scriptPubKey of the COMMIT's vout0 ).
 const VECTORS = [
   ["LUCKY-20|DEPLOY|LUCKY|000102030405060708090a0b0c0d0e0f", "51200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", "1ac55b4c608ed7c39eb3dbcecaf04c41222d5b3c37b6343477c9a91d4a6f33fc"],
@@ -86,9 +86,9 @@ assert.equal(salts.size, 8, "fresh salts differ");
 for (const s of salts) assert.ok(isValidSalt(s), `salt ${s} is 32 lowercase hex`);
 console.log("payloads: COMMIT is 80 bytes, REVEAL = DEPLOY|T|SALT, the 3-field DEPLOY parses with salt null, salts are fresh 16-byte hex");
 
-// ---- SEND: exactly six fields (§2.3) — mirrors protocol.rs parse tests ----------------------------
-// 5 fields (no CHANGE_OUT) → invalid. This is the case the Rust parser used
-// to accept with a "default rule"; both sides now reject it.
+// ---- SEND: exactly six fields (§2.3) — mirrors the indexer's parse tests ----------------------------
+// 5 fields (no CHANGE_OUT) → invalid: no default CHANGE_OUT is ever
+// assumed, on either side.
 assert.equal(parsePayload("LUCKY-20|SEND|T|100|0"), null, "5-field SEND (no CHANGE_OUT) is invalid");
 // 6 fields → valid
 assert.deepEqual(parsePayload("LUCKY-20|SEND|T|100|0|3"), { op: "SEND", ticker: "T", amount: 100, toOutIdx: 0, changeOutIdx: 3 }, "6-field SEND parses");

@@ -29,8 +29,8 @@ export const GRID_ROWS = 6;
 /**
  * The window chips, by real time (GET /digits?days=N). Blocks per day are
  * not fixed, so a window holds however many blocks were mined in it and
- * the chips never show a block count. No 1-day chip (owner, 2026-09-27):
- * its grid was the one window whose size did not match the others.
+ * the chips never show a block count. No 1-day chip: its grid would be
+ * the one window whose size does not match the others.
  */
 export const WINDOWS = [
   { days: 7, label: "1 week" },
@@ -146,9 +146,9 @@ export function gridLayout(digits, rows = GRID_ROWS) {
 }
 
 /**
- * Row-major layout for the digit grid (owner, 2026-09-27: blocks run left to
- * right, then wrap to the next row — oldest top-left, newest in the last
- * row). `rows` rows of ceil(n / rows) columns; block i sits at row
+ * Row-major layout for the digit grid: blocks run left to right, then wrap
+ * to the next row — oldest top-left, newest in the last row. `rows` rows
+ * of ceil(n / rows) columns; block i sits at row
  * floor(i / width), column i % width. Returned as columns (so only the
  * columns in view need drawing), each cell { digit, tier, index, row }.
  */

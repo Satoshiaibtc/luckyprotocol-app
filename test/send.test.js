@@ -1,4 +1,4 @@
-// The Send page (owner decision G, audits portfolio-2 / portfolio-3): carrier
+// The Send page: carrier
 // rows, automatic carrier choice, amount and recipient checks, the §2.3
 // layout the confirm screen shows, the pending outpoints, the route — and
 // one real build through the SEND builder (two carriers, one of them
@@ -113,7 +113,7 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   console.log("send layout: vout0 amount → recipient, vout3 residual + other tickers → you; pending carriers registered");
 }
 
-// ---- ux-7: one message per amount problem; thousands separators accepted -------------------------------------------
+// ---- one message per amount problem; thousands separators accepted -------------------------------------------
 {
   assert.equal(parseSendAmount("1500"), 1500);
   assert.equal(parseSendAmount(" 1,000 "), 1000, "the page prints 1,000 — pasting it works");
@@ -136,7 +136,7 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   console.log("send amount: 1,000 accepted; a bad amount shows one message, never a contradicting second line");
 }
 
-// ---- ux-2: the review shows what was signed, not the live rows ----------------------------------------------------------
+// ---- the review shows what was signed, not the live rows ----------------------------------------------------------
 {
   const keys = [`${TX("a")}:0`];
   const signed = sendReviewModel({ rows, keys, ticker: "LUCKY", amount: 500, toAddress: BC1Q, self: SELF, payloadText: "LUCKY-20|SEND|LUCKY|500|0|3", feeRateSatVb: 2 });
@@ -158,7 +158,7 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   console.log("send review: frozen at signing — the table, the other tickers and the fee rate are the signed ones");
 }
 
-// ---- ux-3: the unconfirmed-sends list clears when a send confirms --------------------------------------------------
+// ---- the unconfirmed-sends list clears when a send confirms --------------------------------------------------
 {
   const m = new Map();
   const storage = { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };

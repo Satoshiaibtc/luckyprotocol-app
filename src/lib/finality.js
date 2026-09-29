@@ -18,7 +18,7 @@ import { isMintedOut } from "./marketBoard.js";
 
 export { isMarketOpen, isMarketPending } from "./marketBoard.js";
 
-/** Confirmations after which a result is final (owner decision, 2026-09-28). */
+/** Confirmations after which a result is final. */
 export const FINAL_DEPTH = 6;
 
 /**

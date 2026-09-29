@@ -60,7 +60,7 @@ assert.equal(chipLabel("okx", "bc1p…62s"), "OKX · bc1p…62s");
 assert.equal(chipLabel("unisat", "bc1p…62s"), "UniSat · bc1p…62s");
 assert.equal(chipLabel("nope", "bc1p…62s"), "bc1p…62s");
 for (const id of PROVIDER_IDS) {
-  // The wallet cards show only the logo, name, status and action (owner, 2026-09-29).
+  // The wallet cards show only the logo, name, status and action.
   assert.equal(PROVIDER_META[id].description, undefined, `${id}: no card description`);
   assert.ok(PROVIDER_META[id].mobileHint.includes("app"), `${id}: phone guidance names the app`);
 }
@@ -141,7 +141,7 @@ assert.equal(isMainnetAddress(null), false);
   assert.equal(defaultProviderId(null, []), null);
 }
 
-// ---- M-8: inscription outpoints from getInscriptions pages ------------------------------------------
+// ---- inscription outpoints from getInscriptions pages ------------------------------------------
 {
   const A = "aa".repeat(32);
   const B = "bb".repeat(32);
@@ -221,7 +221,7 @@ assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, FEES), 8);
 assert.equal(resolveFeeRate({ kind: "preset", id: "slow" }, FEES), 5);
 assert.equal(resolveFeeRate({ kind: "preset", id: "economy" }, FEES), 3);
 assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, null), null, "no /fees → preset resolves to null (action disabled)");
-assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: 50_000 }), null, "a /fees value above the cap is REJECTED, not clamped (L-11)");
+assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: 50_000 }), null, "a /fees value above the cap is REJECTED, not clamped");
 assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: MAX_FEE_RATE_SAT_VB + 1 }), null);
 assert.equal(resolveFeeRate({ kind: "preset", id: "fast" }, { fastestFee: MAX_FEE_RATE_SAT_VB }), MAX_FEE_RATE_SAT_VB, "exactly the cap is allowed");
 assert.equal(resolveFeeRate({ kind: "preset", id: "normal" }, { fastestFee: 12, halfHourFee: null }), null, "a missing key is unavailable, never a default");
@@ -264,7 +264,7 @@ assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.lengt
   assert.equal(isUsableFeeRate("2"), false, "a string is not a rate");
 }
 
-// ---- fee choice: custom validation — out of range is unusable, never clamped (audit usertx-8) -------
+// ---- fee choice: custom validation — out of range is unusable, never clamped -------
 {
   assert.deepEqual(clampCustomFee("27"), { value: 27, error: null });
   assert.deepEqual(clampCustomFee(" 1 "), { value: 1, error: null });
@@ -318,7 +318,7 @@ assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.lengt
   }
 }
 
-// ---- high custom rates need an explicit confirmation (audit usertx-8) -----------------------------------
+// ---- high custom rates need an explicit confirmation -----------------------------------
 {
   assert.equal(highFeeThreshold(null), HIGH_FEE_MIN_SAT_VB, "no estimates → the absolute floor");
   assert.equal(highFeeThreshold({ fastestFee: 12 }), HIGH_FEE_MIN_SAT_VB, "2 × 12 is below the floor");

@@ -43,7 +43,7 @@ const EMPTY = {
  *             FINAL_DEPTH (the indexer's applied height from the app's
  *             health, or the server's own count — the larger)
  *
- * `dropped` (audit usertx-2 / usertx-6): the indexer's node has reported the
+ * `dropped`: the indexer's node has reported the
  * tx unknown (`seen:false` — not in its mempool, not confirmed) for longer
  * than DROP_GRACE_MS since it was last seen. That is not proof it is gone
  * (the node may simply not have it), so it is re-checked every

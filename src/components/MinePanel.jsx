@@ -63,13 +63,13 @@ const FEE_LOG_MIN_MS = 10 * 60_000;
  *
  * The button is held only while a MINE is being assembled, signed or
  * broadcast: once broadcast it joins the pending list and another MINE can
- * be started at once (decision F, audit mine-5).
+ * be started at once.
  */
 export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   const { wallet, fee, fees, indexerOk, tipBlock, refreshAll, health, sync } = useApp();
   // Before the activation height the indexer ignores every protocol tx, so a
   // MINE would only cost fees — lock the button and say when it opens. An
-  // unknown tip counts as pre-activation (fail closed, audit L-12).
+  // unknown tip counts as pre-activation (fail closed).
   const tipNow = health.data?.tip_height ?? null;
   const preActivation = activationState(tipNow).locked;
   const settled = useCallback(() => {
@@ -93,7 +93,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   const supply = tokenInfo?.supply ?? 0;
   const exhausted = !!tokenInfo && minted >= supply;
   // Near the cap a MINE is credited at most what is left — and 0 when other
-  // MINEs confirm first (spec §3). Said before signing (audit mine-1).
+  // MINEs confirm first (spec §3). Said before signing.
   const remaining = tokenInfo ? Math.max(0, supply - minted) : null;
   const nearCap = !exhausted && remaining !== null && remaining < YIELD_HIGH;
   const feeRate = fee.satVb;
@@ -109,7 +109,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   const connected = wallet.status === "connected";
   // While the indexer is behind the tip, `minted` (and so "supply left") is
   // older than the chain: a ticker may already be exhausted in a block it
-  // has not applied, and a MINE then pays 546 + fee for 0 (audit usertx-1).
+  // has not applied, and a MINE then pays 546 + fee for 0.
   const lagText = indexerOk ? syncPauseText(sync, "mining") : null;
   // A brand-new ticker opens to mining at its DEPLOY's 2nd confirmation: a
   // MINE in the DEPLOY's block is invalid, and one a reorganization puts
@@ -220,7 +220,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
         if (item.resumed) {
           // Picked up again after a reload / a return: one line with the
           // original broadcast time — no "accepted" / "awaiting block #tip+1"
-          // claims until /tx-status has answered (audit mine-9).
+          // claims until /tx-status has answered.
           push(resumedLine(item.txid, item.broadcastAt));
         } else {
           const tip = tipRef.current?.height ?? tipNowRef.current;
@@ -247,7 +247,7 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
         setStage(item.txid, "confirmed");
       }
       // The ✓ yours banner waits for the indexer's credit: near the cap the
-      // tier and the credit differ (audit mine-1). It says "provisional"
+      // tier and the credit differ. It says "provisional"
       // until the block is final; the final line follows then.
       if (item.phase === "confirmed" && item.reconcile && item.reconcile !== "pending" && stageOf(item.txid) === "confirmed") {
         push(againAfterReorg(settledYoursLine(ticker, item), item.reorgs));

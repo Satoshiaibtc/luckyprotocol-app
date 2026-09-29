@@ -1,5 +1,5 @@
-// Buyer-side carrier checks for a fill (PROTOCOL.md §7.2 step 3, audit
-// trading-2) — pure, unit-tested in test/listingrules.test.js.
+// Buyer-side carrier checks for a fill (PROTOCOL.md §7.2 step 3) — pure,
+// unit-tested in test/listingrules.test.js.
 //
 // `sellerCarrierCheck` judges the indexer's own word on the listed
 // outpoint: `GET /utxos/:seller` must still list it carrying exactly

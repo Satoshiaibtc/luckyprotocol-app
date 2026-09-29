@@ -4,7 +4,7 @@
 //   * dust (≤546) and token-bearing outpoints are never selected as inputs
 //   * vout0 546 → self/recipient, vout1 546 → PROJECT_FEE_ADDRESS, vout2 OP_RETURN
 //   * MINE folds sub-dust change into the fee
-//   * SEND (H-1(A)): every token carrier is exactly 546 sats — vout0 recipient
+//   * SEND (§2.3): every token carrier is exactly 546 sats — vout0 recipient
 //     slot, vout3 residual slot (ALWAYS present) — and BTC change is a separate
 //     vout4 that folds into the fee when sub-dust; payload stays |0|3
 //   * P2TR inputs carry tapInternalKey; P2WPKH inputs do not
@@ -162,7 +162,7 @@ for (const feeRateSatVb of RATES) {
   }
 }
 
-// The regression: a single-input P2WPKH MINE estimates 213.5 vB (→ 214 on
+// Rounding: a single-input P2WPKH MINE estimates 213.5 vB (→ 214 on
 // the node). ceil(213.5 × 3) = 641 is one sat under the node's 214 × 3.
 {
   const r = buildMinePsbt({ address: p2wpkhAddr, pubkeyHex: P2WPKH_PUB, utxos: [{ txid: T(4), vout: 2, sats: 90_000 }], tokenOutpoints: [], feeRateSatVb: 3, ticker: "LUCKY" });
@@ -212,14 +212,14 @@ assert.throws(
   /no spendable BTC/,
 );
 
-// ---- SEND layout (H-1(A)) -------------------------------------------------------------------------
+// ---- SEND layout (§2.3) -------------------------------------------------------------------------
 //   vout0 546 → recipient · vout1 546 → fee · vout2 OP_RETURN |0|3 · vout3 546 → self (residual
 //   slot, always) · vout4 BTC change → self (only when ≥ 546)
 assert.equal(SEND_TO_OUT, 0);
 assert.equal(SEND_CHANGE_OUT, 3);
 assert.equal(SEND_BTC_CHANGE_VOUT, 4);
 
-/** Assert the fixed part of the H-1(A) SEND layout; returns the parsed tx parts. */
+/** Assert the fixed part of the §2.3 SEND layout; returns the parsed tx parts. */
 function checkSendLayout(label, r, { self, to, payload }) {
   const { ins, outs } = parse(r.psbtHex);
   assert.ok(outs.length === 4 || outs.length === 5, `${label}: 4 outputs (change folded) or 5 (with change), got ${outs.length}`);
@@ -434,7 +434,7 @@ assert.throws(
   console.log("psbt REVEAL: carrier as input 0 (nSequence 1: never in its COMMIT's block), proof / 5,460 fee / DEPLOY|T|SALT / change, nLockTime 969,299");
 }
 
-// ---- nLockTime + RBF on MINE and SEND too (decision B) ---------------------------------------------
+// ---- nLockTime + RBF on MINE and SEND too ---------------------------------------------
 {
   const m = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
   const sd = buildSendPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, tokenUtxos: [{ txid: T(3), vout: 0, sats: 20_000 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr });
@@ -502,7 +502,7 @@ assert.throws(
   console.log("psbt speed up: same inputs / outputs / lock time, fee from the change, BIP125 minimum bump");
 }
 
-// ---- M-8: fee-input floor on non-asset-safe UTXO lists ----------------------------------------------
+// ---- fee-input floor on non-asset-safe UTXO lists: an inscription or rune could sit on a small output ----------------------------------------------
 {
   assert.equal(MIN_FEE_INPUT_SATS_UNSAFE, 10_000);
   assert.equal(minFeeInputSats(true), 0, "asset-safe list: no floor");
@@ -512,7 +512,7 @@ assert.throws(
   // filterSpendable: the §4 rules always apply; the floor drops the 3,000-sat output too
   assert.deepEqual(filterSpendable(utxos, tokenOutpoints).map((u) => u.sats), [3_000, 90_000]);
   assert.deepEqual(filterSpendable(utxos, tokenOutpoints, { minSats: 10_000 }).map((u) => u.sats), [90_000]);
-  // Audit usertx-3: ord's default postage IS 10,000 sats — an output of exactly the floor is excluded.
+  // ord's default postage IS 10,000 sats — an output of exactly the floor is excluded.
   assert.deepEqual(filterSpendable([{ txid: T(7), vout: 0, sats: 10_000 }], [], { minSats: 10_000 }).map((u) => u.sats), [], "exactly the floor is excluded");
   assert.deepEqual(filterSpendable([{ txid: T(7), vout: 0, sats: 10_001 }], [], { minSats: 10_000 }).map((u) => u.sats), [10_001], "one sat above qualifies");
   // …and on a list that is not asset-safe the builder selects largest-first,
@@ -564,7 +564,7 @@ assert.throws(
   console.log("psbt floor: non-asset-safe lists never spend outputs of 10,000 sats or less, and select largest-first");
 }
 
-// ---- trading-3: an output worth no more than its own input fee is never selected ------------------------
+// ---- an output worth no more than its own input fee is never selected ------------------------
 {
   // 20 sat/vB: a P2TR input costs ceil(57.5 × 20) = 1,150 sats, more than an 800-sat output is worth.
   assert.equal(inputCostSats("tr", 20), 1_150);
@@ -584,7 +584,7 @@ assert.throws(
   console.log("psbt selection: uneconomic outputs skipped; largest-first available");
 }
 
-// ---- M-1: sign-time payload guard ---------------------------------------------------------------
+// ---- sign-time payload guard ---------------------------------------------------------------
 {
   const mine = buildMinePsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "LUCKY" });
   assert.deepEqual(expectPsbtPayload(mine.psbtHex, { op: "MINE", ticker: "LUCKY" }), { op: "MINE", ticker: "LUCKY" });

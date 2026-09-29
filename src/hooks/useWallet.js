@@ -25,7 +25,7 @@ const IDLE_WALLET = {
  * error the WALLET threw for a prompt the user refused (wallet.walletError
  * tags those) — never for a node rejection that merely contains "reject",
  * e.g. Core's "insufficient fee, rejecting replacement" after a successful
- * signature (audit usertx-9); that one is shown as what it is.
+ * signature; that one is shown as what it is.
  */
 export function friendlyError(e) {
   const msg = String(e?.message || e || "unknown error");
@@ -42,7 +42,7 @@ export function friendlyError(e) {
  * The wallet state after a `connect()` attempt that failed with `message`.
  * A failed or declined SWITCH (`prev` was a live session and the attempt
  * was for another provider) keeps that session exactly as it was, so every
- * in-flight flow keyed on the address survives (audit wallet-2). Any other
+ * in-flight flow keyed on the address survives. Any other
  * failure leaves the wallet disconnected. `hasProvider` = a real provider is
  * injected. Pure; tested in test/wallet.test.js.
  */
@@ -175,7 +175,7 @@ export function useWallet({ onDisconnect } = {}) {
     }
   }, [connect]);
 
-  // Keep the balance current while connected (audit wallet-5): a slow
+  // Keep the balance current while connected: a slow
   // interval, whenever the tab comes back into view, and right after (and
   // again shortly after) every broadcast of this wallet.
   const connectedNow = w.status === "connected";

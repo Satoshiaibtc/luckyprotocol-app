@@ -135,7 +135,7 @@ const keep = (l) => {
   assert.equal(bl.lit, false, "a deploy never lights a digit");
   assert.equal(bl.tier, null);
   const e = keep(errorLine("Signature request was cancelled in the wallet.", T0, T0));
-  assert.equal(e.text, "stopped: Signature request was cancelled in the wallet.", "a neutral prefix — nothing claims someone rejected it (audit create-7)");
+  assert.equal(e.text, "stopped: Signature request was cancelled in the wallet.", "a neutral prefix — nothing claims someone rejected it");
   console.log("deploylog: shared wallet / fee / tip / sign / broadcasting / accepted / block / error lines");
 }
 
@@ -292,7 +292,7 @@ const keep = (l) => {
   console.log("commitReveal: record stored before signing, stages, tamper-proof hash, storage fallback");
 }
 
-// ---- LENS-3 / LENS-4: a draft is never deleted under a signature, and never overwritten -------------------------
+// ---- a draft is never deleted under a signature, and never overwritten -------------------------
 {
   const SALT_A = "0123456789abcdef0123456789abcdef";
   const SALT_B = "fedcba9876543210fedcba9876543210";
@@ -330,7 +330,7 @@ const keep = (l) => {
   console.log("commitReveal: a second Reserve is refused while a reservation is open; a changed / discarded draft is never claimed (nothing broadcast)");
 }
 
-// ---- LENS-2 / ux-1: a replaced or unseen step is never given up --------------------------------------------------
+// ---- a replaced or unseen step is never given up --------------------------------------------------
 {
   const TX_A = "1".repeat(64);
   const TX_B = "2".repeat(64);
@@ -371,7 +371,7 @@ const keep = (l) => {
   console.log("commitReveal: every version of a sped-up / unseen step is checked; the salt is kept until one confirms or the user abandons");
 }
 
-// ---- LENS-4 / rvs-1: publish only through our own, valid reservation ---------------------------------------------
+// ---- publish only through our own, valid reservation ---------------------------------------------
 {
   const SALT = "00112233445566778899aabbccddeeff";
   const rec = normalizeDeployRecord({ ticker: "NEW", salt: SALT, carrierScript: SPK, createdAt: T0, commit: { txid: TXID, sentAt: T0, height: 969_400 } });
@@ -433,7 +433,7 @@ const keep = (l) => {
   assert.equal(ph(rec(conf), { commitStatus: null }), "recording", "404: not recorded yet");
   assert.equal(ph(rec(conf), { commitStatus: "open", row: null }), "settling", "1 confirmation: Publish waits for the 2nd");
   assert.equal(ph(rec(conf), { commitStatus: "open", row: null, tip: 969_401 }), "ready");
-  assert.equal(ph(rec(conf), { commitStatus: "open", tip: 969_401 }), "recording", "ux-5: never ready before the registry row was read");
+  assert.equal(ph(rec(conf), { commitStatus: "open", tip: 969_401 }), "recording", "never ready before the registry row was read");
   const other = (h) => ({ deploy_txid: OTHER_TXID, deploy_block: h });
   assert.equal(ph(rec(conf), { commitStatus: "open", row: other(969_395) }), "taken", "another deploy took the name before the publish — final (6 deep)");
   assert.equal(ph(rec(conf), { commitStatus: "open", row: other(969_396) }), "taken-tentative", "…5 deep: a chain reorganization could still undo it");

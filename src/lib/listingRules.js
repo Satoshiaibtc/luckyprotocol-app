@@ -1,22 +1,22 @@
 // The order book's listing acceptance rules the app checks BEFORE a listing
-// is signed or published (PROTOCOL.md §7.4, owner decision D, audits
-// trading-1 / trading-4) — pure, unit-tested in test/listingrules.test.js.
+// is signed or published (PROTOCOL.md §7.4) — pure, unit-tested in
+// test/listingrules.test.js.
 //
-//   trading-1  a listing no fill could ever relay is refused: the unsigned
+//   shape      a listing no fill could ever relay is refused: the unsigned
 //              tx's nVersion must be 1 or 2, input 0's nSequence must have
 //              the relative-lock-time disable bit set (≥ 0x80000000, which
 //              covers 0xFFFFFFFD / 0xFFFFFFFE / 0xFFFFFFFF), nLockTime 0,
 //              exactly 1 input + 1 output. The seller's 0x83 signature
 //              commits to all of these, so a buyer cannot repair them.
-//   trading-4  per outpoint the book keeps the CHEAPEST live signed
+//   cheapest   per outpoint the book keeps the CHEAPEST live signed
 //              listing: a signed listing is a bearer instrument that stays
 //              fillable on-chain, so a higher re-listing would show a price
 //              nobody has to pay. Raising the price therefore means
 //              Withdraw first (move the tokens on-chain), then list the new
 //              carrier; the same or a lower price replaces the listing.
 //              The indexer keeps guarding it after the book dropped the
-//              listing (TTL, eviction — the "listing floor", audit rvs-3).
-//   rvs-2      the first output of a step-1 reservation (COMMIT) that can
+//              listing (TTL, eviction — the "listing floor").
+//   reserved   the first output of a step-1 reservation (COMMIT) that can
 //              still be published is never listed: a listing's signature
 //              covers only that output and the payment, so a buyer could
 //              publish the reserved ticker with the seller named creator.
@@ -130,14 +130,14 @@ export function listingCapDecision(quota, outpointId) {
   return { ok: true, kind: "new", used, cap };
 }
 
-/** The order book's exact trading-4 refusal (a higher price for a listed outpoint). */
+/** The order book's exact refusal of a higher price for a listed outpoint. */
 export const WITHDRAW_FIRST_TEXT = "withdraw first: the cheaper signed listing stays fillable on-chain";
 
-/** The order book's exact rvs-2 refusal (the first output of an open reservation). */
+/** The order book's exact refusal of the first output of an open reservation. */
 export const COMMIT_CARRIER_LISTING_TEXT =
   "outpoint reserves a ticker (the output of an open COMMIT, step 1 of a deploy): a listing of it would let the buyer publish that ticker with you named as its creator. Move it with a send to yourself, or publish your ticker, before listing";
 
-/** The same rule in plain words for the sell form (audit rvs-2). */
+/** The same rule in plain words for the sell form. */
 export const COMMIT_CARRIER_PLAIN_TEXT =
   "This output holds a ticker reservation: it is the first output of a step 1 (Reserve) transaction that can still be published. A listing's signature covers only this output and your payment, so a buyer could use it to publish that reserved ticker with you named as its creator. Move it with a send to yourself (or publish your own reservation) before listing it.";
 
@@ -164,7 +164,7 @@ export function listingSequenceOk(sequence) {
 }
 
 /**
- * The trading-1 problems of a listing PSBT (hex) — [] when the order book
+ * The shape problems of a listing PSBT (hex) — [] when the order book
  * would accept its shape. Each entry is one plain sentence.
  */
 export function listingShapeProblems(psbtHex) {

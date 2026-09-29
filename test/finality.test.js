@@ -1,8 +1,7 @@
-// Confirmation depth and finality (owner decision, 2026-09-28: FINAL_DEPTH
-// = 6): the pure helpers in src/lib/finality.js, the new-ticker mining gate
-// and the end-of-supply warning in src/lib/statusText.js, and the pure
-// watch behind every tracked transaction (src/hooks/useTxStatus.js). Plain
-// Node, no framework.
+// Confirmation depth and finality (FINAL_DEPTH = 6): the pure helpers in
+// src/lib/finality.js, the new-ticker mining gate and the end-of-supply
+// warning in src/lib/statusText.js, and the pure watch behind every tracked
+// transaction (src/hooks/useTxStatus.js). Plain Node, no framework.
 import assert from "node:assert/strict";
 import {
   FINAL_DEPTH,

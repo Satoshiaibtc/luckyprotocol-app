@@ -1,10 +1,10 @@
-// Concurrent MINEs (owner decision F, audit mine-5) — the pure part of the
+// Concurrent MINEs — the pure part of the
 // mine console's state, unit-tested in test/minepending.test.js.
 //
-// The console used to hold ONE flow: while a MINE waited for its block the
-// button said "Awaiting block" and stayed locked for ten minutes or more.
-// Now a MINE leaves the build → sign → broadcast flow the moment it is
-// broadcast and joins a PENDING LIST; the button is free again at once.
+// A MINE leaves the build → sign → broadcast flow the moment it is
+// broadcast and joins a PENDING LIST, so the button is free again at once
+// instead of saying "Awaiting block" and staying locked for the ten
+// minutes or more a block can take.
 // Each pending item is tracked on its own (tx status → confirmed → the
 // indexer's credit → final), and the inputs of every pending tx stay
 // excluded from the next build through the existing broadcast records
@@ -46,7 +46,7 @@ export function newPendingMine({ txid, ticker, broadcastAt = Date.now() }) {
 /**
  * The items to open the console with for `ticker`: every MINE record this
  * browser keeps for it (unconfirmed, or confirmed but not final and shown
- * yet — audit mine-4), oldest first, as resumed "pending" items. The first
+ * yet), oldest first, as resumed "pending" items. The first
  * /tx-status answer moves a confirmed one straight on to its reveal.
  */
 export function resumeMinePendings(records, ticker) {
@@ -137,8 +137,8 @@ function confirmedIn(item, { block_height, block_hash, block_time, confirmations
  *
  *   pending    confirmed → confirmed (the tier from the block hash);
  *              unknown to the node for longer than `graceMs` since it was
- *              last seen (or broadcast) → dropped (replaced or evicted,
- *              audit usertx-6) — but only while `trustUnseen`: while the
+ *              last seen (or broadcast) → dropped (replaced or evicted)
+ *              — but only while `trustUnseen`: while the
  *              indexer lags or its node has no peers, "unknown" means
  *              nothing and the clock does not run
  *   dropped    confirmed after all → confirmed; seen again → pending

@@ -43,7 +43,7 @@ function writeStoredChoice(choice) {
  *                          (the second source standing in, or its higher Fast), else null
  *   fee.highFee          → null, or { satVb, threshold, fastest, pending } when the
  *                          custom rate is above max(50, 2 × fastestFee): satVb stays
- *                          null until fee.ackHighFee() (audit usertx-8)
+ *                          null until fee.ackHighFee()
  *   fee.pickPreset(id) / fee.pickCustom() / fee.setCustomText(text) / fee.ackHighFee()
  *
  * Options: `{ preset, persist = true }` — `preset` starts from that preset

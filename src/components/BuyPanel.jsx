@@ -46,7 +46,7 @@ const CHECK_ORDER = [
  * sheet it opens. `order` is the ask selected in the order book (or null).
  * The bar shows what the fill costs at the shared fee choice; Confirm opens
  * the sheet, which runs the five §7.2 checks, then the second-source check
- * (audit M-12), then signs and broadcasts.
+ * of the listed outpoint, then signs and broadcasts.
  */
 export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd = null }) {
   const { wallet: w, address, fee, indexerOk, refreshAll } = useApp();
@@ -88,7 +88,7 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
 
   // The node has not seen the fill for a while — a competing fill or a
   // withdrawal may have replaced it, or the node may just not have it: say
-  // so and keep checking (audit usertx-6).
+  // so and keep checking.
   useEffect(() => {
     if (status.dropped) setFlow((f) => (f.phase === "pending" ? { ...f, phase: "unseen", note: droppedMessage(f.txid, "fill") } : f));
     else setFlow((f) => (f.phase === "unseen" ? { ...f, phase: "pending", note: null } : f));
@@ -235,7 +235,7 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
 
       {/* Portalled to <body>: inside the sticky .buybar-wrap (its own stacking
           context, z 6) the sheet painted under the top bar (z 20) and the
-          phone tab bar (z 30) — Close and Sign sat under them (audit market-3). */}
+          phone tab bar (z 30) — Close and Sign sat under them. */}
       {sheetOpen &&
         sheetOrder &&
         createPortal(
@@ -263,10 +263,10 @@ async function buildFill(full, addr, pubkeyHex, rate, onWait, signal) {
       utxos: utxoRes.utxos,
       tokenOutpoints: withPending(tokenRows.map(({ txid, vout }) => ({ txid, vout })), addr),
       feeRateSatVb: rate,
-      minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8: an inscribed sat here would go to the seller
+      minInputSats: minFeeInputSats(utxoRes.assetSafe), // an inscribed sat on a small output would go to the seller
     });
   } catch (e) {
-    // Not enough (confirmed) BTC: say why in plain words (audit wallet-3).
+    // Not enough (confirmed) BTC: say why in plain words.
     const plain = fundingMessage(e, utxoRes, { action: "this fill" });
     throw plain ? new Error(plain) : e;
   }
@@ -282,7 +282,7 @@ const SECOND_IDLE = { state: "pending", detail: "", reasons: [], notes: [] };
 
 /**
  * The buy sheet: the five mandatory §7.2 checks (1, 2, 4, 5 from the PSBT
- * against the OrderView; 3 a live read), then the M-12 second-source
+ * against the OrderView; 3 a live read), then the independent second-source
  * check of the listed outpoint against mempool.space, the plain-words
  * explanation, the totals, and the sign → broadcast → confirm flow.
  */
@@ -292,7 +292,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
   const [second, setSecond] = useState(SECOND_IDLE);
   const [ack, setAck] = useState(false);
   // A separate, explicit confirmation for a carrier whose AMOUNT the second
-  // source cannot confirm (audit trading-2) — never the same tick as the
+  // source cannot confirm — never the same tick as the
   // "second source unreachable" one.
   const [amountAck, setAmountAck] = useState(false);
   const [full, setFull] = useState(null);
@@ -301,7 +301,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
   const sheetRef = useRef(null);
   const busy = BUSY.has(flow.phase);
   // The block that completed the supply — the only block whose MINE may
-  // carry a §3 partial credit (audit consensus-5). A primitive, so the
+  // carry a §3 partial credit. A primitive, so the
   // token poll behind the sheet does not re-run the checks.
   const capHeight = Number.isInteger(token?.minted_out_height) ? token.minted_out_height : null;
   // Dialog semantics: focus moves in, Tab cycles inside, Esc closes (while
@@ -364,7 +364,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
           const utxos = await indexer.tokenUtxos(o.seller);
           if (run !== runRef.current) return;
           // Exactly { TICKER: amount } with amount > 0 — a zero-token carrier
-          // is never buyable (audit trading-2).
+          // is never buyable.
           const c = sellerCarrierCheck(carrierRowOf(utxos, o.id), o);
           liveOk = c.ok;
           liveDetail = c.detail;
@@ -380,7 +380,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
         setSecond({ state: "skipped", detail: "not consulted — the indexer checks failed first", reasons: [], notes: [] });
         return;
       }
-      // M-12: a second, independent source must describe the same UTXO.
+      // A second, independent source must describe the same UTXO.
       const L = parseListing(o.psbt);
       const [txid, vout] = o.id.split(":");
       const listing = { txid, vout: Number(vout), carrierSats: o.carrier_sats, scriptHex: L.input0?.witnessUtxo?.script ? hex.encode(L.input0.witnessUtxo.script) : "", ticker: o.ticker, amount: o.amount, capHeight };
@@ -407,7 +407,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
   const secondOk = secondSourceAllowsSigning(second.state, { unreachableAck: ack, unverifiedAck: amountAck });
   const quote = fillQuote({ order, address: w.address || order.seller, feeRateSatVb: fee.satVb });
 
-  // Audit trading-3: the quote assumes ONE buyer input. Once the listing
+  // The quote assumes ONE buyer input. Once the listing
   // verified, build the fill for real (nothing is signed) so the sheet and
   // the Sign button show the exact total the wallet will be asked for.
   const [dry, setDry] = useState(null); // { rate, loading, waitNote? } | { rate, totalSats, feeSats, inputCount } | { rate, error }
@@ -472,7 +472,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
       const rate = requireRate(fee.satVb);
       // Right before the wallet opens: the indexer must STILL list the
       // outpoint with exactly { TICKER: amount }, amount > 0 — a carrier that
-      // was emptied since the sheet opened is never signed (audit trading-2).
+      // was emptied since the sheet opened is never signed.
       const carrier = sellerCarrierCheck(carrierRowOf(await indexer.tokenUtxos(full.seller), full.id), full);
       if (!carrier.ok) throw new Error(`Not signed: ${carrier.detail}.`);
       // The indexer may be scanning this address first (first use, or again
@@ -494,7 +494,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
         return;
       }
       setFlow({ phase: "signing", feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, totalSats: built.totalSats, inputs: built.inputs, assetSafe: built.assetSafe, detail: `${built.inputIndexes.length} input${built.inputIndexes.length === 1 ? "" : "s"} from your wallet` });
-      // Sign-time guard (M-1): a fill is a SEND of exactly this order — never
+      // Sign-time guard: a fill is a SEND of exactly this order — never
       // sign a PSBT whose OP_RETURN says anything else.
       expectPsbtPayload(built.psbtHex, { op: "SEND", ticker: full.ticker, amount: full.amount });
       // Buyer signs ONLY inputs 1..n; input0 keeps the seller's 0x83 signature.
@@ -692,7 +692,7 @@ function BuySheet({ order, ticker, token, usd, flow, setFlow, status, seedWait, 
         ) : (
           <div className="sheet-actions">
             <button className="btn btn-primary btn-lg" type="button" onClick={confirm} disabled={!canConfirm}>
-              {/* "Sign with", not "Sign in": a translated page would read it as a login (audit market-9). */}
+              {/* "Sign with", not "Sign in": a translated page would read it as a login. */}
               {flow.phase === "idle" || flow.phase === "error" ? `Sign with ${w.providerName || "your wallet"} · pay ${totalSats != null ? fmtSats(totalSats) : "—"}` : flow.phase === "confirmed" ? "Filled" : "Working…"}
             </button>
             {(flow.phase === "error" || flow.phase === "confirmed") && (

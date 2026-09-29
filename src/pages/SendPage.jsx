@@ -23,9 +23,9 @@ const SEND_TO_OUT = 0;
 const SEND_CHANGE_OUT = 3;
 
 /**
- * Send any LUCKY-20 token (owner decision G): to another address, or to
+ * Send any LUCKY-20 token: to another address, or to
  * yourself — which is how a carrier is split, including a carrier that
- * holds several tickers (audits portfolio-2 / portfolio-3). One SEND in the
+ * holds several tickers. One SEND in the
  * §2.3 reference layout: vout0 546 sats → recipient with the amount,
  * vout1 546 → protocol fee, vout2 OP_RETURN, vout3 546 → you (the rest of
  * this ticker and every other ticker on the carriers spent), vout4 BTC
@@ -49,8 +49,8 @@ export default function SendPage({ ticker, params = {} }) {
     },
   });
 
-  // This browser's own unconfirmed sends are re-checked on the page's poll
-  // (audit ux-3): a confirmed or dropped one leaves the store, so the
+  // This browser's own unconfirmed sends are re-checked on the page's poll:
+  // a confirmed or dropped one leaves the store, so the
   // "unconfirmed sends" list clears and its carriers are free again.
   const [recTick, setRecTick] = useState(0);
   useEffect(() => {
@@ -88,7 +88,7 @@ export default function SendPage({ ticker, params = {} }) {
   const [mode, setMode] = useState(params.utxo ? "manual" : "auto"); // auto: carriers follow the amount
   const [manual, setManual] = useState(() => (params.utxo ? [String(params.utxo).toLowerCase()] : []));
   const [step, setStep] = useState("form"); // form | review
-  // What was signed, frozen at the click (audit ux-2): the review shows THIS
+  // What was signed, frozen at the click: the review shows THIS
   // while the send is in flight, not a model rebuilt from the live rows.
   const [sent, setSent] = useState(null);
   // The confirm screen sits under the form on a phone: bring it into view when it opens.
@@ -195,7 +195,7 @@ export default function SendPage({ ticker, params = {} }) {
 
   const inFlight = chain.phase !== "idle";
   const toSelf = rcpt.state === "ok" && rcpt.self;
-  // The review: the live form until Sign, then what was signed (ux-2).
+  // The review: the live form until Sign, then what was signed.
   const review = inFlight && sent ? sent : sendReviewModel({ rows, keys, ticker, amount: amount || 0, toAddress: rcpt.address, self: address, payloadText, feeRateSatVb: fee.satVb });
   const reviewSelf = review.toSelf;
   // vout0's 546 sats leave with the tokens — unless vout0 pays yourself (a split).

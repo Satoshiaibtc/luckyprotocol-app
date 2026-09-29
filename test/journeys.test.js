@@ -1,6 +1,5 @@
-// Pure-part tests for the 2026-09-27 user-journey fixes (visit / wallet /
-// create / mine / portfolio / market). Each block names the audit id it
-// covers. Plain Node, no framework.
+// Pure-part tests for the user journeys (visit / wallet / create / mine /
+// portfolio / market). Plain Node, no framework.
 import assert from "node:assert/strict";
 import { ACTIVATION_HEIGHT, PROTOCOL_LOCKTIME } from "../src/lib/payloads.js";
 import { UNLOCK_HEIGHT, activationBannerText, activationNotice, activationState, blocksEtaText, blocksText, countdownText, lockedHint } from "../src/lib/activation.js";
@@ -31,10 +30,10 @@ import { emptyBoardState, isMintedOut } from "../src/lib/marketBoard.js";
 const TX = (c) => c.repeat(64);
 const ADDR = MOCK_WALLET.address;
 
-// ---- visit-3 / visit-5 + decision B: one activation wording, "1 block", the gate one block early -----
+// ---- one activation wording, "1 block", the gate one block early -----
 {
   assert.deepEqual(activationState(null), { locked: true, unknown: true, blocksLeft: null, active: false, blocksToActivation: null }, "unknown tip fails closed");
-  // Decision B (2026-09-27): Reserve and Mine unlock at tip ACTIVATION_HEIGHT − 1 (969,299) —
+  // Reserve and Mine unlock at tip ACTIVATION_HEIGHT − 1 (969,299) —
   // every tx the app builds has nLockTime 969,299, so none can confirm before 969,300.
   assert.equal(UNLOCK_HEIGHT, ACTIVATION_HEIGHT - 1);
   assert.equal(UNLOCK_HEIGHT, PROTOCOL_LOCKTIME, "the gate opens exactly where the lock time allows the next block");
@@ -62,10 +61,10 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(activationBannerText(ACTIVATION_HEIGHT), null, "no banner once active");
   assert.equal(activationBannerText(ACTIVATION_HEIGHT + 5), null, "no banner after activation");
   assert.match(lockedHint(), /Locked until block #969,299/);
-  console.log("activation: gate opens at 969,299 (decision B), one countdown wording, singular '1 block', banner until 969,300");
+  console.log("activation: gate opens at 969,299, one countdown wording, singular '1 block', banner until 969,300");
 }
 
-// ---- visit-1 / visit-2: the board's empty states -------------------------------------------------------
+// ---- the board's empty states -------------------------------------------------------
 {
   const LUCKY = { ticker: "LUCKY", supply: 21_000_000, minted: 1_234_800, mine_count: 3, deploy_block: 969_301 };
   const BLOK = { ticker: "BLOK", supply: 21_000_000, minted: 21_000_000, minted_out: true, minted_out_height: 969_700, mine_count: 9, deploy_block: 969_302 };
@@ -87,7 +86,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("board: a filter on the Minted out view that matches a minting token says so; 'no match' only when nothing matches");
 }
 
-// ---- create-5 / create-9: clean first, cut after; the caret stays put ------------------------------------
+// ---- clean first, cut after; the caret stays put ------------------------------------
 {
   assert.deepEqual(cleanTickerInput("    LUCKY"), { ticker: "LUCKY", note: "Spaces and symbols were removed — a ticker uses only A–Z and 0–9." });
   assert.equal(cleanTickerInput("$LUCKYCAT").ticker, "LUCKYCAT", "cleaned before it is cut: not LUCKYCA");
@@ -105,7 +104,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("ticker input: cleaned then cut, said out loud; the caret keeps its place");
 }
 
-// ---- wallet-3 / create-7: plain funding errors ---------------------------------------------------------------
+// ---- plain funding errors ---------------------------------------------------------------
 {
   const none = noSpendableError(ADDR, 0);
   assert.equal(none.code, "no-spendable");
@@ -129,7 +128,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("funding: 'wait for a confirmation' when the BTC is only unconfirmed; plain need/have with a next step");
 }
 
-// ---- visit-6 / mine-7 / mine-8: the idle line says why the button is off ------------------------------------
+// ---- the idle line says why the button is off ------------------------------------
 {
   const base = { connected: true, indexerOk: true, preActivation: false, exhausted: false, lagText: null, ticker: "BLOK" };
   assert.equal(mineIdleReason(base), null);
@@ -146,7 +145,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("status: the reason MINE / Create is off; Ready warns a wallet without an asset-safe list");
 }
 
-// ---- create-8: the click-time lag error says nothing was sent ----------------------------------------------------
+// ---- the click-time lag error says nothing was sent ----------------------------------------------------
 {
   const lag = syncStateOf({ indexed_height: 969_798, tip_height: 969_800 });
   assert.equal(syncRetryText(lag, "LAG1's availability"), "Nothing was sent: the indexer is 2 blocks behind the chain tip (#969,798 of #969,800), so LAG1's availability could be out of date. Press Create again once it has caught up.");
@@ -156,7 +155,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("sync: a click-time lag error says nothing was sent and to press again");
 }
 
-// ---- mine-4 / create-3 / portfolio-1: records that resume, trim and name own spends ------------------------------------
+// ---- records that resume, trim and name own spends ------------------------------------
 {
   const mem = new Map();
   const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
@@ -179,7 +178,7 @@ const ADDR = MOCK_WALLET.address;
   const d = resumeDeployState(store.list(ADDR));
   assert.deepEqual([d.phase, d.ticker, d.txid, d.resumed], ["pending", "AWAY2", TX("c"), true]);
   assert.equal(resumeDeployState([]), null);
-  assert.match(deployUntrackedLine(TX("c")).text, /tracking resumes when you return$/, "the promise the page now keeps");
+  assert.match(deployUntrackedLine(TX("c")).text, /tracking resumes when you return$/, "the promise the page keeps");
   const r = deployResumedLine("AWAY2", TX("c"), new Date(2026, 8, 27, 20, 20, 39).getTime());
   assert.equal(r.text, "resumed DEPLOY AWAY2  tx ccccc…ccc  ·  broadcast 20:20:39");
   assert.equal(r.key, `resumed:${TX("c")}`);
@@ -198,7 +197,7 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(ownPendingSpendOf(own, `${TX("7")}:1`, null).txid, TX("f"), "matched by input before the indexer marks it filling");
   assert.equal(ownPendingSpendOf(own, `${TX("8")}:0`, TX("f")).txid, TX("f"), "matched by the order's pending_spend_txid");
   assert.equal(ownPendingSpendOf(own, `${TX("8")}:0`, TX("d")), null, "someone else's fill");
-  // audit (withdrawal replaced by a fill): the indexer names ANOTHER spend of an outpoint my record spends —
+  // withdrawal replaced by a fill: the indexer names ANOTHER spend of an outpoint my record spends —
   // my withdrawal was replaced; it is not "your withdrawal is pending" any more
   assert.equal(ownPendingSpendOf(own, `${TX("7")}:1`, TX("d")), null, "the outpoint is in my record, but the named spend is someone else's");
   assert.equal(replacedOwnSpendOf(own, `${TX("7")}:1`, TX("d")).txid, TX("f"), "…my withdrawal was replaced");
@@ -210,7 +209,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("txrecords: confirmed MINEs resume, DEPLOYs resume, trim keeps unconfirmed records, own withdrawals are recognised");
 }
 
-// ---- mine-1 / mine-9: the ✓ yours banner shows what the indexer credited -----------------------------------------
+// ---- the ✓ yours banner shows what the indexer credited -----------------------------------------
 {
   const T0 = 1_000;
   const base = { txid: TX("a"), blockHeight: 969_802, yieldLocal: 1000 };
@@ -242,7 +241,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("minerlog: ✓ yours carries the credited amount (partial / 0 near the cap); the caption follows; resumed line");
 }
 
-// ---- mine-1 / mine-6 / mine-7: capped expectations, never '100%' early ----------------------------------------------
+// ---- capped expectations, never '100%' early ----------------------------------------------
 {
   assert.equal(expectedYieldCapped(null), EXPECTED_YIELD);
   assert.equal(expectedYieldCapped(5000), EXPECTED_YIELD);
@@ -261,7 +260,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("supply: expected yield capped by what is left; the minted share never reads 100% early");
 }
 
-// ---- mine-3: the tab stays put when a token flips to minted out ------------------------------------------------------
+// ---- the tab stays put when a token flips to minted out ------------------------------------------------------
 {
   const minting = { ticker: "LUCKY", minted: 20_999_900, supply: 21_000_000 };
   const out = { ...minting, minted: 21_000_000, minted_out: true, market_open: true };
@@ -273,7 +272,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("token tabs: a mid-visit flip is a notice, not a navigation");
 }
 
-// ---- wallet-2: a failed or declined switch keeps the live session ------------------------------------------------------
+// ---- a failed or declined switch keeps the live session ------------------------------------------------------
 {
   const live = { status: "connected", address: ADDR, pubkeyHex: "02" + "ab".repeat(32), provider: "unisat", providerName: "UniSat", balance: 5000, balanceConfirmed: 5000, switching: "okx", error: null, providers: [] };
   const kept = afterConnectFailure(live, { attemptedId: "okx", message: "Connection declined in the wallet.", hasProvider: true });
@@ -290,7 +289,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("wallet: declining 'Switch to …' keeps the working session");
 }
 
-// ---- wallet-4: OKX's x-only Taproot key from connect() -----------------------------------------------------------------
+// ---- OKX's x-only Taproot key from connect() -----------------------------------------------------------------
 {
   const xonly = MOCK_WALLET.pubkeyHex.slice(2);
   assert.equal(p2trAddressOfXOnly(xonly), ADDR, "fixture: the mock wallet's x-only key derives its bc1p address");
@@ -304,7 +303,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("wallet: OKX's x-only Taproot key is accepted after checking it derives the account");
 }
 
-// ---- wallet-3 / wallet-5: balance text -----------------------------------------------------------------------------------
+// ---- balance text -----------------------------------------------------------------------------------
 {
   assert.equal(walletBalanceText(5000, 0), "0.0000 BTC (unconfirmed)".replace("0.0000", "0.00005"));
   assert.equal(walletBalanceText(1_317_684, 1_317_684), "0.01317684 BTC");
@@ -315,7 +314,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("balance: the unconfirmed part is named");
 }
 
-// ---- portfolio-6: the activity address filter ------------------------------------------------------------------------------
+// ---- the activity address filter ------------------------------------------------------------------------------
 {
   const up = ADDR.toUpperCase();
   assert.equal(isSearchableAddress(up), true, "upper-case bech32 is valid");
@@ -329,7 +328,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("activity: upper-case addresses filter; checksum typos are refused");
 }
 
-// ---- visit-7 / market-6: plain indexer and order-book errors ----------------------------------------------------------------
+// ---- plain indexer and order-book errors ----------------------------------------------------------------
 {
   const off = new Error("Indexer unreachable: https://app.luckyprotocolai.com/tokens?limit=200 — Failed to fetch");
   assert.equal(isIndexerOffline(off), true);
@@ -358,7 +357,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("errors: the indexer offline in one sentence; order-book refusals as the book's own words");
 }
 
-// ---- visit-8: path-style links become hash routes ------------------------------------------------------------------------------
+// ---- path-style links become hash routes ------------------------------------------------------------------------------
 {
   assert.equal(hashRouteForPath({ pathname: "/t/LUCKY" }), "/#/t/LUCKY");
   assert.equal(hashRouteForPath({ pathname: "/t/LUCKY", search: "?tab=market" }), "/#/t/LUCKY?tab=market");
@@ -370,7 +369,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("routing: /t/LUCKY → /#/t/LUCKY");
 }
 
-// ---- market-5 / market-8 / portfolio-7 / market-10: the sell form and the chart -------------------------------------------------
+// ---- the sell form and the chart -------------------------------------------------
 {
   assert.equal(parseUnitInput("15"), 15);
   assert.equal(parseUnitInput("15,5"), 15.5, "decimal comma");
@@ -398,7 +397,7 @@ const ADDR = MOCK_WALLET.address;
   console.log("market: unit box never disagrees with the total; split reasons; 1 BTC/token cap; UTC readout");
 }
 
-// ---- market-7: compact sats ----------------------------------------------------------------------------------------------------
+// ---- compact sats ----------------------------------------------------------------------------------------------------
 {
   assert.equal(fmtSatsShort(16_324), "16,324 sats");
   assert.equal(fmtSatsShort(1_234_567), "1.23M sats");

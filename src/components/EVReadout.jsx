@@ -7,8 +7,8 @@ import { inTailZone } from "../lib/statusText.js";
  * `size` = "lg" (44px, with the variance help line) | "md" (28px).
  * `remaining` (tokens left to mine, or null when not known / not a token
  * page): near the cap each tier is capped by what is left, and a minted-out
- * ticker reads 0 — never the uncapped 262.5 next to "credits 0" (audit
- * mine-1 / mine-7). In the tail zone (less than about one block of MINEs
+ * ticker reads 0 — never the uncapped 262.5 next to "credits 0".
+ * In the tail zone (less than about one block of MINEs
  * left) MINEs queued ahead can take the rest, so the figure reads "at most".
  */
 export default function EVReadout({ ticker = "", size = "md", remaining = null }) {

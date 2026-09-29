@@ -13,7 +13,7 @@ import { BUCKETS } from "../lib/yield.js";
 import { UNLOCK_HEIGHT, activationState, countdownText } from "../lib/activation.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
 
-// Board views (owner, 2026-09-27): Active (most mined first), Minted out (only
+// Board views: Active (most mined first), Minted out (only
 // fully minted tokens — the ones whose market is open) and Top volume.
 const SORTS = [
   { id: "active", label: "Active" },
@@ -68,7 +68,7 @@ export default function Board({ notice }) {
       {notice && <div className="notice">{notice}</div>}
 
       <section className="hero">
-        {/* What makes LUCKY-20 different (owner, 2026-09-27): the name,
+        {/* What makes LUCKY-20 different: the name,
             what it is and its one rule as the title; the copy (one plain
             paragraph, no emphasis) with the fair-launch facts; then the four
             tiers. */}
@@ -90,7 +90,7 @@ export default function Board({ notice }) {
         </div>
         <div className="telemetry">
           <Panel as="div" title="Tokens" led={led}>
-            {/* Only the indexer's count: "0" from an empty, failed read would state a fact nobody knows (audit visit-7). */}
+            {/* Only the indexer's count: "0" from an empty, failed read would state a fact nobody knows. */}
             <div className="hero-num">{fmtInt(health.data?.token_count)}</div>
           </Panel>
           <Panel as="div" title={mobile ? "Mines" : "Mines settled"} led={led}>

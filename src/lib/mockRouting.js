@@ -1,12 +1,12 @@
 // The mock indexer's settlement rules (VITE_MOCK=1) — the §2 / §4.1 / §7.5
 // decisions of PROTOCOL.md in one pure function, so a mock-mode browser
-// check shows what the real indexer would do (audit consensus-7). Plain
+// check shows what the real indexer would do. Plain
 // data in, plain data out; tested in test/views.test.js.
 //
 // Deployer attribution is the commit-reveal rule (§2.1): the deployer is
 // the address of the COMMIT carrier that the REVEAL spends as input 0 —
 // no signature-shape heuristics. Consensus itself is asserted by the
-// indexer's Rust tests and the shared vector files, never by this file.
+// indexer's own tests and the shared vector files, never by this file.
 
 import {
   ACTIVATION_HEIGHT,

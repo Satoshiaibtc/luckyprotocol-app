@@ -58,7 +58,7 @@ export function maxPriceSats(amount) {
   return Math.min(MAX_PRICE_SATS, a * MAX_UNIT_PRICE_SATS);
 }
 /**
- * Fill layout (§7.2, H-1(A)): vout1 = buyer token slot (TO_OUT, 546),
+ * Fill layout (§7.2): vout1 = buyer token slot (TO_OUT, 546),
  * vout4 = buyer residual slot (CHANGE_OUT, 546 — ALWAYS present), vout5 =
  * buyer BTC change (optional, folded into the fee when < 546). TO_OUT and
  * CHANGE_OUT MUST differ: equal indices do not parse (§2.3), the tx would
@@ -143,8 +143,8 @@ export function buildListingPsbt({ address, pubkeyHex, tokenUtxo, priceSats, amo
   if (price > MAX_PRICE_SATS) throw new Error("price exceeds the 21e14-sat cap");
   // A fill hands the WHOLE carrier to the buyer and pays the seller only
   // output0 (= price). Any BTC on the carrier above the price is a gift to
-  // the buyer, so a listing must never price a UTXO below its own value
-  // (audit H-3). A fat SEND change output has to be split first.
+  // the buyer, so a listing must never price a UTXO below its own value.
+  // A fat SEND change output has to be split first.
   if (price < sats) {
     throw new Error(
       `price ${price.toLocaleString("en-US")} sats is below the UTXO's own BTC value ` +
@@ -158,7 +158,7 @@ export function buildListingPsbt({ address, pubkeyHex, tokenUtxo, priceSats, amo
       throw new Error("amount must be a whole number of tokens in [1, 21,000,000]");
     }
     // The book refuses more than 1 BTC per token (§7.4) — never ask the
-    // wallet to sign a listing that can only be refused (audit market-5).
+    // wallet to sign a listing that can only be refused.
     if (price > maxPriceSats(amt)) {
       throw new Error(`price ${price.toLocaleString("en-US")} sats is above the order book's cap of 1 BTC per token (${maxPriceSats(amt).toLocaleString("en-US")} sats for ${amt.toLocaleString("en-US")})`);
     }
@@ -204,7 +204,7 @@ export function parseListing(psbtHex) {
     outputCount: outputs.length,
     lockTime: tx.lockTime,
     // nVersion and input0's nSequence are committed by the seller's 0x83
-    // signature; §7.4 refuses a listing no fill could ever relay (trading-1).
+    // signature; §7.4 refuses a listing no fill could ever relay.
     version: tx.version,
     input0: in0
       ? {
@@ -255,7 +255,7 @@ export function verifyListing({ psbtHex, order }) {
   const [oTxid, oVoutStr] = String(order.id || "").split(":");
   const oVout = Number(oVoutStr);
   const shapeOk = L.inputCount === 1 && L.outputCount === 1 && L.lockTime === 0;
-  // trading-1 (§7.4): a fill inherits the listing's nVersion and input0's
+  // §7.4: a fill inherits the listing's nVersion and input0's
   // nSequence (the 0x83 signature commits to both) — version 1 or 2, and no
   // relative lock-time (sequence ≥ 0x80000000), or no fill can be relayed.
   const seq = L.input0?.sequence;
@@ -303,8 +303,8 @@ export function verifyListing({ psbtHex, order }) {
 
   // 4. output0.value == price_sats, output0.value ≥ input0.witnessUtxo.value
   //    (the carrier's BTC above the price would otherwise flow to the buyer's
-  //    change — a listing under the old rule is refused on this side too,
-  //    audit H-3) and output0.script == input0.script (== seller).
+  //    change — such a listing is refused on this side too) and
+  //    output0.script == input0.script (== seller).
   //    Fails closed: no witnessUtxo → no verdict → not ok.
   let outOk = false;
   let outDetail = "no output";
@@ -408,7 +408,7 @@ export function checkFillLayout(tx) {
 
 /**
  * Buyer side. Takes the seller's signed listing and completes it into the
- * §7.2 SEND layout (H-1(A)):
+ * §7.2 SEND layout:
  *
  *   vout0  price_sats → seller        (from the listing — untouched)
  *   vout1  546        → buyer         (token slot; TO_OUT = 1)
@@ -449,7 +449,7 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   const priceSats = Number(tx.getOutput(0).amount);
   const listedKey = `${hex.encode(in0.txid)}:${in0.index}`;
 
-  // §4 filter (+ the non-asset-safe floor, M-8: an inscribed sat in a buyer
+  // §4 filter (+ the non-asset-safe floor: an inscribed sat in a buyer
   // input would land in the seller's price output), plus never re-spend the
   // listed outpoint itself.
   const spendable = filterSpendable(utxos, tokenOutpoints, { minSats: minInputSats }).filter((u) => outpointKey(u) !== listedKey);
@@ -471,7 +471,7 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
     let fee = 0;
     for (let pass = 0; pass < 3; pass++) {
       const target = fixedOutValue + fee + (withChange ? DUST_SATS : 0) - carrierSats;
-      // Largest-first with uneconomic outputs skipped (audit trading-3): a
+      // Largest-first with uneconomic outputs skipped: a
       // fill is a one-off purchase, never a consolidation — smallest-first
       // could pull dozens of small outputs and multiply the fee the sheet
       // quoted (it quotes ONE buyer input).
@@ -519,7 +519,7 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
   if (!changeOmitted) tx.addOutputAddress(address, BigInt(change), NETWORK);        // vout5 BTC change — optional
 
   // Self-check before handing the PSBT to the wallet: exactly one OP_RETURN,
-  // it is the SEND of this order (M-1 / M-3), and the slots are laid out as
+  // it is the SEND of this order, and the slots are laid out as
   // the payload's indices say.
   checkExpectedPayload(protocolPayloadOfScripts(outputScripts(tx)), { op: "SEND", ticker: order.ticker, amount: order.amount });
   checkFillLayout(tx);
@@ -550,7 +550,7 @@ export function buildFillPsbt({ listingPsbtHex, order, address, pubkeyHex, utxos
 export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
   const tx = loadPsbt(signedPsbtHex);
   if (tx.inputsLength < 2) throw new Error("fill has no buyer inputs");
-  // Broadcast-time guard (M-1 / M-3): the tx we are about to extract must be
+  // Broadcast-time guard: the tx we are about to extract must be
   // a single-OP_RETURN SEND — never a MINE / DEPLOY riding on the
   // seller's bearer signature, never a second OP_RETURN a wallet injected —
   // laid out with 546-sat token / residual slots at the payload's indices.
@@ -571,7 +571,7 @@ export function finalizeFill(signedPsbtHex, expect = { op: "SEND" }) {
  * [{ vout, sats, script(hex), address|null }], witnesses: [[hex…]…],
  * payload|null, payloadText, payloadVout, opReturnCount }`.
  *
- * `payload` follows the indexer's rule (§2, audit M-3): the LOWEST-index
+ * `payload` follows the indexer's rule (§2): the LOWEST-index
  * OP_RETURN output whose script is exactly `OP_RETURN <one push>` (direct
  * push or PUSHDATA1/2/4, nothing after it) and whose push parses. Every
  * output starting 0x6a counts towards `opReturnCount` and never gets an

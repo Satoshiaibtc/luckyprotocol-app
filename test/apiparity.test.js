@@ -1,13 +1,13 @@
-// API envelope parity (audit F1). The indexer once answered the global
-// `GET /mines` with `{ total, limit, offset, mines }` while its route
-// table, this app and its mock all used `items`. The mock followed the
-// table, so every test passed while the real site showed no mines at all.
-// These checks keep the three sides together:
+// API envelope parity. An indexer that answers the global `GET /mines`
+// with `{ total, limit, offset, mines }` while its route table, this app
+// and its mock all use `items` lets every test pass (the mock follows the
+// table) while the live site shows no mines at all. These checks keep the
+// three sides together:
 //
 //   1. every route the mock serves carries every top-level key the
-//      indexer's route table names, read from the indexer checkout when
-//      it sits beside this one; without it (a Pages build) this check is
-//      skipped with a note;
+//      indexer's route table names, read from the local indexer checkout
+//      that LP_INDEXER_DIR points at; without it (a Pages build) this
+//      check is skipped with a note;
 //   2. the app's readers, fed the mock through the real HTTP code path,
 //      return rows (a reader that reads a key the table does not name
 //      gets none);
@@ -24,13 +24,15 @@
 // Plain Node, no framework.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { mockGet, MOCK_WALLET } from "../src/lib/mock.js";
 import * as indexer from "../src/lib/indexer.js";
 import { indexerBtcRows } from "../src/lib/wallet.js";
 import { isAbortError, seedFailureText } from "../src/lib/retry.js";
 
-const API_DOC = new URL("../../luckyprotocol-indexer/docs/API.md", import.meta.url);
-const TABLE = existsSync(API_DOC) ? readFileSync(API_DOC, "utf8") : null;
+const INDEXER_DIR = process.env.LP_INDEXER_DIR || "";
+const API_DOC = INDEXER_DIR ? join(INDEXER_DIR, "docs", "API.md") : null;
+const TABLE = API_DOC && existsSync(API_DOC) ? readFileSync(API_DOC, "utf8") : null;
 
 /**
  * Top-level keys of the JSON object the route-table row for `GET <route>`
@@ -111,7 +113,7 @@ for (const [path, route] of ROUTES) {
   assert.deepEqual(missing, [], `mock ${path} lacks ${missing.join(", ")} of the route-table row for GET ${route}`);
 }
 if (!TABLE) {
-  console.log("apiparity: indexer checkout not beside the app — route-table key checks skipped (mock and reader checks still run)");
+  console.log("apiparity: LP_INDEXER_DIR not set — route-table key checks skipped (mock and reader checks still run)");
 }
 
 // ---- 3. the global feed is `items`, the per-address list is `mines` ----------------------------------
@@ -145,7 +147,7 @@ globalThis.fetch = async (url) => {
   assert.ok((await indexer.tokenHolders("LUCKY", { limit: 5 })).holders.length > 0, "tokenHolders reads `holders`");
 }
 
-// ---- 4. depth and finality (the reorg audit's API contract), served by the mock ------------------------------
+// ---- 4. depth and finality (the finality API contract), served by the mock ------------------------------
 {
   const h = await indexer.health();
   assert.deepEqual([typeof h.last_poll_at, h.node_peers, typeof h.tip_time, h.rebuilding, h.final_depth, h.persist_ok, h.stalled], ["number", 8, "number", false, 6, true, false], "/health: last_poll_at, node_peers, tip_time, rebuilding, final_depth, persist_ok");

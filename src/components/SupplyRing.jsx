@@ -11,7 +11,7 @@ export default function SupplyRing({ ticker, minted = 0, supply = REQUIRED_TOKEN
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const cx = size / 2;
-  // Never "100%" before the supply is reached (audit mine-6): at 99.5%
+  // Never "100%" before the supply is reached: at 99.5%
   // minted there can still be ~105,000 tokens to mine.
   const full = supply > 0 && minted >= supply;
   const centre = full ? "100%" : pct > 0 && pct < 10 ? `${pct.toFixed(1)}%` : `${Math.min(99, Math.round(pct))}%`;

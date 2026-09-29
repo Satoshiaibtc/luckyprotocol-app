@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 // could serve a stale tip / supply view is worse than a hard reload.
 export default defineConfig(({ mode }) => {
   // A production bundle must never ship the fake indexer / simulated
-  // wallet (audit L-16): fail the build instead of shipping a demo.
+  // wallet: fail the build instead of shipping a demo.
   const env = loadEnv(mode, process.cwd(), "");
   if (mode === "production" && env.VITE_MOCK === "1") {
     throw new Error("VITE_MOCK=1 is set for a production build — the mock indexer must never ship; unset it (it belongs in .env.development only)");

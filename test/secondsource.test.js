@@ -1,4 +1,4 @@
-// Tests for src/lib/secondSource.js (audit M-12): the mempool.space second
+// Tests for src/lib/secondSource.js: the mempool.space second
 // check of a listing's outpoint — URL shape, the pure comparison with
 // agree / unverified / disagree fixtures (value, script, and the §7.2 step 3 OP_RETURN
 // re-parse for MINE and SEND carriers), and the transport's unreachable
@@ -99,7 +99,7 @@ const agreeTx = {
   const otherTicker = compareSecondSource(listing, { outspend: agreeOutspend, tx: withPayload("LUCKY-20|SEND|ORE|1200|1|4") });
   assert.match(otherTicker.reasons[0], /OP_RETURN for ORE, the listing says LUCKY/);
   const residual = compareSecondSource({ ...listing, vout: 4, amount: 7 }, { outspend: agreeOutspend, tx: agreeTx });
-  assert.equal(residual.verdict, "unverified", "the CHANGE_OUT residual slot is a token slot too (§2.3 / §4.1) — but its balance depends on the inputs: amount not independently verified (trading-2)");
+  assert.equal(residual.verdict, "unverified", "the CHANGE_OUT residual slot is a token slot too (§2.3 / §4.1) — but its balance depends on the inputs: amount not independently verified");
   assert.equal(residual.reasons.length, 0);
   assert.match(residual.notes[0], /vout 4 is the SEND's residual output \(CHANGE_OUT\).*cannot see token balances/);
   const notASlot = compareSecondSource({ ...listing, vout: 2, scriptHex: FEE }, { outspend: agreeOutspend, tx: agreeTx });
@@ -129,7 +129,7 @@ const agreeTx = {
   console.log("second source OP_RETURN: SEND TO_OUT (AMT) agrees, CHANGE_OUT is unverified, other vouts / tickers / opcodes disagree; MINE vout 0 + recomputed yield");
 }
 
-// ---- consensus-5 / trading-2: partial credits and amounts the second source cannot confirm -----------
+// ---- partial credits and amounts the second source cannot confirm -----------
 {
   const CAP = 969_900;
   const mineTx = (height, last = "f") => ({

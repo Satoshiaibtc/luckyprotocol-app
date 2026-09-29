@@ -11,7 +11,7 @@ const int = (n) => Number(n).toLocaleString("en-US");
 /**
  * The "Ready" line. A wallet without an asset-safe UTXO list (OKX, the
  * simulated wallet) is told plainly what that means BEFORE its first
- * transaction (spec §6: the app warns OKX users; audit mine-8) — not only
+ * transaction (spec §6: the app warns OKX users) — not only
  * in the signing detail, while the wallet's own popup has the attention.
  */
 export function readyText(assetSafe, action) {
@@ -23,7 +23,7 @@ export function readyText(assetSafe, action) {
 }
 
 /**
- * Why the MINE button is off while idle (audit visit-6 / mine-7), or null
+ * Why the MINE button is off while idle, or null
  * when nothing but the fee rate stops it. The order is the order of the
  * notices above the button.
  */
@@ -48,7 +48,7 @@ export function deployWaitText(ticker, deployBlock) {
   return `${ticker} was just created. Mining opens at its ${MINE_MIN_DEPLOY_CONFIRMATIONS === 2 ? "2nd" : `${MINE_MIN_DEPLOY_CONFIRMATIONS}th`} confirmation${opens}, so a chain reorganization cannot leave a MINE ahead of the creation — such a MINE credits nothing.`;
 }
 
-// ---- the end of the supply (audit: MINEs queued in the mempool) ------------------------------------
+// ---- the end of the supply (MINEs queued in the mempool) ------------------------------------
 
 /** Blocks of recent minting the rate is measured over. */
 export const TAIL_WINDOW_BLOCKS = 6;

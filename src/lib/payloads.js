@@ -31,7 +31,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 // ---- §1 constants ----------------------------------------------------------
 
 export const PROTOCOL_PREFIX = "LUCKY-20";
-export const ACTIVATION_HEIGHT = 969_300;          // spec §1 (owner decision 2026-09-26); protocol txs below this height are ignored
+export const ACTIVATION_HEIGHT = 969_300;          // spec §1; protocol txs below this height are ignored
 export const REQUIRED_TOKEN_SUPPLY = 21_000_000;   // implicit on every DEPLOY
 export const DUST_SATS = 546;                      // token-carrier output value
 export const PROJECT_FEE_ADDRESS =
@@ -58,8 +58,8 @@ export const COMMIT_HASH_RE = /^[0-9a-f]{64}$/;
 export const SCRIPT_HEX_RE = /^(?:[0-9a-f]{2})+$/;
 
 /**
- * nLockTime of every COMMIT, REVEAL, MINE and SEND this app builds (owner
- * decision B, 2026-09-27): ACTIVATION_HEIGHT − 1, so such a transaction can
+ * nLockTime of every COMMIT, REVEAL, MINE and SEND this app builds:
+ * ACTIVATION_HEIGHT − 1, so such a transaction can
  * only confirm in block ACTIVATION_HEIGHT or later. That is what lets the
  * Reserve and Mine gates open one block early (at tip 969,299) with no risk
  * of an ignored, pre-activation confirmation. Not a consensus constant: the
@@ -274,8 +274,8 @@ export function buildSendPayload({ ticker, amount, toOutIdx, changeOutIdx }) {
  * Anything else — an unknown op such as the withdrawn AVATAR (§8), a hash or
  * salt in the wrong case or length — is "not a protocol tx". SEND is
  * EXACTLY six fields: a five-field SEND (no CHANGE_OUT) and a seven-field
- * one are both invalid, and TO == CHG is invalid (§2.3; the same vectors
- * live in protocol.rs and in test/payloads.test.js — audit M-2). Used by the
+ * one are both invalid, and TO == CHG is invalid (§2.3; test/payloads.test.js
+ * pins the same vectors the indexer is tested against). Used by the
  * mock indexer, by the sign-time guard in psbt.js and by display code;
  * never by consensus.
  */

@@ -33,7 +33,7 @@ const RELIST_WARNING =
  * total price (prefilled from the floor / last trade), split part of it
  * off first when needed, and manage the listings — Renew (re-POST the same
  * PSBT before the 14-day expiry) and Withdraw (the spec's "cancel": a SEND
- * to yourself; the M-9 replacement rule applies while a fill is pending).
+ * to yourself; the replacement-fee rule applies while a fill is pending).
  * One word for one action on every surface: the button, the fold, the
  * notices and the progress labels all say "withdraw".
  *
@@ -100,7 +100,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
       })
       // 546-sat carriers first (the ones meant to be listed); fatter SEND
       // change outputs sink to the bottom — listing one hands its BTC surplus
-      // to the buyer (audit H-3), so they are tagged "split first".
+      // to the buyer, so they are tagged "split first".
       .sort((a, b) => (a.sats === DUST_SATS ? 0 : 1) - (b.sats === DUST_SATS ? 0 : 1) || b.amount - a.amount);
   }, [tokenUtxos.data, btcUtxos.data, myRows, ticker]);
 
@@ -132,7 +132,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
     const { sel: s, token: t } = seedRef.current;
     if (!s) return;
     const ref = t?.floor_unit_price ?? t?.last_trade?.unit_price ?? null;
-    const floorSats = Math.max(MIN_PRICE_SATS, Number.isInteger(s.sats) ? s.sats : 0); // never below the carrier's own value (H-3)
+    const floorSats = Math.max(MIN_PRICE_SATS, Number.isInteger(s.sats) ? s.sats : 0); // never below the carrier's own value
     if (ref) {
       const total = Math.max(floorSats, Math.round(ref * s.amount));
       setTotalStr(String(total));
@@ -146,7 +146,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
     }
   }, [selKey]);
 
-  // The two boxes never disagree (audit market-8): a unit price that does
+  // The two boxes never disagree: a unit price that does
   // not parse ("", "15x") clears the total, so Sign cannot go out at a total
   // the unit box no longer shows; "15,5" reads as 15.5.
   // A new price starts a new listing attempt: the last "Listed" / refusal line goes.
@@ -171,7 +171,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
   const maxPrice = sel ? maxPriceSats(sel.amount) : null;
   const priceOk = Number.isInteger(priceSats) && priceSats >= minPriceSats && (maxPrice === null || priceSats <= maxPrice);
   // A carrier whose spend already sits in the mempool: the book refuses a
-  // new listing for it (409) until that spend confirms or drops (market-5).
+  // new listing for it (409) until that spend confirms or drops.
   const selFilling = !!sel && sel.listing?.status === "filling";
   const fatCarrier = !!sel && Number.isInteger(sel.sats) && sel.sats > DUST_SATS;
   const listBusy = listFlow.phase === "checking" || listFlow.phase === "signing" || listFlow.phase === "posting";
@@ -192,13 +192,13 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
   // book's only open ask has no band at all.
   const bandRef = (token?.floor_unit_price ?? null) > 0 ? token.floor_unit_price : null;
   const aboveBand = !!sel && priceOk && bandRef !== null && !(sel.listing && sel.listing.status === "open" && token?.open_orders === 1) && priceSats / sel.amount > 100 * bandRef;
-  // trading-4 (§7.4): the book keeps the cheapest live signed listing of an
+  // §7.4: the book keeps the cheapest live signed listing of an
   // outpoint — a HIGHER price needs Withdraw first; the same or a lower
   // price replaces the listing.
   const relist = !!sel && !sel.multi && priceOk ? relistDecision(sel.listing, priceSats, sel.amount) : null;
   const raiseBlocked = !!relist && !relist.ok && relist.kind === "raise";
 
-  // rvs-2 (§7.4): the first output of a step-1 reservation (COMMIT) that can
+  // §7.4: the first output of a step-1 reservation (COMMIT) that can
   // still be published is never listed — checked through /commits/:txid
   // when the row is picked, and again right before the wallet signs.
   const selTxid = sel?.txid ?? null;
@@ -230,7 +230,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
 
   const signListing = async () => {
     if (!connected || !sel || sel.multi || selFilling || !priceOk || sel.sats === null || !marketOpen || listPause || raiseBlocked || reservedCarrier || capBlocked) return;
-    // "checking" = the reads made before the wallet is opened (cap, rvs-2).
+    // "checking" = the reads made before the wallet is opened (cap, reserved carrier).
     setListFlow({ phase: "checking" });
     try {
       // §7.4 per-seller cap, re-read at the click (another tab or device may
@@ -250,12 +250,12 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
         return;
       }
       if (sel.vout === 0) {
-        // rvs-2: re-checked at the click — fails closed when the indexer cannot say.
+        // Re-checked at the click — fails closed when the indexer cannot say.
         const problem = commitCarrierProblem(0, await indexer.commit(sel.txid));
         if (problem) throw new Error(problem);
       }
       const built = buildListingPsbt({ address, pubkeyHex, tokenUtxo: { txid: sel.txid, vout: sel.vout, sats: sel.sats }, priceSats, amount: sel.amount });
-      // trading-1: never ask the wallet to sign a listing no fill could relay.
+      // Never ask the wallet to sign a listing no fill could relay.
       const before = listingShapeProblems(built.psbtHex);
       if (before.length) throw new Error(`Not signed: ${before.join("; ")}.`);
       setListFlow({ phase: "signing" });
@@ -271,7 +271,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
     } catch (e) {
       // 409 `market opens when TICKER is fully minted (minted X of Y)` or
       // `market opens at block N` → the same one-line notice the tabs show;
-      // every other refusal of the book → one plain sentence (audit market-6).
+      // every other refusal of the book → one plain sentence.
       const closed = e?.status === 409 && /market opens (when|at block)/i.test(String(e?.message || ""));
       setListFlow({ phase: "error", error: closed ? marketClosed : listingRefusalText(e) ?? friendlyError(e) });
     }
@@ -311,11 +311,11 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
 
   // This browser's own pending transactions: a `filling` listing whose
   // pending spend is one of them is the user's own withdrawal — no "a fill
-  // sits in the mempool … you are paid" note, no second Withdraw (portfolio-1).
+  // sits in the mempool … you are paid" note, no second Withdraw.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read the store on each listings refresh / flow step
   const records = useMemo(() => (address ? txRecords(address) : []), [address, myRows, chain.phase]);
 
-  // The M-9 rule, previewed for every filling listing before Withdraw is clicked.
+  // The replacement-fee rule, previewed for every filling listing before Withdraw is clicked.
   const fillingNotes = useMemo(() => {
     const out = [];
     for (const o of ordersHere) {
@@ -359,7 +359,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
         <ul className="utxo-list" role="radiogroup" aria-label={`${ticker} UTXOs`}>
           {rows.map((r) => {
             // A multi-ticker carrier stays selectable: it cannot be listed, but
-            // its tokens can be moved onto their own carrier (portfolio-3).
+            // its tokens can be moved onto their own carrier.
             const disabled = chainBusy;
             return (
               <li key={r.key}>
@@ -622,7 +622,7 @@ export default function SellPanel({ ticker, token, onSettled, usd = null, active
         <>
           {chain.rule?.raised && (
             <div className="notice">
-              <strong>Replacement fee (M-9).</strong> A fill of this listing is pending in the mempool at {chain.order?.pending_feerate ?? "?"} sat/vB; to replace it the network requires at least {chain.rule.floorSatVb} sat/vB — max of your {fee.satVb} sat/vB, {chain.rule.rateFloor} (its rate + {chain.rule.incr} increment + 1)
+              <strong>Replacement fee.</strong> A fill of this listing is pending in the mempool at {chain.order?.pending_feerate ?? "?"} sat/vB; to replace it the network requires at least {chain.rule.floorSatVb} sat/vB — max of your {fee.satVb} sat/vB, {chain.rule.rateFloor} (its rate + {chain.rule.incr} increment + 1)
               {chain.rule.absFloor !== null ? ` and ${chain.rule.absFloor} (enough absolute fee to beat what it already pays)` : ""}. This transaction uses {chain.rule.satVb} sat/vB.
             </div>
           )}

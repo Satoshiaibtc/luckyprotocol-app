@@ -41,7 +41,7 @@ export function isUsableFeeRate(v) {
  * entered; `error` is the inline message or null. A rate outside
  * [1, cap] is UNUSABLE (null), never clamped: a typo such as 5000 for 50
  * must not quietly become the 1,000 sat/vB cap and a ~227,000-sat MINE fee
- * — the same rule the presets follow (audit L-11, usertx-8).
+ * — the same rule the presets follow.
  */
 export function clampCustomFee(input, cap = MAX_FEE_RATE_SAT_VB) {
   const text = String(input ?? "").trim();
@@ -84,7 +84,7 @@ export function serializeFeeChoice(choice) {
  * Why a preset has no usable rate: 'missing' (no /fees, or the key is
  * absent / malformed), 'over-cap' (the indexer's value exceeds the
  * MAX_FEE_RATE_SAT_VB safety cap — a wrong estimate is REJECTED, never
- * clamped to a number that still overpays; audit L-11), or null when it
+ * clamped to a number that still overpays), or null when it
  * resolves.
  */
 export function presetUnavailableReason(id, feesData) {
@@ -140,7 +140,7 @@ export function presetUnavailableText(reason) {
   return null;
 }
 
-// ---- high custom rates need an explicit confirmation (audit usertx-8) ------------------------------------
+// ---- high custom rates need an explicit confirmation ------------------------------------
 
 /** A custom rate at or below this never asks for confirmation, whatever the estimates say. */
 export const HIGH_FEE_MIN_SAT_VB = 50;

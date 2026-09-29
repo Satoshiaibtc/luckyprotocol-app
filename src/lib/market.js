@@ -4,7 +4,7 @@
 //               geometry the hand-built SVG chart draws from
 //   order book  sortAsks / orderSelectable / fillQuote — which ask a buyer
 //               may pick and what a fill costs at a fee rate
-//   cancel      cancelFeeRate — the audit M-9 rule for a SEND-to-self that
+//   cancel      cancelFeeRate — the fee rule for a SEND-to-self that
 //               has to replace a low-fee fill sitting in the mempool
 //   change      changeSign / fmtChangePct — sign-coloured deltas
 //
@@ -28,7 +28,7 @@ export const INTERVALS = [
 // ---- withdrawal wording --------------------------------------------------------------------
 
 /**
- * The withdrawal's pending line (audit: withdrawals racing fills): until the
+ * The withdrawal's pending line: until the
  * SEND-to-self confirms, the old signed listing is still a valid fill —
  * anyone who saved it can pay a higher fee and replace the withdrawal.
  */
@@ -245,7 +245,7 @@ export function fillQuote({ order, address, feeRateSatVb }) {
   };
 }
 
-// ---- M-9 cancel fee rule ------------------------------------------------------------------
+// ---- cancel fee rule ------------------------------------------------------------------
 
 /**
  * The fee rate a cancel (SEND-to-self of the listed UTXO) must use.
@@ -315,9 +315,9 @@ export function fmtChangePct(pct) {
 
 /**
  * The readout / aria time of a candle, in UTC like the axis ticks
- * (fmtTimeTick) — "2026-09-27 11:00 UTC" (1h) / "2026-09-27 UTC" (1d). The
- * readout used local time next to UTC ticks, 8 h apart in UTC+8 with no
- * zone on either (audit market-10).
+ * (fmtTimeTick) — "YYYY-MM-DD HH:MM UTC" (1h) / "YYYY-MM-DD UTC" (1d).
+ * Local time next to UTC ticks would sit 8 h apart in UTC+8 with no zone
+ * on either.
  */
 export function fmtCandleTime(t, interval) {
   if (!Number.isFinite(t)) return "";
@@ -344,8 +344,8 @@ export function parseUnitInput(v) {
 }
 
 /**
- * Why a split amount cannot be used, or null when it can (audit
- * portfolio-7). `max` = the largest amount this carrier allows (its whole
+ * Why a split amount cannot be used, or null when it can. `max` = the
+ * largest amount this carrier allows (its whole
  * amount when it may be moved entirely, else one less); `holds` = what the
  * carrier holds.
  */
@@ -363,7 +363,7 @@ export function splitAmountError(text, max, holds, ticker) {
 }
 
 /**
- * Why a higher price needs Withdraw first (owner decision D / trading-4),
+ * Why a higher price needs Withdraw first (the book keeps the cheapest listing),
  * in plain words — the sell form's notice and the book's 409 both say it.
  */
 export const RAISE_PRICE_TEXT =
@@ -403,11 +403,11 @@ export function listingRefusalText(e) {
   if (/price band/i.test(msg)) return `The order book refused this price: ${msg}.`.replace(/\.\.$/, ".");
   if (/price_sats must be in/i.test(msg)) return "The order book refused this price: at most 1 BTC per whole token (and at least 546 sats in total).";
   if (/pending spend|spent or pending/i.test(msg)) return "A transaction spending this UTXO is already in the mempool — the order book refuses a new listing for it until that confirms or drops.";
-  // trading-4: the book keeps the cheapest live signed listing of an outpoint.
+  // The book keeps the cheapest live signed listing of an outpoint.
   if (/withdraw first/i.test(msg)) return RAISE_PRICE_TEXT;
-  // rvs-2: the first output of an open reservation (COMMIT) is never listed.
+  // The first output of an open reservation (COMMIT) is never listed.
   if (/reserves a ticker|open commit/i.test(msg)) return COMMIT_CARRIER_PLAIN_TEXT;
-  // trading-1: a listing whose version / input sequence no fill could relay
+  // A listing whose version / input sequence no fill could relay
   // (the book says "listing tx version must be 1 or 2 …" and "input0
   // nSequence … sets a relative timelock").
   if (/tx version|nversion|nsequence|relative (time)?lock|timelock|can never be filled/i.test(msg)) {

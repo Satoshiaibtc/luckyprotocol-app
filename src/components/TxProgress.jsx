@@ -5,7 +5,7 @@ import { isMobileBrowser } from "../lib/wallet.js";
 import { useApp } from "../context.js";
 
 /**
- * The inputs a PSBT is about to spend, shown at signing time (audit M-8).
+ * The inputs a PSBT is about to spend, shown at signing time.
  * With an asset-safe list it is a plain listing; without one it carries
  * the warning that any of these outputs could hold Ordinals or Runes the
  * indexer cannot see (inscriptions are excluded when the wallet can list

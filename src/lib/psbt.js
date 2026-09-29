@@ -5,8 +5,8 @@
 // protocol outputs in the exact order the indexer expects, and returns an
 // UNSIGNED PSBT (hex) that the UniSat extension signs + finalizes.
 //
-// Every transaction built here has nLockTime = PROTOCOL_LOCKTIME (969,299,
-// owner decision B) and every input nSequence = RBF_SEQUENCE (0xfffffffd):
+// Every transaction built here has nLockTime = PROTOCOL_LOCKTIME (969,299)
+// and every input nSequence = RBF_SEQUENCE (0xfffffffd):
 // the lock time is only enforced when some input's sequence is below
 // 0xffffffff, and 0xfffffffd also signals replace-by-fee, which "Speed up"
 // (buildSpeedUpPsbt) relies on. Such a tx can only confirm in block
@@ -34,7 +34,7 @@
 //                       vout2 OP_RETURN  LUCKY-20|MINE|<TICKER>
 //                       vout3 change → self (omitted if < dust; folded into fee)
 //
-// SEND layout (§2.3, H-1(A) — token carriers are ALWAYS 546-sat outputs):
+// SEND layout (§2.3 — token carriers are ALWAYS 546-sat outputs):
 //                       vout0 546 → recipient          (TO_OUT = 0)
 //                       vout1 546 → PROJECT_FEE_ADDRESS
 //                       vout2 OP_RETURN  LUCKY-20|SEND|<TICKER>|<AMT>|0|3
@@ -306,7 +306,7 @@ export function rawTxSummary(rawHex) {
 }
 
 /**
- * Broadcast-time guard (audit M-3): count the OP_RETURN outputs (byte-0
+ * Broadcast-time guard: count the OP_RETURN outputs (byte-0
  * 0x6a) of a raw tx and refuse more than one. A wallet or aggregator that
  * appends its own OP_RETURN (memo, runestone) to one of our protocol txs
  * would otherwise turn it into "not a protocol tx" for an indexer that
@@ -412,7 +412,7 @@ function psbtOutputScripts(psbtHex) {
 }
 
 /**
- * Sign-time guard (audit M-1 / M-3): before a PSBT goes to the wallet,
+ * Sign-time guard: before a PSBT goes to the wallet,
  * assert that its OP_RETURN says what the flow believes it says.
  *
  *   expectPsbtPayload(hex, { op: "SEND", ticker: "LUCKY", amount: 100 })
@@ -535,8 +535,8 @@ export const outpointKey = (u) => `${u.txid}:${u.vout}`;
  * mock have no asset-aware list; the indexer's raw BTC view cannot tell an
  * inscription or rune carrier from plain BTC). ord's default postage is
  * 10,000 sats, so anything AT or below it is treated as a possible carrier
- * and never spent as a fee input (audit M-8; `<=`, not `<`: an output of
- * exactly the postage is the most likely carrier of all — audit usertx-3).
+ * and never spent as a fee input (`<=`, not `<`: an output of exactly the
+ * postage is the most likely carrier of all).
  * Runes are still not detectable this way — the notice says so.
  */
 export const MIN_FEE_INPUT_SATS_UNSAFE = 10_000;
@@ -551,7 +551,7 @@ export function minFeeInputSats(assetSafe) {
  * `assetSafe` flag. An asset-safe list is consolidated smallest-first; on
  * any other list the LARGEST outputs are spent first, so postage-sized
  * outputs (possible Ordinals / Runes carriers above the floor) are a last
- * resort, not the first pick (audit usertx-3).
+ * resort, not the first pick.
  */
 export function selectionOrderFor(assetSafe) {
   return assetSafe === true ? "smallest" : "largest";
@@ -636,7 +636,7 @@ export function inputCostSats(type, satVb) {
  *   minEffectiveSats           — skip every output worth ≤ this (its own
  *                                input fee, inputCostSats): an uneconomic
  *                                output can never help fund a tx, it only
- *                                raises the fee (audit trading-3)
+ *                                raises the fee
  */
 export function selectInputs({ utxos, target, excludeKeys, order = "smallest", minEffectiveSats = 0 }) {
   const exclude = new Set(excludeKeys || []);
@@ -1159,7 +1159,7 @@ export function estimateSendFeeSats({ address, toAddress, ticker, amount = 1, fe
 }
 
 /**
- * Build an unsigned SEND PSBT (H-1(A) layout — see the header). `tokenUtxos`
+ * Build an unsigned SEND PSBT (§2.3 layout — see the header). `tokenUtxos`
  * are the sender's token-bearing outpoints for `ticker` (from /utxos/:addr);
  * they are spent as inputs so their balances form the tx's input pool.
  *

@@ -1,4 +1,4 @@
-// Web-hygiene tests (audit L-14 / L-15 / L-16): the generated _headers
+// Web-hygiene tests: the generated _headers
 // CSP, the canonical-host redirect and the VITE_SPEC_URL validator. Plain
 // Node, no framework.
 import assert from "node:assert/strict";
@@ -11,11 +11,11 @@ import { isAllowedSpecUrl, resolveSpecUrl, DEFAULT_SPEC_URL } from "../src/lib/s
 import { parseSpecConstants, specConstantMismatches, specProcessLeaks, specUrlProblem } from "../scripts/check-spec.mjs";
 import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
-// ---- L-14: _headers generated from VITE_INDEXER_URL ----------------------------------------------------
+// ---- _headers generated from VITE_INDEXER_URL ----------------------------------------------------
 {
   const prod = buildHeaders({ indexerUrl: "https://app.luckyprotocolai.com/", mode: "production", strict: true });
   const csp = /Content-Security-Policy: (.*)/.exec(prod)[1];
-  assert.equal(/connect-src ([^;]*)/.exec(csp)[1], "'self' https://app.luckyprotocolai.com https://mempool.space", "connect-src: self + the indexer + the M-12 second source, nothing else");
+  assert.equal(/connect-src ([^;]*)/.exec(csp)[1], "'self' https://app.luckyprotocolai.com https://mempool.space", "connect-src: self + the indexer + the second source, nothing else");
   assert.equal(/img-src ([^;]*)/.exec(csp)[1], "'self' data:", "img-src: no remote origin — token pictures are inline SVG identicons (avatars withdrawn, spec §8); neither the indexer nor mempool.space is an image origin");
   assert.equal(/style-src ([^;]*)/.exec(csp)[1], "'self'", "no 'unsafe-inline'");
   assert.equal(/script-src ([^;]*)/.exec(csp)[1], "'self'");
@@ -84,7 +84,7 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   console.log("middleware: the document gets the static header set plus a per-response script-src nonce; assets untouched");
 }
 
-// ---- L-15: *.pages.dev → canonical host ------------------------------------------------------------------
+// ---- *.pages.dev → canonical host ------------------------------------------------------------------
 {
   assert.equal(CANONICAL_HOST, "luckyprotocolai.com");
   assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", pathname: "/", search: "", hash: "#/token/LUCKY" }), "https://luckyprotocolai.com/#/token/LUCKY", "same path + hash on the canonical host");
@@ -97,7 +97,7 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   assert.equal(canonicalRedirectTarget({ hostname: "luckyprotocol-app.pages.dev", mock: true }), null, "mock builds never redirect");
 }
 
-// ---- L-16: VITE_SPEC_URL validated like VITE_INDEXER_URL ---------------------------------------------------
+// ---- VITE_SPEC_URL validated like VITE_INDEXER_URL ---------------------------------------------------
 {
   assert.equal(DEFAULT_SPEC_URL, "/PROTOCOL.md");
   assert.equal(isAllowedSpecUrl("/PROTOCOL.md"), true, "same-origin path");
@@ -117,9 +117,9 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   assert.equal(resolveSpecUrl(undefined), DEFAULT_SPEC_URL);
 }
 
-// ---- F7: a VITE_SPEC_URL that names no served file fails the build ---------------------------------------------
+// ---- a VITE_SPEC_URL that names no served file fails the build ---------------------------------------------
 // The host answers an unknown path with the app page, so a stale same-origin
-// value (an earlier spec file name) would open the app instead of the spec.
+// value (a path that names no file in public/) would open the app instead of the spec.
 {
   const pub = join(dirname(fileURLToPath(import.meta.url)), "../public");
   assert.equal(specUrlProblem(undefined, pub), null, "unset: the default /PROTOCOL.md");
@@ -161,26 +161,27 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- the served spec is the indexer's canonical one ------------------------------------------------------
 // public/PROTOCOL.md (DEFAULT_SPEC_URL) is a byte-identical copy of the
-// indexer repo's PROTOCOL.md. When the sibling checkout is present (the
-// LUCKY-20 workspace), a drifted copy fails the check; a lone app checkout
-// (e.g. the Pages build) skips it.
+// indexer's PROTOCOL.md. When LP_INDEXER_DIR names a local indexer checkout,
+// a drifted copy fails the check; without it (e.g. the Pages build) the
+// check is skipped.
 {
   const here = dirname(fileURLToPath(import.meta.url));
   const served = join(here, "../public/PROTOCOL.md");
-  const canonical = join(here, "../../luckyprotocol-indexer/PROTOCOL.md");
+  const canonical = process.env.LP_INDEXER_DIR ? join(process.env.LP_INDEXER_DIR, "PROTOCOL.md") : null;
   let canon = null;
   try {
-    canon = readFileSync(canonical);
+    if (canonical) canon = readFileSync(canonical);
   } catch {
-    console.log("spec copy: indexer checkout not beside the app — byte-identity check skipped");
+    /* reported below */
   }
+  if (!canon) console.log("spec copy: LP_INDEXER_DIR not set — byte-identity check skipped");
   if (canon) {
-    assert.ok(readFileSync(served).equals(canon), "public/PROTOCOL.md must be a byte-identical copy of luckyprotocol-indexer/PROTOCOL.md");
+    assert.ok(readFileSync(served).equals(canon), "public/PROTOCOL.md must be a byte-identical copy of the indexer's PROTOCOL.md");
     console.log("spec copy: public/PROTOCOL.md is byte-identical to the indexer's");
   }
 }
 
-// ---- the served spec's §1 table is what the app builds with (every build, audit web-2) --------------------
+// ---- the served spec's §1 table is what the app builds with (every build) --------------------
 // scripts/check-spec.mjs runs in `prebuild`, so a Pages build fails when the
 // code and the served spec copy disagree on a consensus constant — the gate
 // that still holds where the byte-identity check above is skipped.
@@ -227,9 +228,8 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
 
 // ---- the served spec states rules, not the project's process ------------------------------------------------
 // A public rulebook names no audit finding, internal schema number,
-// repository, language, file or date, and carries no revision history.
-// scripts/check-spec.mjs applies the same list on every build, and the
-// indexer's own tests hold its copy to it.
+// repository, file or date, and carries no revision history.
+// scripts/check-spec.mjs applies the same list on every build.
 {
   const here = dirname(fileURLToPath(import.meta.url));
   const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
@@ -238,9 +238,9 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   assert.ok(served.includes("\n## 8. Token avatars\n"), "§8 keeps its number and a timeless title");
   assert.ok(!/\b(19|20)\d\d-\d\d-\d\d\b/.test(served), "no calendar date");
   // the gate itself
-  assert.deepEqual(specProcessLeaks("a rule (audit H-1)\nSNAPSHOT_VERSION 17\nthe Rust indexer\nrevised 2026-09-28"), ["1: audit", "2: snapshot_version", "3: Rust", "4: 2026-"]);
-  assert.deepEqual(specProcessLeaks("a buyer trusts the indexer; Trust is not the language"), [], "\"trust\" is not \"Rust\"");
-  console.log("spec process: the served spec names no audit, schema number, repository, language or date");
+  assert.deepEqual(specProcessLeaks("a rule (audit X-1)\nSTATE_VERSION 1\nsee the luckyprotocol-example repo\nrevised 2000-01-01\nan interim rule"), ["1: audit", "2: schema number", "3: repository", "4: date", "5: revision narrative"]);
+  assert.deepEqual(specProcessLeaks("a buyer trusts the indexer; version 2 transactions; it audits nothing"), [], "ordinary words pass");
+  console.log("spec process: the served spec names no audit, schema number, repository, date or revision narrative");
 }
 
 // ---- the served spec's order-book caps agree with each other and with the app --------------------------------

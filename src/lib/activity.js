@@ -186,7 +186,7 @@ export function activityParties(item) {
 /**
  * The address search box accepts what a wallet may connect with (mainnet
  * bc1q… / bc1p…), in either case, with a valid bech32 / bech32m checksum —
- * a typo is "not an address", never "no activity" (audit portfolio-6).
+ * a typo is "not an address", never "no activity".
  */
 export function isSearchableAddress(s) {
   return isValidBech32Address(String(s || "").trim());

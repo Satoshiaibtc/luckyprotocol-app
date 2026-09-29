@@ -182,7 +182,7 @@ export function deployResumedLine(ticker, txid, broadcastAt, { at = Date.now() }
  * The state the Create page opens in for `address`: the newest DEPLOY this
  * browser broadcast that has not been settled by the registry yet (see
  * src/lib/txrecords.js) resumes as "pending" — the tx-status poll then
- * moves it on to confirmed and the registry's verdict (audit create-3).
+ * moves it on to confirmed and the registry's verdict.
  * `records` = txRecords(address). Returns null when there is nothing to resume.
  */
 export function resumeDeployState(records) {
@@ -266,7 +266,7 @@ export function stepDroppedLine(what, txid, at = Date.now()) {
 /**
  * `COMMIT a3f9c…21e not seen by the indexer's node for a few minutes · still checking (it may confirm)` —
  * the step is NOT given up: the reservation code stays saved and the page keeps looking for it and for
- * the versions it replaced (audits LENS-2 / ux-1).
+ * the versions it replaced.
  */
 export function stepUnseenLine(what, txid, at = Date.now()) {
   return line({ key: `cr:unseen:${txid}`, kind: "sys", text: `${what} ${short(txid)} not seen by the indexer's node for a few minutes · still checking (it may confirm)`, ts: at });

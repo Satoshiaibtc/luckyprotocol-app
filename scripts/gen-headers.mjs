@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Generate the Cloudflare Pages deployment files for the build output from
-// the SAME environment Vite built with (audit L-14):
+// the SAME environment Vite built with:
 //
 //   npm run build   →   vite build && node scripts/gen-headers.mjs
 //
@@ -18,7 +18,7 @@
 // https://mempool.space, the read-only SECOND SOURCE, never read with
 // headers, credentials or a body:
 //   - the buy flow re-checks a listing's outpoint before a fill is signed
-//     (audit M-12, src/lib/secondSource.js: GET /api/tx/<txid>/outspend/<vout>
+//     (src/lib/secondSource.js: GET /api/tx/<txid>/outspend/<vout>
 //     and GET /api/tx/<txid>; nothing but the outpoint in the URL);
 //   - every page compares the chain tip (GET /api/blocks/tip/height) with
 //     the indexer's node and reads the recommended fee rates
@@ -48,7 +48,7 @@
 // one route it owns. Static assets never touch the Function (_routes.json)
 // and keep the plain _headers rules, including the immutable cache.
 //
-// Operator note: "/" is now a Pages Function request and counts toward the
+// Operator note: "/" is a Pages Function request and counts toward the
 // account's Workers plan quota (Workers Free: 100,000 requests/day,
 // account-wide; when exceeded Cloudflare answers error 1027 and the
 // document is unavailable until the daily reset; static assets are

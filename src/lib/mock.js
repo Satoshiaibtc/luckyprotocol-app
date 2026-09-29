@@ -15,7 +15,7 @@
 // prevouts) — open orders whose outpoint was spent are settled per §7.5
 // (the payment is judged at the listed input's own index), and fills
 // append a TradeView. It is a simulator for browser checks: consensus is
-// asserted by the indexer's Rust tests and the shared vector files.
+// asserted by the indexer's own tests and the shared vector files.
 // That is what lets the whole listing → fill → trade loop run end-to-end
 // without a node.
 //
@@ -226,7 +226,7 @@ function signedOrder({ seller, utxo, ticker, amount, price_sats, created_at }) {
   };
 }
 
-/** The `filling` overlay (audit M-9): a fill of the outpoint is in the mempool at `vsize` vB and `feerate` sat/vB. */
+/** The `filling` overlay: a fill of the outpoint is in the mempool at `vsize` vB and `feerate` sat/vB. */
 function pendingFill(seed, vsize, feerate) {
   return {
     status: "filling",
@@ -377,7 +377,7 @@ function world() {
 
       // ---- open asks: 3–8 real signed listings at ascending prices. The
       // second BLOK ask is `filling`: a low-fee fill of it sits in the
-      // mempool (audit M-9), so the book greys it out.
+      // mempool, so the book greys it out.
       const last = mine[mine.length - 1].unit_price;
       const k = randInt(`orders-n:${s.ticker}`, 3, 8);
       let unit = last * (1 + rand(`ask0:${s.ticker}`) * 0.03);
@@ -403,7 +403,7 @@ function world() {
           ...(filling ? pendingFill(`pending-fill:${s.ticker}:${j}`, 99_000, 0.1) : {}),
         });
       }
-      // ---- one ask on a PARTIAL-CREDIT carrier (§3, audit consensus-5): the
+      // ---- one ask on a PARTIAL-CREDIT carrier (§3): the
       // MINE that completed the supply in block minted_out_height drew the
       // 1,000 tier but was credited only the 300 that were left. The second
       // source can check the tier, not the 300 — the buy sheet must say
@@ -446,8 +446,8 @@ function world() {
   // The simulated wallet's own `filling` listing: its 1,921-BLOK carrier
   // (seeded UTXO #5; BLOK is the one minted-out token, so the one the wallet
   // can list) listed near the floor, with a 99 kvB / 0.1 sat/vB fill of it
-  // "in the mempool" — the Sell fold's Cancel then has to apply the M-9
-  // replacement rule, which is the point of seeding it.
+  // "in the mempool" — the Sell fold's Cancel then has to apply the
+  // replacement fee rule, which is the point of seeding it.
   ensureSeeded(MOCK_WALLET.address);
   const mine = seededBtcUtxos(MOCK_WALLET.address)[5];
   const myCarrier = { txid: mine.txid, vout: mine.vout, sats: mine.sats };
@@ -917,7 +917,7 @@ function applyTx(txid, e) {
     const o = w.orders.get(key(i));
     if (!o || (o.status !== "open" && o.status !== "filling")) continue;
     // The payment is judged at the listed input's own index (SIGHASH_SINGLE
-    // pairs them), not at vout0 — §7.5 / audit consensus-4.
+    // pairs them), not at vout0 — §7.5.
     const pay = d.outputs[idx];
     const to = p && p.op === "SEND" ? d.outputs[p.toOutIdx] : null;
     const isFill = isFillOf(d, dec, o, idx) && !!to;
@@ -1321,7 +1321,7 @@ function explorerTxOf(txid, vout, u) {
 }
 
 /**
- * Mock second source (audit M-12) for VITE_MOCK=1, same verdict shape as
+ * Mock second source for VITE_MOCK=1, same verdict shape as
  * src/lib/secondSource.js — and the SAME comparison (compareSecondSource:
  * unspent, value, script, the §7.2 step 3 OP_RETURN re-parse with the §3
  * partial-credit rule) run over the mock's own record of the creating tx
@@ -1601,7 +1601,7 @@ export async function mockGet(path) {
     return { height, hash: blockHashAt(height), time, ...blockCapacityAt(height) };
   }
   if (p === "/fees") {
-    // Fractional like the real indexer (f64 rounded up to hundredths) so
+    // Fractional like the real indexer (a decimal rounded up to hundredths) so
     // mock mode exercises decimal rates end to end.
     // `ok: false` (the node could not estimate) serves 1 sat/vB floors, like the live indexer.
     if (mockFeesDown()) return { ok: false, fastestFee: 1, halfHourFee: 1, hourFee: 1, economyFee: 1, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
@@ -1696,7 +1696,7 @@ export async function mockPostJson(path, body) {
     throw bad(`psbt does not decode: ${e.message || e}`);
   }
   if (L.inputCount !== 1 || L.outputCount !== 1 || L.lockTime !== 0) throw bad("listing must have exactly 1 input, 1 output and nLockTime 0");
-  // trading-1 (§7.4): refuse a listing no fill could ever relay — the 0x83
+  // §7.4: refuse a listing no fill could ever relay — the 0x83
   // signature commits nVersion and input0's nSequence, so no buyer can fix
   // them. The texts are byte-identical to the order book's.
   if (L.version !== 1 && L.version !== 2) throw bad(`listing tx version must be 1 or 2 (got ${L.version}): a listing with any other version can never be filled`);
@@ -1705,7 +1705,7 @@ export async function mockPostJson(path, body) {
     throw bad(`input0 nSequence 0x${(Number(seq) >>> 0).toString(16).padStart(8, "0")} sets a relative timelock: use 0xfffffffd, 0xfffffffe or 0xffffffff (any value >= 0x80000000) so the listing can be filled`);
   }
   const outpoint = `${L.input0.txid}:${L.input0.vout}`;
-  // rvs-2 (§7.4): the carrier of an open COMMIT is never listed.
+  // §7.4: the carrier of an open COMMIT is never listed.
   const reserving = L.input0.vout === 0 ? w.commits.get(String(L.input0.txid).toLowerCase()) : null;
   if (reserving && reserving.status === "open" && !reserving.spent_txid && tipHeight() < reserving.height + MAX_COMMIT_AGE) throw bad(COMMIT_CARRIER_LISTING_TEXT, 409);
   if (L.input0.address) ensureSeeded(L.input0.address);
@@ -1736,7 +1736,7 @@ export async function mockPostJson(path, body) {
   // mempool — a buyer must not be handed it again (and it is exempt from
   // expiry, so there is nothing to renew).
   if (existing && existing.status === "filling") throw bad("outpoint has a pending spend in the mempool (filling)", 409);
-  // trading-4 (§7.4): the book keeps the CHEAPEST live signed listing of an
+  // §7.4: the book keeps the CHEAPEST live signed listing of an
   // outpoint — the cheaper PSBT stays fillable on-chain whatever the book
   // shows; the same or a lower price replaces it.
   if (existing && existing.status === "open" && order.unit_price > existing.unit_price + 1e-9) {
@@ -1754,7 +1754,7 @@ export async function mockPostJson(path, body) {
     const perAddress = [...w.orders.values()].filter((o) => o.seller === u.address && o.status === "open" && !(o.expires_at <= ts)).length;
     if (perAddress >= MAX_OPEN_LISTINGS_PER_ADDRESS) throw bad(sellerCapError(perAddress, MAX_OPEN_LISTINGS_PER_ADDRESS), 400);
   }
-  // §7.4 price band (audit M-11), the live indexer's exact rule: at most
+  // §7.4 price band, the live indexer's exact rule: at most
   // 100× the ticker's best OTHER open ask; no band on an otherwise empty book.
   const others = [...w.orders.values()].filter((o) => o.ticker === ticker && o.status === "open" && o.id !== outpoint);
   if (others.length) {

@@ -103,7 +103,7 @@ export function walletBalanceText(total, confirmed, { short = false } = {}) {
 
 /**
  * The minted share as a percentage string that never reads "100%" before
- * the supply is actually reached (audit mine-6): rounded as usual, but
+ * the supply is actually reached: rounded as usual, but
  * capped just under 100 while `minted < supply` ("99.99%" at 20,999,900 of
  * 21,000,000 — not "100.00%" next to "Remaining 100"). `digits` decimals
  * ("5.88%").
@@ -160,7 +160,7 @@ export function fmtTime(unixSeconds) {
   return d.toLocaleString("en-US", { hour12: false });
 }
 
-/** "2026-09-27" (UTC) for a unix-seconds timestamp. */
+/** "YYYY-MM-DD" (UTC) for a unix-seconds timestamp. */
 export function fmtDateUtc(unixSeconds) {
   if (!unixSeconds) return "—";
   const d = new Date(unixSeconds * 1000);

@@ -1,4 +1,4 @@
-// VITE_SPEC_URL validation (audit L-16): the footer's "Protocol spec" link
+// VITE_SPEC_URL validation: the footer's "Protocol spec" link
 // target comes from a build-time env value. Like VITE_INDEXER_URL it is
 // validated before it can become an href — an https URL, or an absolute
 // same-origin path — and anything else falls back to the copy served

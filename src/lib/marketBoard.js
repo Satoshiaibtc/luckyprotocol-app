@@ -1,6 +1,6 @@
 // Pure helpers for the #/market page and the board's market gating.
 //
-// Owner's rules (2026-09-27, 2026-09-28): a token's market opens only once
+// A token's market opens only once
 // the token is fully minted AND the block that completed the supply has
 // FINAL_DEPTH (6) confirmations (src/lib/finality.js). "Minted" is the
 // CUMULATIVE credited MINE yield — burns and unspendable outputs never
@@ -97,7 +97,7 @@ export function mintedOutFirst(rows) {
 }
 
 /**
- * What the board shows when the current view is empty (audit visit-1) —
+ * What the board shows when the current view is empty —
  * `items` the whole registry, `shown` the current view after filter + sort,
  * `sort` the view id, `q` the filter text. Tested in test/journeys.test.js.
  *   "none"         — the registry is empty

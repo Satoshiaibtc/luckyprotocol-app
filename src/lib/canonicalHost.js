@@ -1,4 +1,4 @@
-// Canonical host (audit L-15). Cloudflare Pages also serves the app from
+// Canonical host. Cloudflare Pages also serves the app from
 // its default *.pages.dev origin. localStorage and wallet connections are
 // per origin, so the pending-carrier registry (src/lib/pending.js) written
 // on one host is invisible on the other — a just-created token carrier
@@ -21,10 +21,10 @@ export function canonicalRedirectTarget({ hostname, pathname = "/", search = "",
 }
 
 /**
- * A path-style link to a hash route (audit visit-8): Pages serves
- * index.html for ANY path, so /t/LUCKY rendered the board with no notice
- * and every later link carried the bogus path (/t/LUCKY#/market). Returns
- * the URL to replace the current one with, or null when the path is the
+ * A path-style link to a hash route: Pages serves index.html for ANY
+ * path, so /t/LUCKY would render the board with no notice and every later
+ * link would carry the bogus path (/t/LUCKY#/market). Returns the URL to
+ * replace the current one with, or null when the path is the
  * root or names a file (anything with an extension).
  *
  *   /t/LUCKY            → /#/t/LUCKY

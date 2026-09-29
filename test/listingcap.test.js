@@ -5,7 +5,7 @@
 // the mock order book enforcing the same cap with the indexer's exact text.
 // Plain Node.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 // The mock's dev knob, read when its world is first built: the simulated
 // wallet gets 9 open BLOK listings plus two unlisted BLOK carriers. Set
@@ -33,17 +33,9 @@ const row = (id, status = "open", extra = {}) => ({ id, seller: ME, ticker: "BLO
   assert.equal(MAX_OPEN_LISTINGS_PER_ADDRESS, 10);
   assert.equal(sellerCapError(), "seller has 10 open orders (cap 10)", "the order book's exact text");
   assert.equal(sellerCapError(11, 10), "seller has 11 open orders (cap 10)", "the real count, above the cap");
-  const RS = new URL("../../luckyprotocol-indexer/src/indexer.rs", import.meta.url);
-  if (existsSync(RS)) {
-    const src = readFileSync(RS, "utf8");
-    const m = /pub const MAX_OPEN_ORDERS_PER_SELLER: usize = (\d[\d_]*);/.exec(src);
-    assert.ok(m, "the indexer checkout states the per-address cap");
-    assert.equal(Number(m[1].replace(/_/g, "")), MAX_OPEN_LISTINGS_PER_ADDRESS, "the app's cap equals the indexer's");
-    assert.ok(src.includes('"seller has {} open orders (cap {})"'), "the indexer's refusal text is the one SELLER_CAP_RE reads");
-    console.log("listing cap: 10, the same number and refusal text as the indexer checkout");
-  } else {
-    console.log("listing cap: indexer checkout not beside the app — constant parity check skipped");
-  }
+  // The served spec states the same cap (test/web.test.js checks it against
+  // this constant), and the indexer holds its own code to the spec.
+  console.log("listing cap: 10, with the order book's exact refusal text");
 }
 
 // ---- the counter: open listings of this address, every ticker ----------------------------------------------------
@@ -215,7 +207,7 @@ const row = (id, status = "open", extra = {}) => ({ id, seller: ME, ticker: "BLO
   assert.deepEqual([lower.replaced, lower.price_sats], [true, cur - 1]);
   const renewed = await list(target, cur - 1);
   assert.equal(renewed.replaced, true);
-  // a higher price is still the trading-4 409, not the cap
+  // a higher price is still the withdraw-first 409, not the cap
   await assert.rejects(list(target, cur + 10), (e) => e.status === 409 && /withdraw first/.test(e.message));
   // the wallet's own filling listing: the pending-spend refusal comes first, as in the order book
   const filling = unlisted.find((u) => u.balances.BLOK === 1_921);

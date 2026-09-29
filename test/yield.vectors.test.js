@@ -1,6 +1,6 @@
 // Cross-impl conformance test for the LuckyProtocol yield function. Runs in
 // plain Node — no test framework, no deps — against the golden vectors
-// shared with the Rust indexer (PROTOCOL.md §3). A mismatch
+// shared with the indexer (PROTOCOL.md §3). A mismatch
 // throws and exits non-zero, so `npm test` works as a CI gate.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -42,7 +42,7 @@ for (const v of vectors) {
   passed++;
 }
 
-// Spec §3 (audit consensus-1): `block_hash` is the DISPLAY form — the
+// Spec §3: `block_hash` is the DISPLAY form — the
 // double-SHA256 of the 80-byte header, byte-reversed, as getblockhash and
 // explorers print it. Real mainnet headers pin that: the display hash is
 // recomputed from the header, and the internal (un-reversed) order ends in
@@ -67,16 +67,17 @@ for (const v of vectors) {
 }
 
 // The indexer's copy of the vectors is the canonical one: byte-identical
-// when the sibling checkout is present (skipped in a lone app checkout).
+// when LP_INDEXER_DIR names a local indexer checkout (skipped otherwise).
 {
   let canon = null;
   try {
-    canon = readFileSync(join(here, "../../luckyprotocol-indexer/tests/yield_vectors.json"));
+    if (process.env.LP_INDEXER_DIR) canon = readFileSync(join(process.env.LP_INDEXER_DIR, "tests", "yield_vectors.json"));
   } catch {
-    console.log("yield vectors: indexer checkout not beside the app — byte-identity check skipped");
+    /* reported below */
   }
+  if (!canon) console.log("yield vectors: LP_INDEXER_DIR not set — byte-identity check skipped");
   if (canon) {
-    assert.ok(readFileSync(join(here, "../src/lib/yield_vectors.json")).equals(canon), "src/lib/yield_vectors.json must be byte-identical to luckyprotocol-indexer/tests/yield_vectors.json");
+    assert.ok(readFileSync(join(here, "../src/lib/yield_vectors.json")).equals(canon), "src/lib/yield_vectors.json must be byte-identical to the indexer's copy");
     console.log("yield vectors: byte-identical to the indexer's");
   }
 }

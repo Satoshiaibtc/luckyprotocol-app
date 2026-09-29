@@ -6,7 +6,7 @@ import DigitChip from "./DigitChip.jsx";
  * `LATEST BLOCK  #969,800  …a91[c]  → 500 LUCKY · tier a–e · 5 of 16  12 min ago`
  * `remaining` (tokens left, or null): a minted-out ticker drops the arrow —
  * no MINE is credited anything — and near the cap the arrow reads
- * "at most N" (audit mine-7).
+ * "at most N".
  */
 export default function TipReadout({ tipBlock, ticker = "", remaining = null }) {
   const hash = tipBlock?.data?.hash;

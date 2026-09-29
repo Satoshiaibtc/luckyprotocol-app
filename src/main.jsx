@@ -19,11 +19,11 @@ import App from "./App.jsx";
 import { canonicalRedirectTarget, hashRouteForPath } from "./lib/canonicalHost.js";
 
 // A path-style link (/t/LUCKY) becomes its hash route (/#/t/LUCKY) before
-// anything renders — the router reads only the hash (audit visit-8).
+// anything renders — the router reads only the hash.
 const pathFix = hashRouteForPath({ pathname: location.pathname, search: location.search, hash: location.hash });
 const fixed = pathFix ? new URL(pathFix, location.origin) : location;
 
-// Canonical host (audit L-15): the default *.pages.dev origin has its own
+// Canonical host: the default *.pages.dev origin has its own
 // localStorage, so the pending-carrier registry written there is invisible
 // on the real host (and vice versa). Send such visits to the canonical
 // origin with the same path + hash before anything renders. Dev / mock are

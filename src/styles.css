@@ -576,7 +576,7 @@ input[type="search"]::-webkit-search-decoration {
   gap: 10px;
   flex-wrap: wrap;
 }
-/* Desktop header spans the whole window (owner, 2026-09-27): wordmark at the
+/* Desktop header spans the whole window: wordmark at the
    left edge, the SYS pill + wallet at the right edge, one row. The page body
    below keeps its --max column. */
 @media (min-width: 721px) {
@@ -2317,7 +2317,7 @@ input[type="search"]::-webkit-search-decoration {
   flex-wrap: wrap;
 }
 /* Static inline styles moved to classes so the CSP's style-src can be 'self'
-   without 'unsafe-inline' (audit L-14). The remaining dynamic style props
+   without 'unsafe-inline'. The remaining dynamic style props
    (bar widths, grid columns) are applied by React through the CSSOM, which
    CSP does not restrict. */
 .tier-table .th .th-right {
@@ -2597,7 +2597,7 @@ input[type="search"]::-webkit-search-decoration {
   color: var(--danger);
 }
 .cols-trades .tr {
-  /* Total: 112px fits "0.00028365 BTC" (audit portfolio-8) */
+  /* Total: 112px fits "0.00028365 BTC" */
   grid-template-columns: 76px minmax(0, 1.2fr) 78px 112px minmax(0, 1fr) 72px;
 }
 .cols-mines .tr {
@@ -2728,9 +2728,8 @@ input[type="search"]::-webkit-search-decoration {
     gap: 2px;
   }
 }
-/* Preview card + the Deploy // log underneath it (the log moved here from
-   the form column at the owner's request); no longer sticky, the column is
-   as tall as the log. */
+/* Preview card + the Deploy // log underneath it (the log lives here, not in
+   the form column); no longer sticky, the column is as tall as the log. */
 .create-preview {
   display: grid;
   gap: 10px;
@@ -5388,7 +5387,7 @@ button.wallet-addr:focus-visible {
   }
 }
 
-/* ---- activation banner (before ACTIVATION_HEIGHT only, audit visit-3) --------------------------- */
+/* ---- activation banner (before ACTIVATION_HEIGHT only) ------------------------------------------ */
 
 .activation-banner {
   border-bottom: 1px solid var(--border);
@@ -5420,7 +5419,7 @@ button.wallet-addr:focus-visible {
   justify-content: center;
 }
 
-/* ---- order tables: the unit price under the amount on phones (audit portfolio-8) ---------------- */
+/* ---- order tables: the unit price under the amount on phones ------------------------------------ */
 
 .tr .unit-sub {
   display: none;
@@ -5434,7 +5433,7 @@ button.wallet-addr:focus-visible {
   }
 }
 
-/* ---- phone listings table: seller under the amount, total in sats (audit market-7) ------------- */
+/* ---- phone listings table: seller under the amount, total in sats ------------------------------ */
 
 .cols-book-c .tr {
   grid-template-columns: 20px minmax(0, 1fr) 72px 92px;
@@ -5452,7 +5451,7 @@ button.wallet-addr:focus-visible {
   color: var(--accent);
 }
 
-/* ---- block tape: "70% full" fits the ~52 px desktop tile (audit visit-10) ---------------------- */
+/* ---- block tape: "70% full" fits the ~52 px desktop tile --------------------------------------- */
 
 .tile-fullness.narrow {
   font-size: 9px;
@@ -5553,7 +5552,7 @@ button.wallet-addr:focus-visible {
   }
 }
 
-/* ---- concurrent MINEs: the pending list under the button (decision F) -------------------------- */
+/* ---- concurrent MINEs: the pending list under the button --------------------------------------- */
 
 .mine-pending {
   display: grid;
@@ -5600,7 +5599,7 @@ button.wallet-addr:focus-visible {
   color: var(--danger);
 }
 
-/* ---- portfolio: Send per ticker, multi-ticker carriers (decision G) ----------------------------- */
+/* ---- portfolio: Send per ticker, multi-ticker carriers ------------------------------------------ */
 
 .bal-item {
   display: grid;
@@ -5655,7 +5654,7 @@ button.wallet-addr:focus-visible {
   gap: 6px;
 }
 
-/* ---- send page (decision G) -------------------------------------------------------------------- */
+/* ---- send page --------------------------------------------------------------------------------- */
 
 .send-grid {
   display: grid;
@@ -5783,7 +5782,7 @@ button.wallet-addr:focus-visible {
   }
 }
 
-/* ---- buy sheet: amount not independently verified (trading-2); sell: raise = withdraw first ---- */
+/* ---- buy sheet: amount not independently verified; sell: raise = withdraw first ---------------- */
 
 .amount-tag {
   margin-left: 4px;

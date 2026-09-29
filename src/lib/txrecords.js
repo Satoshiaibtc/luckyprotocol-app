@@ -3,7 +3,7 @@
 // localStorage ('lp.txrec.<address>'), so a reload, a navigation or an
 // account switch does not forget it.
 //
-// Two jobs (audit usertx-2 / usertx-6):
+// Two jobs:
 //
 //   * Its INPUTS are excluded from fee selection until the tx confirms or
 //     drops. The indexer's /btc-utxos confirmed set only changes when a
@@ -31,8 +31,8 @@
 // A confirmed DEPLOY or MINE is KEPT until the page that shows its result
 // has shown it (`done`): the Create page's registry verdict, the mine
 // console's final credit — "tracking resumes when you return" must hold
-// even when another page's build refreshed the records in between (audit
-// mine-4). Pure parts are unit-tested in test/pending.test.js and
+// even when another page's build refreshed the records in between. Pure
+// parts are unit-tested in test/pending.test.js and
 // test/flows.test.js.
 
 import { FINAL_DEPTH, confirmationsAt } from "./finality.js";
@@ -149,7 +149,7 @@ export function trimRecords(list, max = TXREC_MAX) {
  * The record of this browser's own transaction that spends `outpoint`
  * ("txid:vout") and is in the mempool, or null. A listing whose pending
  * spend is one of these is the seller's own withdrawal (or split), not a
- * buyer's fill (audit portfolio-1).
+ * buyer's fill.
  *
  * When the indexer names the pending spend (`pendingSpendTxid`), only that
  * txid counts — even a record already seen confirmed (a chain

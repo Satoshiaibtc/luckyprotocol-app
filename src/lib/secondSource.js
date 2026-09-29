@@ -1,4 +1,4 @@
-// Second source for a listing's outpoint (audit M-12).
+// Second source for a listing's outpoint.
 //
 // Checks 1–5 of PROTOCOL.md §7.2 all read the same indexer, so a
 // compromised indexer plus a colluding seller could vouch for an outpoint
@@ -20,18 +20,18 @@
 // or — only in the block that completed the supply (`capHeight`, the
 // token's minted_out_height) — the partial credit min(tier, remaining), a
 // positive multiple of 100 below the tier, which the second source cannot
-// confirm ("unverified", audit consensus-5); a full tier in a block after
+// confirm ("unverified"); a full tier in a block after
 // the cap block is a disagreement (§3 credits 0 there). A SEND carrier is
 // either TO_OUT (AMT must equal `amount`) or the residual slot (§2.3 /
 // §4.1: CHANGE_OUT, or the default output when CHANGE_OUT is unusable),
 // whose balance depends on the inputs — only the slot is checked
 // ("unverified"). Any other vout, opcode, or no LUCKY-20 payload at all is
-// a disagreement, and so is a listing of 0 tokens (audit trading-2).
+// a disagreement, and so is a listing of 0 tokens.
 //
 // Verdicts: "agree" (proceed), "unverified" (the outpoint agrees, but the
 // second source cannot confirm the TOKEN AMOUNT on it — mempool.space sees
 // no token balances: the UI says "amount not independently verified" and
-// requires an extra explicit confirmation, audit trading-2), "disagree"
+// requires an extra explicit confirmation), "disagree"
 // (hard stop — the two sources do not describe the same UTXO, or the
 // amount is one the rules can never credit), "unreachable" (timeout /
 // network error / server error / non-JSON — the UI shows a notice and
@@ -77,7 +77,7 @@ export function secondSourceUrls(txid, vout, origin = SECOND_SOURCE_ORIGIN) {
 
 /**
  * The creating tx's LUCKY-20 payload as the indexer would read it (§2,
- * audit M-3: the lowest-index OP_RETURN whose single push parses), from
+ * the lowest-index OP_RETURN whose single push parses), from
  * the explorer's `vout[].scriptpubkey` hex. Null when there is none.
  */
 export function payloadOfTxVouts(vouts) {

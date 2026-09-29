@@ -1,5 +1,4 @@
-// The Send page's pure logic (owner decision G, audits portfolio-2 /
-// portfolio-3) — unit-tested in test/send.test.js.
+// The Send page's pure logic — unit-tested in test/send.test.js.
 //
 // A SEND moves `AMT` of ONE ticker from the tx's input pool (the carriers
 // it spends) to vout0; the residual of that ticker AND every other ticker
@@ -17,7 +16,7 @@
 //   sendLayout        the §2.3 reference layout, as the confirm screen shows it
 //   parseSendAmount   the amount field → whole tokens ("1,000" allowed)
 //   sendFormHint      the one line saying why Review is still off
-//   sendReviewModel   what the confirm screen shows — frozen at signing (ux-2)
+//   sendReviewModel   what the confirm screen shows — frozen at signing
 //   pendingSendsOf    this browser's unconfirmed sends of a ticker
 
 import { checkRecipientAddress } from "./psbt.js";
@@ -122,7 +121,7 @@ export function spendableAmount(rows) {
 /**
  * The whole-token amount the field text means, or null: plain digits, or
  * digits grouped by commas in threes ("1,000" — how the page itself prints
- * amounts, so a pasted figure works; audit ux-7). Anything else is null.
+ * amounts, so a pasted figure works). Anything else is null.
  */
 export function parseSendAmount(text) {
   const t = String(text ?? "").trim();
@@ -171,7 +170,7 @@ export function recipientState(text, self) {
  * The one line under the form saying why Review is still off, or null when
  * nothing (or a message already on screen) explains it. A specific amount
  * error is shown by the field itself, so no second, contradicting line is
- * added for it (audit ux-7).
+ * added for it.
  */
 export function sendFormHint({ connected, indexerOk, lagText, rcptState, amount, amountErr, keysCount, pickedTotal, mode, freeTotal, ticker, feeHint }) {
   if (!connected) return null;
@@ -193,7 +192,7 @@ export function sendFormHint({ connected, indexerOk, lagText, rcptState, amount,
  * What the confirm screen shows for a SEND of `amount` from the carriers
  * `keys` of `rows` to `toAddress` (`self` = your address): the §2.3 layout,
  * the other tickers riding along and the listed carriers it withdraws. The
- * page freezes this at signing (audit ux-2): afterwards the live rows no
+ * page freezes this at signing: afterwards the live rows no
  * longer hold the spent carriers, so a model rebuilt from them would
  * describe a transaction that was never sent.
  */

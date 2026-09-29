@@ -32,11 +32,11 @@ const STATUS_POLL_MS = 15_000;
 const LAGGING_POLL_MS = 5_000;
 
 /**
- * The site-wide line under the top bar while the protocol is not active yet
- * (audit visit-3): every page — the board's "anyone can mine it", an empty
+ * The site-wide line under the top bar while the protocol is not active yet:
+ * every page — the board's "anyone can mine it", an empty
  * Market or Activity — reads differently when nothing can be created or
  * mined for another few days. At tip ACTIVATION_HEIGHT − 1 it says that
- * Reserve and Mine are already open (decision B). Hidden while the tip is
+ * Reserve and Mine are already open. Hidden while the tip is
  * unknown (the gates still fail closed and each action says so) and from
  * activation on.
  */
@@ -129,7 +129,7 @@ export default function App() {
   const price = usePoll((s) => indexer.price(s), 60_000, []);
   const indexerOk = !health.error && !!health.data;
 
-  // Start the indexer's UTXO scan for a wallet as soon as it connects (api-1):
+  // Start the indexer's UTXO scan for a wallet as soon as it connects:
   // the first /btc-utxos query of an address queues a scan that takes a
   // few minutes, and it is better spent while the user looks around than
   // after they press Mine. Fire-and-forget: the 503 / 429 is expected.

@@ -33,7 +33,7 @@ const HEX_RE = /^[0-9a-f]+$/;
  * A draft (ticker + salt chosen, no COMMIT signed yet) older than this is
  * abandoned work — the wallet window of that attempt is long gone — and may
  * be cleared. A younger one may belong to a signature that is still open in
- * this or another tab, so it is kept (audit LENS-3).
+ * this or another tab, so it is kept.
  */
 export const DRAFT_STALE_MS = 30 * 60 * 1000;
 
@@ -132,7 +132,7 @@ export function normalizeDeployRecord(r) {
     // Publish transactions this reservation sent that the indexer's node
     // lost sight of while the reservation stayed open (the reveal was then
     // released so the user could publish again). One of them may still
-    // confirm; if it does, it is ours (audit LENS-2).
+    // confirm; if it does, it is ours.
     droppedReveals: commit ? txidList(r.droppedReveals) : [],
   };
 }
@@ -220,8 +220,8 @@ export function switchStepTo(step, txid, { height = null, now = Date.now() } = {
 
 /**
  * Why the indexer's record of the COMMIT (`c`, a CommitView) does not
- * belong to the reservation `rec` of `address`, or null when it does
- * (audit LENS-4): its `hash` must be the record's H (so the saved ticker,
+ * belong to the reservation `rec` of `address`, or null when it does:
+ * its `hash` must be the record's H (so the saved ticker,
  * salt and carrier script reveal it) and its `committer` the connected
  * address (so the deployer is the user). `addressScript` (optional, the
  * scriptPubKey hex of `address`) must be the script the record's H was made
@@ -360,7 +360,7 @@ export function ownPublishTxids(rec) {
  * "reserve-unseen" / "publish-unseen": the indexer's node has not known the
  * step (nor any version it replaced) for a few minutes. Not a dead end — a
  * miner may still confirm it — so the record and its salt are kept and the
- * page keeps checking (audits LENS-2 / ux-1).
+ * page keeps checking.
  *
  * Depth (src/lib/finality.js): "settling" — step 1 confirmed but Publish
  * waits for PUBLISH_MIN_CONFIRMATIONS; "closing" — too few blocks left to
@@ -386,7 +386,7 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
       if (row) {
         if (ownPublishTxids(rec).has(String(row.deploy_txid || "").toLowerCase())) return "recording";
         // Someone else's DEPLOY: final only at FINAL_DEPTH — until then a
-        // chain reorganization could still undo it (audit: 1-conf verdicts).
+        // chain reorganization could still undo it.
         return rowIsFinal(row, indexed) ? "taken" : "taken-tentative";
       }
       if (!Number.isInteger(rec.commit.height)) return rec.commit.unseenAt ? "reserve-unseen" : "reserve-pending";
@@ -398,7 +398,7 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
       if (commitStatus !== "open" || !t?.ready) return "recording";
       if (!t.settled) return "settling";
       // The registry row of the ticker has not been read yet (undefined, not
-      // null): never offer Publish before it is known to be free (ux-5).
+      // null): never offer Publish before it is known to be free.
       if (row === undefined) return "recording";
       return "ready";
     }
@@ -422,7 +422,7 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
       // word that OUR publish spent the reservation. After a chain
       // reorganization took the publish out of its block the reservation is
       // open again and there is no row either: that is not a verdict, the
-      // page keeps checking (audit: 1-conf verdicts).
+      // page keeps checking.
       if (
         row === null &&
         Number.isInteger(rowAsOf) &&
@@ -463,7 +463,7 @@ export const DEAD_END_PHASES = new Set(["taken", "closing", "expired", "invalid"
  * (`commitData === null`, /commits 404) although it has applied the blocks
  * after it (`indexed ≥ height + 1`), and that was seen on `misses` ≥ 2
  * reads in a row (one read can race the indexer). The page then asks
- * about every version of step 1 again (audit: reorganized COMMIT).
+ * about every version of step 1 again.
  */
 export function commitRecheckNeeded({ commit, commitData, indexed, misses }) {
   if (!commit || !Number.isInteger(commit.height) || commitData !== null) return false;
@@ -630,8 +630,7 @@ export function createDeployRecordStore({ storage, now = () => Date.now() } = {}
      * scriptPubKey hex of the carrier the COMMIT will pay). → the record.
      * Refuses (throws, `code: "busy"`) while `address` has any other record
      * that is not a stale draft — a reservation in another tab or window
-     * included, so two Reserve clicks can never overwrite each other's salt
-     * (audit LENS-4).
+     * included, so two Reserve clicks can never overwrite each other's salt.
      */
     start(address, { ticker, salt, carrierScript }) {
       const rec = normalizeDeployRecord({ ticker, salt, carrierScript, createdAt: now(), commit: null, reveal: null });

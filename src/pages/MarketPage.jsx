@@ -30,7 +30,7 @@ export default function MarketPage() {
   const { open, next } = useMemo(() => partitionMarkets(items, { sort }), [items, sort]);
   const tip = health.data?.tip_height ?? null;
   const led = ledFromPoll(tokens);
-  // No answer yet (or only a failed one): the counts are unknown, not 0 (audit visit-7).
+  // No answer yet (or only a failed one): the counts are unknown, not 0.
   const unknown = !tokens.data;
 
   return (

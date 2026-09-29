@@ -1,6 +1,6 @@
 // Flat ESLint config (ESLint v9+ format).
 //
-// Mirrors luckyprotocol-web/eslint.config.js: a SAFETY-NET lint, not a
+// A SAFETY-NET lint, not a
 // style enforcer. Build-breaking rules are the ones that catch real
 // correctness bugs (conditional hooks, undefined globals, duplicate keys,
 // unreachable code, forgotten debugger/alert). Everything else warns.

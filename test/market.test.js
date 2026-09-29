@@ -1,5 +1,5 @@
 // Pure-part tests for src/lib/market.js: candle geometry + axis ticks,
-// order-book selection, the fill cost quote, the audit M-9 cancel fee rule
+// order-book selection, the fill cost quote, the cancel fee rule
 // and the sign-coloured change formatter. Plain Node, no framework.
 import assert from "node:assert/strict";
 import {
@@ -135,7 +135,7 @@ const T = "ab".repeat(32);
   console.log("market book: sorted asks, own / filling / closed rows unselectable, fill quote = price + 3 × 546 + fee");
 }
 
-// ---- M-9 cancel fee rule ------------------------------------------------------------------
+// ---- cancel fee rule ------------------------------------------------------------------
 {
   const open = { status: "open", pending_feerate: null, pending_fee_sats: null, pending_vsize: null };
   assert.deepEqual(cancelFeeRate({ chosenSatVb: 1.5, order: open, incrementalRelayFee: 0.1, vsize: 250 }), { satVb: 1.5, floorSatVb: null, rateFloor: null, absFloor: null, incr: null, overCap: false, raised: false }, "open order: the chosen rate, untouched");
@@ -175,7 +175,7 @@ const T = "ab".repeat(32);
 
   const notFilling = cancelFeeRate({ chosenSatVb: 2, order: { status: "open", pending_feerate: 50, pending_fee_sats: 5000 }, incrementalRelayFee: 0.1, vsize: 250 });
   assert.equal(notFilling.satVb, 2, "pending fields on a non-filling order are ignored");
-  console.log("market cancel (M-9): filling → max(chosen, pending_feerate + increment + 1, absolute-fee floor); over-cap flagged");
+  console.log("market cancel: filling → max(chosen, pending_feerate + increment + 1, absolute-fee floor); over-cap flagged");
 }
 
 // ---- change -------------------------------------------------------------------------------

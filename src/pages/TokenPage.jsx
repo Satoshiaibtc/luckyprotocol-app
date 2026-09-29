@@ -59,7 +59,7 @@ export default function TokenPage({ ticker, params, navigate }) {
     if (params.tab && !ALL_TABS.includes(params.tab)) navigate(tokenHref(ticker), { replace: true });
   }, [params.tab, ticker, navigate]);
 
-  // The tab a visit opened on stays put (audit mine-3): without `?tab=`, a
+  // The tab a visit opened on stays put: without `?tab=`, a
   // token that becomes minted out mid-visit would switch its default to
   // Market on the next poll and unmount a MINE in flight. `pinned` is the
   // default seen on the first load (and whatever tab the user picks since).

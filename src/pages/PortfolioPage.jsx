@@ -29,13 +29,12 @@ export default function PortfolioPage() {
 
   const balances = usePoll(address ? (s) => indexer.balances(address, s) : null, POLL_MS, [address]);
   // Carriers that hold more than one ticker cannot be listed (§7.1) — the
-  // Balances panel offers to split them (a SEND to yourself, audits
-  // portfolio-2 / portfolio-3).
+  // Balances panel offers to split them (a SEND to yourself).
   const carriers = usePoll(address ? (s) => indexer.tokenUtxos(address, s) : null, POLL_MS, [address]);
   const multiCarriers = useMemo(() => (carriers.data || []).filter((u) => Object.keys(u.balances || {}).length > 1), [carriers.data]);
   // /mines/:addr is paged by the indexer (50 / page, max 200, indexer API): the
   // table pages with Load more, and the mix reads the newest 200 and says so
-  // — never a silent "50 mines" (audit portfolio-4).
+  // — never a silent "50 mines".
   const mines = usePaged(address ? (offset, limit, s) => indexer.minesByAddress(address, { offset, limit }, s) : null, { limit: 50, deps: [address], refreshMs: POLL_MS });
   const mixQ = usePoll(address ? (s) => indexer.minesByAddress(address, { limit: indexer.ADDR_LIST_MAX_LIMIT }, s) : null, POLL_MS, [address]);
   const mixRows = mixQ.data?.items || null;
@@ -67,7 +66,7 @@ export default function PortfolioPage() {
   const liveCount = listings.filter((o) => o.status === "open" || o.status === "filling").length;
   const fillingCount = listings.filter((o) => o.status === "filling").length;
 
-  // Withdraw = SEND-to-self of the listed carrier (the spec's cancel; M-9 rule inside the hook); Renew = re-POST.
+  // Withdraw = SEND-to-self of the listed carrier (the spec's cancel; the replacement-fee rule lives in the hook); Renew = re-POST.
   const { chain, status, run, reset, stopWaiting, busy } = useSendToSelf({ onSettled: () => orders.refresh() });
   // This browser's own pending transactions: a listing whose pending spend
   // is one of them is the user's own withdrawal, not a buyer's fill.
@@ -140,7 +139,7 @@ export default function PortfolioPage() {
                         {t?.floor_unit_price ? ` · floor ${fmtUnit(t.floor_unit_price)}` : ""}
                       </span>
                     </a>
-                    {/* Any token can be sent, market open or not (decision G). */}
+                    {/* Any token can be sent, market open or not. */}
                     <a className="btn btn-sm bal-send" href={sendHref(ticker)} aria-label={`Send ${ticker}`}>
                       Send
                     </a>
@@ -217,7 +216,7 @@ export default function PortfolioPage() {
             <>
               {chain.rule?.raised && (
                 <div className="notice">
-                  <strong>Replacement fee (M-9).</strong> A fill of this listing is pending in the mempool at {chain.order?.pending_feerate ?? "?"} sat/vB; replacing it requires at least {chain.rule.floorSatVb} sat/vB — this transaction uses {chain.rule.satVb} sat/vB.
+                  <strong>Replacement fee.</strong> A fill of this listing is pending in the mempool at {chain.order?.pending_feerate ?? "?"} sat/vB; replacing it requires at least {chain.rule.floorSatVb} sat/vB — this transaction uses {chain.rule.satVb} sat/vB.
                 </div>
               )}
               <TxProgress

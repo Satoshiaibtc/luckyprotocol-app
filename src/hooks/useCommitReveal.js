@@ -179,7 +179,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
     if (deployStage(r) === "draft") {
       // A draft may belong to a wallet window that is still open — in
       // another tab, or in an earlier mount of this page the user navigated
-      // away from (audit LENS-3): it is kept, and only a stale one (older
+      // away from: it is kept, and only a stale one (older
       // than DRAFT_STALE_MS, no signature can still be pending) is cleared.
       if (isStaleDraft(r)) {
         clearDeployRecord(address);
@@ -247,7 +247,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
   });
 
   // A tracked tx has not been in the node's mempool for DROP_GRACE_MS
-  // without confirming. That is NOT proof it is gone (audits LENS-2 / ux-1):
+  // without confirming. That is NOT proof it is gone:
   // after a Speed up a miner may confirm the ORIGINAL version, and a node
   // may evict a tx other nodes still hold. So the step is only marked
   // unseen — the record and its salt stay — and the version check below
@@ -399,7 +399,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
   }, [commitTxid, commitPollKey]);
   const commitData = commitInfo.txid === commitTxid ? commitInfo.data : undefined;
 
-  // Chain reorganizations under the reservation (audit: reorganized COMMIT):
+  // Chain reorganizations under the reservation:
   //  - the indexer records step 1 at another height → follow it (countdown, links);
   //  - it no longer has step 1 although it applied the blocks after it (two
   //    reads in a row) → ask about every version again: confirmed elsewhere,
@@ -657,8 +657,8 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         const signed = await wallet.signPsbt(built.psbtHex, { inputIndexes: built.inputIndexes, address });
         signedTxid = rawTxSummary(extractRawTxHex(signed)).txid;
         const step = { txid: signedTxid, psbt: built.psbtHex, signedAt: Date.now(), sentAt: null, height: null, feeSats: built.feeSats, feeRateSatVb: built.feeRateSatVb, vsize: built.estimatedVsize, changeVout: built.changeVout, inputs: built.inputs };
-        // Only broadcast when the stored draft is still THIS one (audits
-        // LENS-3 / LENS-4): if it was discarded or replaced while the wallet
+        // Only broadcast when the stored draft is still THIS one: if it was
+        // discarded or replaced while the wallet
         // window was open, the salt of this COMMIT would exist nowhere.
         const claimed = claimDeployRecord(
           address,
@@ -731,7 +731,7 @@ export function useCommitReveal({ address, pubkeyHex, providerName, tip, indexed
         setCommitInfo({ txid: r.commit.txid, data: c, error: null });
         if (c.status !== "open") throw new Error(`Your reservation is ${commitStatusText(c.status)} — nothing was sent.`);
         // The recorded COMMIT must be the one this record's ticker + salt +
-        // carrier script reveal, reserved by this address (audit LENS-4) —
+        // carrier script reveal, reserved by this address —
         // else the publish would pay the fee and register nothing (or
         // someone else).
         const mismatch = commitMismatch(c, r, address, { addressScript: carrierScriptHex(address) });

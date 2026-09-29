@@ -279,7 +279,7 @@ export async function connect(id, { silent = false } = {}) {
     // newer builds, `compressedPublicKey`). Use whichever it gave — the
     // x-only one only after checking that it derives the returned address —
     // so the in-app browser, whose provider documents no getPublicKey(),
-    // connects with this one prompt (audit wallet-4).
+    // connects with this one prompt.
     pubkeyHex = pubkeyFromConnect(res, address, p2trAddressOfXOnly);
   } else {
     try {
@@ -397,8 +397,7 @@ export async function getBalance() {
  * rather than trusting the wallet's list alone.
  *
  * OKX has no such method (the mock omits it on purpose), so the rows come
- * from the indexer's `/btc-utxos/:addr` CONFIRMED set. On that path
- * (audit M-8):
+ * from the indexer's `/btc-utxos/:addr` CONFIRMED set. On that path:
  *   * if the provider has `getInscriptions`, every inscription outpoint is
  *     paged out and dropped → `assetSafe:"inscriptions-only"` (runes are
  *     still not covered — no provider exposes a runes UTXO list and the
@@ -410,8 +409,8 @@ export async function getBalance() {
  * the UI shows the notice and lists the inputs at signing time.
  *
  * On EVERY path, the inputs of transactions this browser broadcast that
- * have not confirmed yet are dropped (src/lib/txrecords.js, audit
- * usertx-6): the indexer's confirmed set only changes per block, so
+ * have not confirmed yet are dropped (src/lib/txrecords.js): the
+ * indexer's confirmed set only changes per block, so
  * without this a second build would re-spend them and — full-RBF — replace
  * the first transaction (a listing withdrawal undone by the next MINE).
  *
@@ -572,8 +571,7 @@ const DECLINE_RE = /reject|denied|cancel|declin/i;
  * provider itself) so the UI can tell "you declined" from every other
  * failure: `declined` is "sign" | "connect" when the message reads like a
  * refusal (EIP-1193 code 4001 counts too). Node / relay errors never go
- * through here, so a node's "rejecting replacement" is shown as what it is
- * (audit usertx-9).
+ * through here, so a node's "rejecting replacement" is shown as what it is.
  */
 export function walletError(e, what = "sign") {
   const msg = _msg(e);
@@ -654,7 +652,7 @@ const broadcastListeners = new Set();
 
 /**
  * Subscribe to "a transaction of the connected wallet was just broadcast"
- * (the balance shown in the top bar is re-read then, audit wallet-5).
+ * (the balance shown in the top bar is re-read then).
  * Returns an unsubscribe function.
  */
 export function onBroadcast(fn) {
@@ -676,7 +674,7 @@ function notifyBroadcast(txid) {
  * Both relays failed. A relay can fail AFTER the node accepted the tx (a
  * timeout on the way back), so before telling the user to try again ask
  * the indexer whether the tx is in its node's mempool — a blind retry of a
- * DEPLOY would pay the fees twice (audit usertx-2). Returns the txid when
+ * DEPLOY would pay the fees twice. Returns the txid when
  * it landed; otherwise throws `err` with the verdict appended
  * (`err.landed` false = not seen by the node, null = could not tell).
  */
@@ -723,7 +721,7 @@ function summarize(rawHex) {
  */
 export async function broadcastSignedPsbt(signedPsbtHex, meta = {}) {
   // Extract first: a PSBT that does not finalize, or a finalized tx with
-  // more than one OP_RETURN output (M-3), never reaches any relay.
+  // more than one OP_RETURN output, never reaches any relay.
   const raw = extractRawTxHex(signedPsbtHex);
   const summary = summarize(raw);
   try {

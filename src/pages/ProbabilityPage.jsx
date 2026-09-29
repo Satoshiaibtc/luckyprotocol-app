@@ -39,7 +39,7 @@ import {
 
 const POLL_MS = 30_000;
 const HEX = "0123456789abcdef";
-// Digit grid sizing (the version the owner approved, 2026-09-27): the grid
+// Digit grid sizing: the grid
 // fills the panel width; its row count grows with the window (plateRows) so
 // digits stay legible, and a window too long for the width keeps 11 px
 // cells and scrolls sideways, newest end in view. Only the columns in view
@@ -49,8 +49,8 @@ const CELL_MAX = 26;
 const GLYPH_MIN = 16; // preferred cell size when choosing the grid's row count
 const GLYPH_FONT_MIN = 7; // every cell carries its digit; small cells get small letters
 const PLATE_BUFFER = 12; // extra columns drawn each side of the viewport
-// Sequence chart: 8 rows of 26 px cells (owner, 2026-09-27: taller and
-// bigger, filling the space beside the stats); the panel scrolls sideways.
+// Sequence chart: 8 rows of 26 px cells (tall and big enough to fill the
+// space beside the stats); the panel scrolls sideways.
 const ROAD_ROWS = 8;
 const ROAD_CELL = 26;
 const ROAD_CELL_PHONE = 22;
@@ -261,7 +261,7 @@ function BeadPlate({ digits, heightAt }) {
   const [scrollCol, setScrollCol] = useState(0); // first column in view
   const n = digits.length;
   const rows = plateRows(n, width, GLYPH_MIN);
-  // Row-major (owner, 2026-09-27): blocks run left to right, then the next row.
+  // Row-major: blocks run left to right, then the next row.
   const cols = useMemo(() => gridLayoutRows(digits, rows), [digits, rows]);
   const cell = cellSize(width, cols.length);
   const W = Math.max(1, cols.length * cell);

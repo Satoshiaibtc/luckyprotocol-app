@@ -5,7 +5,7 @@
 // third-party fallback: if the indexer is unreachable, reads throw and the
 // UI shows the offline state. mempool.space is an explorer LINK target
 // and a read-only second source: the buyer-side check of a listing's
-// outpoint (audit M-12, src/lib/secondSource.js), plus the network tip and
+// outpoint (src/lib/secondSource.js), plus the network tip and
 // fee rates (src/lib/network.js). This module never talks to it.
 //
 // Base URL: `VITE_INDEXER_URL` at build time (default http://127.0.0.1:8765),
@@ -206,7 +206,7 @@ async function _httpPostJson(path, bodyObj, signal) {
     if (!res.ok) {
       // The indexer answers every trading route with `{ "error": "…" }`: the
       // sentence itself is what a seller reads — no HTTP prefix, no JSON
-      // punctuation, never cut mid-sentence (audit market-6).
+      // punctuation, never cut mid-sentence.
       throw orderHttpError(path, res.status, text);
     }
     try {
@@ -415,7 +415,7 @@ function _sanitizeTradeRow(t) {
 }
 
 // OrderView (§7.4). `psbt` is hex-only and only present on GET /orders/:id.
-// `filling` (audit M-9): the indexer sees a spend of the listed outpoint in
+// `filling`: the indexer sees a spend of the listed outpoint in
 // the mempool; the pending_* fields describe that spend and are null for
 // every other status.
 const _ORDER_STATUS = new Set(["open", "filling", "filled", "cancelled"]);
@@ -654,8 +654,8 @@ function _sanitizeHolderRow(h) {
 // when the server says so (`seen:true` / `in_mempool:true`, a mempool-aware
 // /tx-status). A server that answers 200 `confirmed:false` for ANY txid
 // (no mempool lookup) proves nothing, so without those fields an
-// unconfirmed tx is `seen:false` (audit M-7 — the old "every 200 is seen"
-// reading could never report a dropped tx). A 404 is
+// unconfirmed tx is `seen:false` (reading every 200 as "seen" could never
+// report a dropped tx). A 404 is
 // `seen:false` as before. `in_mempool` is the server's own flag, or null
 // when it does not provide one.
 function _sanitizeTxStatus(txid, s, known = true) {
@@ -683,7 +683,7 @@ function _sanitizeTxStatus(txid, s, known = true) {
 // A missing or malformed value is null — never a made-up default — and an
 // absurd one (> 1e6 sat/vB) is dropped here; anything above the
 // MAX_FEE_RATE_SAT_VB safety cap survives as-is so feechoice can REJECT
-// it visibly ("estimate unavailable") instead of clamping (audit L-11).
+// it visibly ("estimate unavailable") instead of clamping.
 // `ok: false` means the node could not estimate and the numbers are floors:
 // they are never used — every tier is null then, like a missing one.
 function _sanitizeFees(f) {
@@ -696,7 +696,7 @@ function _sanitizeFees(f) {
     hourFee: pick("hourFee"),
     economyFee: pick("economyFee"),
     minimumFee: pick("minimumFee"),
-    // The node's BIP125 increment (sat/vB), used by the M-9 cancel rule;
+    // The node's BIP125 increment (sat/vB), used by the cancel fee rule;
     // null when the indexer does not report it (the rule then assumes 1).
     incrementalrelayfee: _safeFloat(f && f.incrementalrelayfee, 1_000_000),
   };
@@ -752,7 +752,7 @@ export async function health(signal) {
     tip_height: _safeInt(env && env.tip_height, 1e9),
     token_count: _safeInt(env && env.token_count, 1e9) ?? 0,
     mine_count: _safeInt(env && env.mine_count, 1e12) ?? 0,
-    // open orders with a spend already in the mempool (audit M-9); 0 when the indexer predates it
+    // open orders with a spend already in the mempool; 0 when the indexer predates it
     filling_order_count: _safeInt(env && env.filling_order_count, 1e9) ?? 0,
     last_progress_at: _safeInt(env && env.last_progress_at, 1e12),
     // unix s of the indexer's last completed poll of its node (null = not reported)
@@ -803,7 +803,7 @@ export async function btcUtxos(address, signal) {
  * GET /mines/:addr?limit&offset → `{ total, offset, limit, items }`. Paged by
  * the indexer (default 50, max ADDR_LIST_MAX_LIMIT, indexer API): `total` is
  * the address's full count — a caller that shows one page must not present
- * it as the whole record (audit portfolio-4).
+ * it as the whole record.
  */
 export async function minesByAddress(address, opts = {}, signal) {
   const env = await _httpGet(`/mines/${encodeURIComponent(address)}${_pageQuery({ limit: opts.limit, offset: opts.offset })}`, signal);
@@ -845,7 +845,7 @@ export async function tokens(opts = {}, signal) {
 
 /**
  * GET /tokens/:ticker → registry entry (+ holders) | null (404 only).
- * A 200 whose row fails sanitization THROWS (audit usertx-1): the ticker
+ * A 200 whose row fails sanitization THROWS: the ticker
  * exists but its row is unreadable — "unknown", never "free", or the Create
  * page would offer a DEPLOY that the indexer ignores (fees lost).
  */
@@ -1233,8 +1233,8 @@ export async function activity(opts = {}, signal) {
   if (opts.kind && opts.kind !== "all" && _ACTIVITY_FILTER.has(opts.kind)) q.kind = opts.kind;
   if (opts.address) {
     // Never drop a filter silently: an unfiltered ledger shown under a
-    // "Showing rows where … is a party" notice is the whole network's
-    // (audit portfolio-6). Callers lower-case a bech32 address first.
+    // "Showing rows where … is a party" notice is the whole network's.
+    // Callers lower-case a bech32 address first.
     const a = String(opts.address);
     if (!_ADDR_RE.test(a)) throw new Error(`"${a}" is not a mainnet address the ledger can be filtered by`);
     q.address = a;

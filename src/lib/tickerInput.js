@@ -3,8 +3,8 @@
 // A ticker is 1–8 characters, A–Z and 0–9 (spec §2.1). What a person types
 // or pastes is cleaned FIRST and cut to 8 AFTER: an input-level maxLength
 // would cut a pasted "    LUCKY" to "    LUCK" before the spaces are
-// stripped and silently leave "LUCK" — a different, free name (audit
-// create-5). Any change beyond upper-casing is said out loud (`note`).
+// stripped and silently leave "LUCK" — a different, free name. Any change
+// beyond upper-casing is said out loud (`note`).
 
 export const TICKER_MAX = 8;
 
@@ -29,8 +29,7 @@ export function cleanTickerInput(raw) {
 /**
  * Where the caret belongs in the cleaned value when it stood at `caret` in
  * `raw`: the length of the cleaned text before it. Keeps the cursor in
- * place when a lower-case letter typed mid-word is upper-cased (audit
- * create-9).
+ * place when a lower-case letter typed mid-word is upper-cased.
  */
 export function cleanedCaret(raw, caret) {
   const text = String(raw ?? "");

@@ -2,15 +2,15 @@
 // below ACTIVATION_HEIGHT are ignored). Pure, no React; tested in
 // test/journeys.test.js.
 //
-// Owner decision B (2026-09-27): Reserve (the COMMIT step of Create) and
-// Mine unlock one block EARLY — at tip ACTIVATION_HEIGHT − 1 (969,299) —
-// because every COMMIT, REVEAL, MINE and SEND this app builds carries
-// nLockTime = PROTOCOL_LOCKTIME (969,299): a node will not put such a
-// transaction in any block below 969,300, so nothing sent through the app
-// can confirm too early and be ignored. An UNKNOWN tip still counts as
-// locked (fail closed, audit L-12). This module puts that rule and its
-// wording in one place, so every page counts the same way and says
-// "1 block", not "1 blocks".
+// Reserve (the COMMIT step of Create) and Mine unlock one block EARLY — at
+// tip ACTIVATION_HEIGHT − 1 (969,299) — because every COMMIT, REVEAL, MINE
+// and SEND this app builds carries nLockTime = PROTOCOL_LOCKTIME (969,299):
+// a node will not put such a transaction in any block below 969,300, so
+// nothing sent through the app can confirm too early and be ignored. An
+// UNKNOWN tip still counts as locked (fail closed: a gate that cannot see
+// the tip must not open). This module puts that rule and its wording in
+// one place, so every page counts the same way and says "1 block", not
+// "1 blocks".
 
 import { ACTIVATION_HEIGHT, PROTOCOL_LOCKTIME } from "./payloads.js";
 

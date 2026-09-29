@@ -36,8 +36,8 @@ export const MINE_BUSY = MINE_FLOW_BUSY;
 
 /**
  * The newest MINE this browser broadcast for `address` / `ticker` whose
- * result the console has not shown yet, as a resumed "pending" state (audit
- * usertx-2 / mine-4). The console itself resumes EVERY such MINE
+ * result the console has not shown yet, as a resumed "pending" state.
+ * The console itself resumes EVERY such MINE
  * (resumeMinePendings); this single-item view is kept for callers and
  * tests that only need the latest one.
  */
@@ -49,7 +49,7 @@ export function resumeMineState(address, ticker, records = address ? txRecords(a
 }
 
 /**
- * The mine console's state (owner decision F, audit mine-5):
+ * The mine console's state:
  *
  *   flow      idle → building → signing → broadcasting → idle   (↘ error)
  *             — one MINE being assembled; the only thing that holds the button
@@ -124,7 +124,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
         tokenOutpoints,
         feeRateSatVb,
         ticker,
-        minInputSats: minFeeInputSats(utxoRes.assetSafe), // M-8: 10,000-sat floor on non-asset-safe lists
+        minInputSats: minFeeInputSats(utxoRes.assetSafe), // 10,000-sat floor on non-asset-safe lists
       });
       setFlow({
         phase: "signing",
@@ -193,7 +193,7 @@ export function useMine({ wallet: walletState, ticker, tokenInfo, feeRateSatVb, 
   // pace): pending every STATUS_POLL_MS; confirmed but not final every
   // CONFIRMED_POLL_MS; dropped every DROPPED_POLL_MS for DROPPED_WATCH_MS.
   // The yield is computed client-side on confirmation. A tx the node has
-  // not seen for DROP_GRACE_MS is dropped / replaced (audit usertx-6) — not
+  // not seen for DROP_GRACE_MS is dropped / replaced — not
   // before the indexer's ledger was asked, and not while the node's
   // "unknown" means nothing (`trustUnseen`).
   const now0 = Date.now();

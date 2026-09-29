@@ -18,7 +18,7 @@ export default function MineTicker() {
   const items = mines.data?.items || [];
 
   if (items.length === 0) {
-    // A failed read is not "no mines" (audit visit-7).
+    // A failed read is not "no mines".
     const text = mines.loading
       ? "Loading mines…"
       : mines.error

@@ -358,8 +358,8 @@ const LIVE = new Set(["open", "filling"]);
 /**
  * A seller's listings, every status. Live rows (`open`, `filling`) show
  * their expiry (§7.4 TTL) and take Renew (re-POST the same PSBT) /
- * Withdraw (the spec's cancel: a SEND-to-self; for a `filling` row the M-9
- * replacement rule applies — the row says which fill is pending and at
+ * Withdraw (the spec's cancel: a SEND-to-self; for a `filling` row the
+ * replacement-fee rule applies — the row says which fill is pending and at
  * what rate). Closed rows link the spending tx.
  *
  * `records` = this browser's tx records for the address (txrecords.js).
@@ -368,7 +368,7 @@ const LIVE = new Set(["open", "filling"]);
  * is one of the user's own transactions says "your withdrawal is pending"
  * — and that the listing can still be bought until it confirms — and
  * offers no second Withdraw: that would only out-bid the user's own
- * transaction (audit portfolio-1). A row whose pending spend is someone
+ * transaction. A row whose pending spend is someone
  * else's although the user's own withdrawal spent it too says the
  * withdrawal was replaced, and offers Withdraw again (it must out-bid).
  */

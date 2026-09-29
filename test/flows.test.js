@@ -1,9 +1,9 @@
-// Pure-part tests for the write-flow safety nets added by the 2026-09-27
-// review: the indexer-lag gate (src/lib/sync.js), the broadcast records
-// (src/lib/txrecords.js), the /btc-utxos seeding retry (src/lib/retry.js),
-// wallet-vs-node error tagging and the "did the failed broadcast land?"
-// check (src/lib/wallet.js), and the mock indexer's §4.1 routing
-// (src/lib/mockRouting.js). Plain Node, no framework.
+// Pure-part tests for the write-flow safety nets: the indexer-lag gate
+// (src/lib/sync.js), the broadcast records (src/lib/txrecords.js), the
+// /btc-utxos seeding retry (src/lib/retry.js), wallet-vs-node error tagging
+// and the "did the failed broadcast land?" check (src/lib/wallet.js), and
+// the mock indexer's §4.1 routing (src/lib/mockRouting.js). Plain Node, no
+// framework.
 import assert from "node:assert/strict";
 import { syncPauseText, syncStateOf } from "../src/lib/sync.js";
 import {
@@ -43,7 +43,7 @@ import { PROJECT_FEE_ADDRESS } from "../src/lib/payloads.js";
 const TX = (c) => c.repeat(64);
 const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
 
-// ---- usertx-1: the lag gate ------------------------------------------------------------------------------
+// ---- the lag gate ------------------------------------------------------------------------------
 {
   assert.deepEqual(syncStateOf({ indexed_height: 969_310, tip_height: 969_310, stalled: false }), {
     indexed: 969_310,
@@ -69,7 +69,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("sync: synced only when indexed == tip and not stalled; a lag pauses Create and Mine");
 }
 
-// ---- usertx-2 / usertx-6: broadcast records -------------------------------------------------------------
+// ---- broadcast records -------------------------------------------------------------
 {
   const mem = new Map();
   const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
@@ -91,7 +91,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   assert.equal(classifyTxStatus(rec, null, now), "unknown");
   // refresh: the DEPLOY and the MINE confirmed — both kept (marked confirmed, their
   // inputs still guarded until final) until the page that shows their result
-  // forgets them (audit mine-4: "tracking resumes when you return")
+  // forgets them ("tracking resumes when you return")
   now += 10_000;
   const answers = { [TX("a")]: { confirmed: true, seen: true, block_height: 969_400 }, [TX("b")]: { confirmed: true, seen: true, block_height: 969_400 } };
   const after = await refreshTxRecords(ADDR, async (t) => answers[t], { store, now: () => now, tip: 969_400 });
@@ -117,7 +117,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("txrecords: inputs of pending broadcasts are excluded until they are final or drop; DEPLOYs stay remembered by ticker");
 }
 
-// ---- reorg audit: a confirmed tx guards its inputs until final; back in the mempool it is pending again ---------------
+// ---- finality: a confirmed tx guards its inputs until final; back in the mempool it is pending again ---------------
 {
   const mem = new Map();
   const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
@@ -174,7 +174,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("txrecords: confirmed txs guard their inputs until final; a reorganization back to the mempool unconfirms; forget keeps a confirmed guard");
 }
 
-// ---- reorg audit: a confirmed record is re-checked at most every CONFIRMED_RECHECK_MS, not on every build ---------------
+// ---- finality: a confirmed record is re-checked at most every CONFIRMED_RECHECK_MS, not on every build ---------------
 {
   const mem = new Map();
   const storage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
@@ -221,7 +221,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("txrecords: confirmed records are re-checked at most once a minute; a build does not wait on dozens of serial reads");
 }
 
-// ---- reorg audit: a tx is dropped only after DROP_GRACE_MS since it was LAST seen, and only while that answer means something ----
+// ---- finality: a tx is dropped only after DROP_GRACE_MS since it was LAST seen, and only while that answer means something ----
 {
   const rec = { txid: TX("5"), kind: "send", inputs: [], at: 0, confirmed: false, seenAt: 60 * 60 * 1000 };
   const unseen = { confirmed: false, seen: false };
@@ -249,7 +249,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("txrecords: drops count from the last sighting, never while the node's answer cannot be trusted");
 }
 
-// ---- api-1 (client side): 503 and 429 both mean "not yet", with the server's Retry-After -----------------
+// ---- client side: 503 and 429 both mean "not yet", with the server's Retry-After -----------------
 {
   const e503 = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 503"), { status: 503, retryAfter: 15 });
   const e429 = Object.assign(new Error("Indexer /btc-utxos/x -> HTTP 429"), { status: 429, retryAfter: 60 });
@@ -416,7 +416,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("retry: ten-minute first-use wait with queue position and estimate, per-network limit said at once, Stop waiting");
 }
 
-// ---- usertx-9: only a WALLET refusal reads as "declined" ------------------------------------------------
+// ---- only a WALLET refusal reads as "declined" ------------------------------------------------
 {
   const refused = walletError(new Error("User rejected the request."), "sign");
   assert.equal(refused.declined, "sign");
@@ -432,7 +432,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("wallet: declined is tagged at the wallet boundary only");
 }
 
-// ---- usertx-2 (b): a "failed" broadcast is looked up before the user is told to retry ----------------------
+// ---- a "failed" broadcast is looked up before the user is told to retry ----------------------
 {
   const summary = { txid: TX("e"), inputs: [{ txid: TX("6"), vout: 0 }] };
   const recorded = [];
@@ -464,7 +464,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   console.log("wallet: a failed broadcast is checked against /tx-status before a retry is offered");
 }
 
-// ---- consensus-7 / consensus-4: the mock settles by §4.1 and §7.5 ----------------------------------------
+// ---- the mock settles by §4.1 and §7.5 ----------------------------------------
 {
   const out = (vout, { address = null, sats = 546, opReturn = false, script = null } = {}) => ({ vout, sats, address: opReturn ? null : address, script: opReturn ? "6a0a" : script ?? (address ? "5120aa" : "51") });
   const FEE = (vout, sats) => out(vout, { address: PROJECT_FEE_ADDRESS, sats });
@@ -472,7 +472,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   // MINE: valid needs the fee; the residual goes to vout0 either way; no vout0 → burn
   const mine = { payload: { op: "MINE", ticker: "LUCKY" }, outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true })] };
   assert.deepEqual(routeDecision(mine, { isDeployed: deployed }), { op: "MINE", valid: true, applied: true, reason: null, yieldVout: 0, send: null, residualVout: 0 });
-  // D1: a MINE in its ticker's DEPLOY block is invalid (deploy_same_block); its residual still goes to vout0
+  // a MINE in its ticker's DEPLOY block is invalid (deploy_same_block); its residual still goes to vout0
   const sameBlock = routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_400, height: 969_400 });
   assert.deepEqual([sameBlock.valid, sameBlock.reason, sameBlock.yieldVout, sameBlock.residualVout], [false, "deploy_same_block", null, 0]);
   assert.equal(routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_400, height: 969_401 }).valid, true, "the block after the DEPLOY: valid");
@@ -508,10 +508,10 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   assert.equal(routeDecision({ ...commitTx, outputs: [out(0, { opReturn: true }), out(1, { address: ADDR })] }).commit.invalid_reason, "carrier_op_return", "vout0 an OP_RETURN → recorded invalid");
   assert.equal(routeDecision({ ...commitTx, outputs: [out(0), out(1, { opReturn: true })] }).commit.invalid_reason, "carrier_no_address", "address-less vout0 → recorded invalid");
   assert.equal(routeDecision({ ...commitTx, outputs: [] }).commit.status, "invalid", "no vout0 → recorded invalid (carrier_missing)");
-  // rvs-1: several COMMITs may carry one H — a copy in Mallory's COMMIT is recorded open, with HIS carrier script.
+  // several COMMITs may carry one H — a copy in Mallory's COMMIT is recorded open, with HIS carrier script.
   const copyTx = { ...commitTx, txid: TX("e"), outputs: [out(0, { address: MALLORY, script: SPK_M }), out(1, { opReturn: true })] };
   assert.deepEqual(routeDecision(copyTx).commit, { hash: H, carrier: `${TX("e")}:0`, carrier_script: SPK_M, committer: MALLORY, status: "open", invalid_reason: null });
-  // rvs-4: the carrier's value is never read — a 0-sat vout0 is a carrier.
+  // the carrier's value is never read — a 0-sat vout0 is a carrier.
   assert.equal(routeDecision({ ...commitTx, outputs: [out(0, { address: ADDR, sats: 0 }), out(1, { opReturn: true })] }).commit.status, "open");
   // REVEAL = DEPLOY|T|SALT: input 0 spends an open commit whose H matches, 1 ≤ age ≤ 2016, exact 5,460 fee, name free
   const payloadText = `LUCKY-20|DEPLOY|NEW|${"ab".repeat(16)}`;

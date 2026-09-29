@@ -117,7 +117,7 @@ export function tipLine(tip, ticker, tokenInfo, at = Date.now()) {
   if (height === null) return null;
   let minted = "";
   if (tokenInfo && Number(tokenInfo.supply) > 0) {
-    // Rounded down: never "100%" while mining is still open (audit mine-6).
+    // Rounded down: never "100%" while mining is still open.
     minted = `  ·  ${ticker} minted ${fmtMintedPct(Number(tokenInfo.minted || 0), Number(tokenInfo.supply), 1).replace(/\.0%$/, "%")}`;
   }
   return line({ key: `tip:${ticker}:${height}`, kind: "sys", text: `tip #${fmtInt(height)}${minted}`, ts: at });
@@ -148,7 +148,7 @@ export function acceptedLine(txid, at = Date.now()) {
 
 /**
  * `mempool  1 mine awaiting block #968,662` — or, while earlier MINEs of
- * this console are still waiting too (concurrent MINEs, decision F),
+ * this console are still waiting too (concurrent MINEs),
  * `mempool  3 of your mines awaiting block #968,662`.
  */
 export function mempoolLine(nextHeight, txid, at = Date.now(), { count = 1 } = {}) {

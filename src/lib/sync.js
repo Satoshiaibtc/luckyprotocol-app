@@ -1,4 +1,4 @@
-// How far the indexer is behind the chain tip (audit usertx-1), and whether
+// How far the indexer is behind the chain tip, and whether
 // its node itself can be trusted to be current. Pure, no React; tested in
 // test/views.test.js, test/flows.test.js and test/network.test.js.
 //
@@ -77,7 +77,7 @@ function notSyncedReason(sync) {
  * The error for a click that found the indexer behind at the moment of the
  * click (the idle hint above did not see it yet): says that nothing was
  * sent and what to do — press again — instead of promising an automatic
- * resume the flow does not have (audit create-8). null when synced.
+ * resume the flow does not have. null when synced.
  */
 export function syncRetryText(sync, subject, action = "Create") {
   if (!sync || sync.synced) return null;
