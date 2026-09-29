@@ -21,23 +21,23 @@ import { _sanitizeFees } from "../src/lib/indexer.js";
 
 // ---- the second source's tip: behind by 2+ blocks on reads 90 s apart ------------------------------------------
 {
-  let t = networkLag(null, { networkTip: 969_810, tip: 969_810, now: 0 });
-  assert.deepEqual(t, { behindSince: null, networkTip: 969_810 });
-  t = networkLag(t, { networkTip: 969_812, tip: 969_810, now: 1_000 });
+  let t = networkLag(null, { networkTip: 970_110, tip: 970_110, now: 0 });
+  assert.deepEqual(t, { behindSince: null, networkTip: 970_110 });
+  t = networkLag(t, { networkTip: 970_112, tip: 970_110, now: 1_000 });
   assert.equal(t.behindSince, 1_000);
-  assert.equal(confirmedNetworkLag(t, 969_810, 1_000), 0, "one read can race a new block");
-  t = networkLag(t, { networkTip: 969_813, tip: 969_810, now: 1_000 + NETWORK_LAG_CONFIRM_MS });
+  assert.equal(confirmedNetworkLag(t, 970_110, 1_000), 0, "one read can race a new block");
+  t = networkLag(t, { networkTip: 970_113, tip: 970_110, now: 1_000 + NETWORK_LAG_CONFIRM_MS });
   assert.equal(t.behindSince, 1_000, "the run keeps its start");
-  assert.equal(confirmedNetworkLag(t, 969_810, 1_000 + NETWORK_LAG_CONFIRM_MS), 3, "behind on reads 90 s apart: 3 blocks");
-  assert.equal(confirmedNetworkLag(t, 969_813, 1_000 + NETWORK_LAG_CONFIRM_MS), 0, "the node caught up: not behind");
-  assert.deepEqual(networkLag(t, { networkTip: 969_811, tip: 969_810, now: 5_000_000 }).behindSince, null, "1 block is normal");
-  assert.deepEqual(networkLag(t, { networkTip: null, tip: 969_810, now: 5_000_000 }), { behindSince: null, networkTip: null }, "the second source unreachable: never a pause");
+  assert.equal(confirmedNetworkLag(t, 970_110, 1_000 + NETWORK_LAG_CONFIRM_MS), 3, "behind on reads 90 s apart: 3 blocks");
+  assert.equal(confirmedNetworkLag(t, 970_113, 1_000 + NETWORK_LAG_CONFIRM_MS), 0, "the node caught up: not behind");
+  assert.deepEqual(networkLag(t, { networkTip: 970_111, tip: 970_110, now: 5_000_000 }).behindSince, null, "1 block is normal");
+  assert.deepEqual(networkLag(t, { networkTip: null, tip: 970_110, now: 5_000_000 }), { behindSince: null, networkTip: null }, "the second source unreachable: never a pause");
   console.log("network tip: behind only on two reads ≥ 90 s apart, 2+ blocks, against the current tip");
 }
 
 // ---- sync: rebuilding / stalled / no peers / behind the network pause writes ------------------------------------
 {
-  const ok = { indexed_height: 969_810, tip_height: 969_810, stalled: false, node_peers: 8 };
+  const ok = { indexed_height: 970_110, tip_height: 970_110, stalled: false, node_peers: 8 };
   assert.equal(syncStateOf(ok).synced, true);
   assert.equal(syncStateOf(ok).trustUnseen, true);
   const rebuilding = syncStateOf({ ...ok, rebuilding: true });
@@ -55,8 +55,8 @@ import { _sanitizeFees } from "../src/lib/indexer.js";
   assert.match(syncPauseText(behind, "token creation"), /^Our Bitcoin node is 3 blocks behind the network, so token creation would rely on stale state/);
   assert.match(syncWarningText(behind), /3 blocks behind the network/);
   assert.equal(syncWarningText(syncStateOf(ok)), null, "all current: no banner");
-  assert.equal(syncWarningText(syncStateOf({ ...ok, tip_height: 969_811 })), null, "a one-block lag is normal for a few seconds");
-  assert.match(syncWarningText(syncStateOf({ ...ok, tip_height: 969_815 })), /catching up: 5 blocks behind/);
+  assert.equal(syncWarningText(syncStateOf({ ...ok, tip_height: 970_111 })), null, "a one-block lag is normal for a few seconds");
+  assert.match(syncWarningText(syncStateOf({ ...ok, tip_height: 970_115 })), /catching up: 5 blocks behind/);
   const now = 2_000_000_000_000;
   assert.match(syncWarningText(syncStateOf(ok), { tipTime: now / 1000 - 2 * 3600, now }), /No new block for about 120 minutes/);
   assert.equal(syncWarningText(syncStateOf(ok), { tipTime: now / 1000 - 30 * 60, now }), null);
@@ -65,8 +65,8 @@ import { _sanitizeFees } from "../src/lib/indexer.js";
   const booting = syncStateOf({ ...ok, tip_height: 0 });
   assert.deepEqual([booting.synced, booting.lag, booting.trustUnseen], [false, null, false], "a node tip below the indexed height is not synced");
   assert.match(syncPauseText(booting, "mining"), /has not reported how far it has indexed/);
-  assert.equal(chainTipOf({ ...ok, tip_height: 0 }), 969_810, "the shown tip never drops below the indexed height");
-  assert.equal(chainTipOf({ ...ok, tip_height: 969_812 }), 969_812);
+  assert.equal(chainTipOf({ ...ok, tip_height: 0 }), 970_110, "the shown tip never drops below the indexed height");
+  assert.equal(chainTipOf({ ...ok, tip_height: 970_112 }), 970_112);
   assert.equal(chainTipOf({ indexed_height: null, tip_height: 0 }), null, "a tip of 0 is unknown");
   assert.equal(chainTipOf(null), null);
   console.log("sync: rebuilding, stalled, no peers and behind-the-network each pause writes with their own sentence");
@@ -116,7 +116,7 @@ import { _sanitizeFees } from "../src/lib/indexer.js";
     seen.push({ url, init });
     return { ok, json: async () => body };
   };
-  assert.equal(await fetchNetworkTip({ fetchImpl: reply(969_812) }), 969_812);
+  assert.equal(await fetchNetworkTip({ fetchImpl: reply(970_112) }), 970_112);
   assert.equal(seen[0].url, NETWORK_TIP_URL);
   assert.equal(seen[0].init.credentials, "omit");
   assert.equal(await fetchNetworkTip({ fetchImpl: reply("oops") }), null);

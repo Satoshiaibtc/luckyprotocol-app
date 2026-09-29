@@ -33,13 +33,13 @@ const ADDR = MOCK_WALLET.address;
 // ---- one activation wording, "1 block", the gate one block early -----
 {
   assert.deepEqual(activationState(null), { locked: true, unknown: true, blocksLeft: null, active: false, blocksToActivation: null }, "unknown tip fails closed");
-  // Reserve and Mine unlock at tip ACTIVATION_HEIGHT − 1 (969,299) —
-  // every tx the app builds has nLockTime 969,299, so none can confirm before 969,300.
+  // Reserve and Mine unlock at tip ACTIVATION_HEIGHT − 1 (969,599) —
+  // every tx the app builds has nLockTime 969,599, so none can confirm before 969,600.
   assert.equal(UNLOCK_HEIGHT, ACTIVATION_HEIGHT - 1);
   assert.equal(UNLOCK_HEIGHT, PROTOCOL_LOCKTIME, "the gate opens exactly where the lock time allows the next block");
   assert.deepEqual(activationState(ACTIVATION_HEIGHT - 463), { locked: true, unknown: false, blocksLeft: 462, active: false, blocksToActivation: 463 });
   assert.equal(activationState(ACTIVATION_HEIGHT - 2).locked, true);
-  assert.deepEqual(activationState(ACTIVATION_HEIGHT - 1), { locked: false, unknown: false, blocksLeft: 0, active: false, blocksToActivation: 1 }, "open at 969,299");
+  assert.deepEqual(activationState(ACTIVATION_HEIGHT - 1), { locked: false, unknown: false, blocksLeft: 0, active: false, blocksToActivation: 1 }, "open at 969,599");
   assert.equal(activationState(ACTIVATION_HEIGHT).locked, false);
   assert.equal(activationState(ACTIVATION_HEIGHT).active, true);
   assert.equal(blocksText(1), "1 block");
@@ -49,25 +49,25 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(blocksEtaText(30), "about 5 hours");
   assert.equal(blocksEtaText(144), "about 24 hours");
   assert.equal(countdownText(1), "1 block from now (about 10 minutes)");
-  assert.match(activationNotice(ACTIVATION_HEIGHT - 2, "Mining"), /Mining opens when block #969,299 is mined — 1 block from now \(about 10 minutes\)\./);
+  assert.match(activationNotice(ACTIVATION_HEIGHT - 2, "Mining"), /Mining opens when block #969,599 is mined — 1 block from now \(about 10 minutes\)\./);
   assert.ok(!/1 blocks/.test(activationNotice(ACTIVATION_HEIGHT - 2, "Reserving a ticker")));
-  assert.match(activationNotice(ACTIVATION_HEIGHT - 2, "Mining"), /lock time, so none can be confirmed before block #969,300/);
+  assert.match(activationNotice(ACTIVATION_HEIGHT - 2, "Mining"), /lock time, so none can be confirmed before block #969,600/);
   assert.match(activationNotice(null, "Reserving a ticker"), /has not reported the chain tip yet/);
-  assert.equal(activationNotice(ACTIVATION_HEIGHT - 1, "Mining"), null, "no lock notice at 969,299");
+  assert.equal(activationNotice(ACTIVATION_HEIGHT - 1, "Mining"), null, "no lock notice at 969,599");
   assert.equal(activationNotice(ACTIVATION_HEIGHT, "Mining"), null);
-  assert.match(activationBannerText(ACTIVATION_HEIGHT - 463), /^LUCKY-20 starts at block #969,300\. Reserve and Mine open at block #969,299, 462 blocks from now \(about 3 days\);/);
-  assert.match(activationBannerText(ACTIVATION_HEIGHT - 1), /^LUCKY-20 starts with the next block, #969,300\. Reserve and Mine are open/, "at 969,299 the banner says the gate is open");
+  assert.match(activationBannerText(ACTIVATION_HEIGHT - 463), /^LUCKY-20 starts at block #969,600\. Reserve and Mine open at block #969,599, 462 blocks from now \(about 3 days\);/);
+  assert.match(activationBannerText(ACTIVATION_HEIGHT - 1), /^LUCKY-20 starts with the next block, #969,600\. Reserve and Mine are open/, "at 969,599 the banner says the gate is open");
   assert.equal(activationBannerText(null), null, "no banner while the tip is unknown");
   assert.equal(activationBannerText(ACTIVATION_HEIGHT), null, "no banner once active");
   assert.equal(activationBannerText(ACTIVATION_HEIGHT + 5), null, "no banner after activation");
-  assert.match(lockedHint(), /Locked until block #969,299/);
-  console.log("activation: gate opens at 969,299, one countdown wording, singular '1 block', banner until 969,300");
+  assert.match(lockedHint(), /Locked until block #969,599/);
+  console.log("activation: gate opens at 969,599, one countdown wording, singular '1 block', banner until 969,600");
 }
 
 // ---- the board's empty states -------------------------------------------------------
 {
-  const LUCKY = { ticker: "LUCKY", supply: 21_000_000, minted: 1_234_800, mine_count: 3, deploy_block: 969_301 };
-  const BLOK = { ticker: "BLOK", supply: 21_000_000, minted: 21_000_000, minted_out: true, minted_out_height: 969_700, mine_count: 9, deploy_block: 969_302 };
+  const LUCKY = { ticker: "LUCKY", supply: 21_000_000, minted: 1_234_800, mine_count: 3, deploy_block: 969_601 };
+  const BLOK = { ticker: "BLOK", supply: 21_000_000, minted: 21_000_000, minted_out: true, minted_out_height: 970_000, mine_count: 9, deploy_block: 969_602 };
   const items = [LUCKY, BLOK];
   const view = (sort, q) => {
     const needle = q.trim().toUpperCase();
@@ -133,7 +133,7 @@ const ADDR = MOCK_WALLET.address;
   const base = { connected: true, indexerOk: true, preActivation: false, exhausted: false, lagText: null, ticker: "BLOK" };
   assert.equal(mineIdleReason(base), null);
   assert.equal(mineIdleReason({ ...base, exhausted: true }), "BLOK is fully minted — mining is closed; a MINE would credit 0.");
-  assert.match(mineIdleReason({ ...base, preActivation: true }), /Locked until block #969,299/);
+  assert.match(mineIdleReason({ ...base, preActivation: true }), /Locked until block #969,599/);
   assert.equal(mineIdleReason({ ...base, connected: false }), "Connect a wallet to mine.");
   assert.match(mineIdleReason({ ...base, indexerOk: false, preActivation: true }), /indexer is not answering/, "offline first (the unknown tip is why it reads locked)");
   assert.match(readyText(true, "Mine"), /^Ready\. Fee inputs are selected from spendable BTC only/);
@@ -147,8 +147,8 @@ const ADDR = MOCK_WALLET.address;
 
 // ---- the click-time lag error says nothing was sent ----------------------------------------------------
 {
-  const lag = syncStateOf({ indexed_height: 969_798, tip_height: 969_800 });
-  assert.equal(syncRetryText(lag, "LAG1's availability"), "Nothing was sent: the indexer is 2 blocks behind the chain tip (#969,798 of #969,800), so LAG1's availability could be out of date. Press Create again once it has caught up.");
+  const lag = syncStateOf({ indexed_height: 970_098, tip_height: 970_100 });
+  assert.equal(syncRetryText(lag, "LAG1's availability"), "Nothing was sent: the indexer is 2 blocks behind the chain tip (#970,098 of #970,100), so LAG1's availability could be out of date. Press Create again once it has caught up.");
   assert.ok(!/paused until/.test(syncRetryText(lag, "x")));
   assert.match(syncRetryText(syncStateOf({ indexed_height: 5, tip_height: 5, stalled: true }), "x"), /stopped making progress/);
   assert.equal(syncRetryText(syncStateOf({ indexed_height: 5, tip_height: 5 }), "x"), null);
@@ -212,13 +212,13 @@ const ADDR = MOCK_WALLET.address;
 // ---- the ✓ yours banner shows what the indexer credited -----------------------------------------
 {
   const T0 = 1_000;
-  const base = { txid: TX("a"), blockHeight: 969_802, yieldLocal: 1000 };
+  const base = { txid: TX("a"), blockHeight: 970_102, yieldLocal: 1000 };
   assert.equal(settledYoursLine("LUCKY", { ...base, reconcile: "pending" }, T0), null, "no banner before the indexer answers");
   assert.equal(settledYoursLine("LUCKY", { ...base, reconcile: "timeout" }, T0), null, "no amount on a timeout");
   const full = settledYoursLine("LUCKY", { ...base, reconcile: "done", indexed: { status: "settled", yield_smallest: 1000, cap_exhausted: false } }, T0);
   assert.equal(full.sum, "+1,000 LUCKY");
   assert.equal(full.tier, 1000);
-  assert.equal(full.text, "LUCKY mine settled  block 969,802  ✓ yours");
+  assert.equal(full.text, "LUCKY mine settled  block 970,102  ✓ yours");
   const partial = settledYoursLine("LUCKY", { ...base, reconcile: "done", indexed: { status: "settled", yield_smallest: 100, cap_exhausted: false } }, T0);
   assert.equal(partial.sum, "+100 LUCKY", "the partial credit, never the +1,000 tier");
   assert.equal(partial.tier, null, "no tier colour on a short credit");
@@ -254,7 +254,7 @@ const ADDR = MOCK_WALLET.address;
   assert.equal(fmtMintedPct(1_234_800, 21_000_000), "5.88%");
   assert.equal(fmtMintedPct(0, 21_000_000), "0.00%");
   assert.equal(fmtMintedPct(5, 0), "0.00%");
-  assert.equal(tipLine({ height: 969_800 }, "LUCKY", { minted: 20_999_700, supply: 21_000_000 }, 1).text, "tip #969,800  ·  LUCKY minted 99.9%");
+  assert.equal(tipLine({ height: 970_100 }, "LUCKY", { minted: 20_999_700, supply: 21_000_000 }, 1).text, "tip #970,100  ·  LUCKY minted 99.9%");
   assert.equal(marketClosedNotice("LUCKY", { ticker: "LUCKY", minted: 20_999_900, supply: 21_000_000 }), "Market opens when LUCKY is fully minted · 99.99% minted");
   assert.equal(marketClosedNotice("S", { ticker: "S", minted: 8_400_000, supply: 21_000_000 }), "Market opens when S is fully minted · 40% minted");
   console.log("supply: expected yield capped by what is left; the minted share never reads 100% early");

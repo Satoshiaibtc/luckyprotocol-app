@@ -5,12 +5,12 @@
 // protocol outputs in the exact order the indexer expects, and returns an
 // UNSIGNED PSBT (hex) that the UniSat extension signs + finalizes.
 //
-// Every transaction built here has nLockTime = PROTOCOL_LOCKTIME (969,299)
+// Every transaction built here has nLockTime = PROTOCOL_LOCKTIME (969,599)
 // and every input nSequence = RBF_SEQUENCE (0xfffffffd):
 // the lock time is only enforced when some input's sequence is below
 // 0xffffffff, and 0xfffffffd also signals replace-by-fee, which "Speed up"
 // (buildSpeedUpPsbt) relies on. Such a tx can only confirm in block
-// 969,300 (ACTIVATION_HEIGHT) or later. The one exception is a REVEAL's
+// 969,600 (ACTIVATION_HEIGHT) or later. The one exception is a REVEAL's
 // input 0 (the COMMIT carrier): nSequence = REVEAL_CARRIER_SEQUENCE (1), a
 // BIP68 relative lock of one block, so the REVEAL can never confirm in its
 // COMMIT's block — not even after a chain reorganization.

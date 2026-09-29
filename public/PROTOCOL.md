@@ -1,6 +1,6 @@
 # LUCKY-20 Protocol Specification — v1
 
-**Version 1** — in force from block 969,300 (`ACTIVATION_HEIGHT`, §1).
+**Version 1** — in force from block 969,600 (`ACTIVATION_HEIGHT`, §1).
 
 LUCKY-20 is a token protocol on Bitcoin L1, published by **LuckyProtocol**.
 Its operations are OP_RETURN payloads and its tokens are bound to UTXOs.
@@ -43,7 +43,7 @@ and this document disagree, this document is authoritative.
 | Name | Value | Notes |
 |---|---|---|
 | `PROTOCOL_PREFIX` | `LUCKY-20` | The standard's name, field 0 of every payload (cf. brc-20's `p`). A push whose field 0 is anything other than `LUCKY-20` — e.g. `LUCKYPROTOCOL` — is not a LUCKY-20 payload; the activation-height gate applies on top. |
-| `ACTIVATION_HEIGHT` | **969_300** | Txs in earlier blocks are ignored. |
+| `ACTIVATION_HEIGHT` | **969_600** | Txs in earlier blocks are ignored. |
 | `REQUIRED_TOKEN_SUPPLY` | 21_000_000 | Implicit on every DEPLOY, not user-settable. |
 | `DUST_SATS` | 546 | Token-carrier output value **by wallet convention** — consensus accepts any non-OP_RETURN output as a carrier whatever its value, 0 sats included (§4 rule 5). |
 | `PROJECT_FEE_ADDRESS` | `bc1phk23psaqmq4rlsjeet79xpt65n9v2hvrv97ezc6c4rpld4s2shwqa9qx9n` | Fixed; the protocol fee outputs of §2.1–§2.3 pay it. |

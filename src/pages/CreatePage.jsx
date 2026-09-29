@@ -10,7 +10,7 @@ import { MAX_FEE_RATE_SAT_VB, estimateCommitFeeSats, estimateRevealFeeSats, spee
 import { refreshTxRecords, txRecords } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
 import { clampCustomFee, missingFeeHint, needsHighFeeAck } from "../lib/feechoice.js";
-import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
+import { ACTIVATION_HEIGHT, DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE } from "../lib/payloads.js";
 import { activationNotice, activationState, lockedHint } from "../lib/activation.js";
 import {
   DEAD_END_PHASES,
@@ -75,7 +75,7 @@ export default function CreatePage({ params, navigate }) {
   const { wallet: walletState, address, pubkeyHex, fee, fees, indexerOk, sync, tipBlock, refreshAll, chainTip } = useApp();
   const connected = walletState.status === "connected";
   const providerName = walletState.providerName;
-  // Reserving is locked below UNLOCK_HEIGHT (969,299); an UNKNOWN tip counts
+  // Reserving is locked below UNLOCK_HEIGHT (969,599); an UNKNOWN tip counts
   // as locked — the gate fails closed. The app's lock time keeps anything
   // sent from confirming before ACTIVATION_HEIGHT.
   const tipNow = chainTip;
@@ -583,6 +583,7 @@ function ledStatesFor(phase, op, error, finished) {
     case "expired":
     case "invalid":
     case "carrier-spent":
+    case "before-activation":
       s = ["ok", "ok", "err", "idle"];
       break;
     case "publish-unsent":
@@ -1034,6 +1035,11 @@ function FlowStatus({ cr, rec, phase, finished, providerName, idle, revealRate, 
       case "carrier-spent":
         led = "err";
         text = `The ${fmtInt(DUST_SATS)}-sat output of step 1 was spent by another transaction, so it can no longer be published. Abandon it and reserve again.`;
+        actions = abandonBtn();
+        break;
+      case "before-activation":
+        led = "err";
+        text = `Step 1 confirmed in block #${fmtInt(rec.commit.height)}, before LUCKY-20 starts at block #${fmtInt(ACTIVATION_HEIGHT)}, so it is not a reservation. Abandon it (the ${fmtInt(DUST_SATS)}-sat output stays in your wallet) and reserve again.`;
         actions = abandonBtn();
         break;
       case "publish-unsent":

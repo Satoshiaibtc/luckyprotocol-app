@@ -45,9 +45,9 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
 
 // ---- the lag gate ------------------------------------------------------------------------------
 {
-  assert.deepEqual(syncStateOf({ indexed_height: 969_310, tip_height: 969_310, stalled: false }), {
-    indexed: 969_310,
-    tip: 969_310,
+  assert.deepEqual(syncStateOf({ indexed_height: 969_610, tip_height: 969_610, stalled: false }), {
+    indexed: 969_610,
+    tip: 969_610,
     lag: 0,
     stalled: false,
     rebuilding: false,
@@ -56,10 +56,10 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
     synced: true,
     trustUnseen: true,
   });
-  const cold = syncStateOf({ indexed_height: 969_300, tip_height: 969_812, stalled: false });
+  const cold = syncStateOf({ indexed_height: 969_600, tip_height: 970_112, stalled: false });
   assert.equal(cold.synced, false, "a cold scan is not synced even while it makes progress");
   assert.equal(cold.lag, 512);
-  assert.match(syncPauseText(cold, "creating PEPE"), /512 blocks behind the chain tip \(#969,300 of #969,812\), so creating PEPE would rely on stale state/);
+  assert.match(syncPauseText(cold, "creating PEPE"), /512 blocks behind the chain tip \(#969,600 of #970,112\), so creating PEPE would rely on stale state/);
   assert.equal(syncStateOf({ indexed_height: 5, tip_height: 5, stalled: true }).synced, false, "stalled is never synced");
   assert.equal(syncStateOf(null).synced, false, "unknown heights fail closed");
   assert.equal(syncStateOf({ indexed_height: null, tip_height: 7 }).lag, null);
@@ -93,10 +93,10 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   // inputs still guarded until final) until the page that shows their result
   // forgets them ("tracking resumes when you return")
   now += 10_000;
-  const answers = { [TX("a")]: { confirmed: true, seen: true, block_height: 969_400 }, [TX("b")]: { confirmed: true, seen: true, block_height: 969_400 } };
-  const after = await refreshTxRecords(ADDR, async (t) => answers[t], { store, now: () => now, tip: 969_400 });
+  const answers = { [TX("a")]: { confirmed: true, seen: true, block_height: 969_700 }, [TX("b")]: { confirmed: true, seen: true, block_height: 969_700 } };
+  const after = await refreshTxRecords(ADDR, async (t) => answers[t], { store, now: () => now, tip: 969_700 });
   assert.deepEqual(after.map((r) => [r.kind, r.state]), [["deploy", "confirmed"], ["mine", "confirmed"]]);
-  assert.ok(store.list(ADDR).every((r) => r.confirmed && r.blockHeight === 969_400), "both marked confirmed in the store, with their block");
+  assert.ok(store.list(ADDR).every((r) => r.confirmed && r.blockHeight === 969_700), "both marked confirmed in the store, with their block");
   assert.equal(pendingSpentOutpoints(store.list(ADDR)).size, 3, "a confirmed tx keeps its inputs excluded until its block is final");
   // a pending tx whose status cannot be read keeps its inputs excluded (fail closed)
   store.add(ADDR, { txid: TX("c"), kind: "send", ticker: "MOON", inputs: [`${TX("5")}:0`] });
@@ -125,34 +125,34 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const store = createTxRecordStore({ storage, now: () => now });
   const IN = `${TX("a")}:0`;
   store.add(ADDR, { txid: TX("1"), kind: "send", ticker: "MOON", inputs: [IN] });
-  let answer = { confirmed: true, seen: true, block_height: 969_500 };
+  let answer = { confirmed: true, seen: true, block_height: 969_800 };
   const refresh = (tip) => refreshTxRecords(ADDR, async () => answer, { store, now: () => now, tip, trustUnseen: true });
-  await refresh(969_500);
+  await refresh(969_800);
   let r = store.list(ADDR)[0];
-  assert.deepEqual([r.confirmed, r.blockHeight, r.confirmedAt], [true, 969_500, now]);
+  assert.deepEqual([r.confirmed, r.blockHeight, r.confirmedAt], [true, 969_800, now]);
   assert.ok(pendingSpentOutpoints(store.list(ADDR)).has(IN), "1 confirmation: the input stays excluded (a withdrawal cannot be undone by the next MINE)");
   // a chain reorganization puts it back in the mempool (seen at the next re-check)
   answer = { confirmed: false, seen: true, in_mempool: true };
   now += CONFIRMED_RECHECK_MS;
-  const back = await refresh(969_501);
+  const back = await refresh(969_801);
   assert.equal(back[0].state, "pending");
   r = store.list(ADDR)[0];
   assert.deepEqual([r.confirmed, r.blockHeight], [false, null], "unconfirmed again");
   assert.ok(pendingSpentOutpoints(store.list(ADDR)).has(IN));
   // confirms again in another block; kept until that block is 6 deep, then forgotten (a send has no result page)
-  answer = { confirmed: true, seen: true, block_height: 969_502 };
-  await refresh(969_502);
-  await refresh(969_506);
+  answer = { confirmed: true, seen: true, block_height: 969_802 };
+  await refresh(969_802);
+  await refresh(969_806);
   assert.equal(store.list(ADDR).length, 1, "5 confirmations: still guarding");
-  await refresh(969_507);
+  await refresh(969_807);
   assert.equal(store.list(ADDR).length, 0, "6 confirmations: final, forgotten");
   // unknown to the indexer while confirmed (it may be mid-reorganization): kept as it is
   store.add(ADDR, { txid: TX("2"), kind: "fill", inputs: [IN] });
-  answer = { confirmed: true, seen: true, block_height: 969_600 };
-  await refresh(969_600);
+  answer = { confirmed: true, seen: true, block_height: 969_900 };
+  await refresh(969_900);
   answer = { confirmed: false, seen: false };
   now += CONFIRMED_RECHECK_MS;
-  await refresh(969_601);
+  await refresh(969_901);
   assert.equal(store.list(ADDR)[0].confirmed, true, "an unknown answer does not unconfirm");
   // forget: a confirmed record is only marked done — it keeps guarding until final
   store.forget(ADDR, TX("2"));
@@ -161,15 +161,15 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const since = store.list(ADDR)[0].confirmedAt;
   assert.equal(recordIsFinal(store.list(ADDR)[0], null, since + FINAL_GUARD_MS - 1), false);
   assert.equal(recordIsFinal(store.list(ADDR)[0], null, since + FINAL_GUARD_MS), true);
-  assert.equal(recordIsFinal(store.list(ADDR)[0], 969_605, now), true, "the depth, when known, decides");
+  assert.equal(recordIsFinal(store.list(ADDR)[0], 969_905, now), true, "the depth, when known, decides");
   // an unconfirmed record is deleted by forget
   store.add(ADDR, { txid: TX("3"), kind: "send", inputs: [`${TX("b")}:1`] });
   store.forget(ADDR, TX("3"));
   assert.ok(!store.list(ADDR).some((x) => x.txid === TX("3")));
   // a done MINE is forgotten once final; one not shown yet stays for its result page
   store.add(ADDR, { txid: TX("4"), kind: "mine", ticker: "MOON", inputs: [] });
-  store.markConfirmed(ADDR, TX("4"), 969_600);
-  await refreshTxRecords(ADDR, async () => ({ confirmed: true, seen: true, block_height: 969_600 }), { store, now: () => now, tip: 969_610 });
+  store.markConfirmed(ADDR, TX("4"), 969_900);
+  await refreshTxRecords(ADDR, async () => ({ confirmed: true, seen: true, block_height: 969_900 }), { store, now: () => now, tip: 969_910 });
   assert.deepEqual(store.list(ADDR).map((x) => x.txid), [TX("4")], "the final done fill is forgotten; the unshown MINE stays");
   console.log("txrecords: confirmed txs guard their inputs until final; a reorganization back to the mempool unconfirms; forget keeps a confirmed guard");
 }
@@ -182,12 +182,12 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const store = createTxRecordStore({ storage, now: () => now });
   for (const c of ["1", "2", "3"]) store.add(ADDR, { txid: TX(c), kind: "mine", ticker: "MOON", inputs: [`${TX(c)}:0`] });
   let calls = 0;
-  let answer = { confirmed: true, seen: true, block_height: 969_700 };
+  let answer = { confirmed: true, seen: true, block_height: 970_000 };
   const refresh = () =>
     refreshTxRecords(ADDR, async () => {
       calls += 1;
       return answer;
-    }, { store, now: () => now, tip: 969_701, trustUnseen: true });
+    }, { store, now: () => now, tip: 970_001, trustUnseen: true });
   await refresh();
   assert.equal(calls, 3, "pending records are asked every time");
   calls = 0;
@@ -208,7 +208,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
     refreshTxRecords(ADDR, async () => {
       calls += 1;
       throw new Error("HTTP 502");
-    }, { store, now: () => now, tip: 969_701 });
+    }, { store, now: () => now, tip: 970_001 });
   await failing();
   calls = 0;
   await failing();
@@ -501,9 +501,9 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const mine = { payload: { op: "MINE", ticker: "LUCKY" }, outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true })] };
   assert.deepEqual(routeDecision(mine, { isDeployed: deployed }), { op: "MINE", valid: true, applied: true, reason: null, yieldVout: 0, send: null, residualVout: 0 });
   // a MINE in its ticker's DEPLOY block is invalid (deploy_same_block); its residual still goes to vout0
-  const sameBlock = routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_400, height: 969_400 });
+  const sameBlock = routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_700, height: 969_700 });
   assert.deepEqual([sameBlock.valid, sameBlock.reason, sameBlock.yieldVout, sameBlock.residualVout], [false, "deploy_same_block", null, 0]);
-  assert.equal(routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_400, height: 969_401 }).valid, true, "the block after the DEPLOY: valid");
+  assert.equal(routeDecision(mine, { isDeployed: deployed, deployBlockOf: () => 969_700, height: 969_701 }).valid, true, "the block after the DEPLOY: valid");
   assert.equal(routeDecision(mine, { isDeployed: () => false }).reason, "not_deployed");
   const feeless = { ...mine, outputs: [out(0, { address: ADDR }), out(1, { opReturn: true })] };
   assert.equal(routeDecision(feeless, { isDeployed: deployed }).valid, false, "no exact 546-sat fee output → invalid");
@@ -550,28 +550,28 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
     inputs: [{ txid: TX("c"), vout: 0 }, { txid: TX("2"), vout: 1 }],
     outputs: [out(0, { address: "bc1qother" }), FEE(1, 5_460), out(2, { opReturn: true })],
   };
-  const open = { hash: H, carrier_script: SPK_A, height: 969_400, committer: ADDR };
+  const open = { hash: H, carrier_script: SPK_A, height: 969_700, committer: ADDR };
   const at = (k) => (k === `${TX("c")}:0` ? open : null);
-  const ok = routeDecision(reveal, { isDeployed: deployed, commitAt: at, height: 969_401 });
+  const ok = routeDecision(reveal, { isDeployed: deployed, commitAt: at, height: 969_701 });
   assert.equal(ok.applied, true, "a reveal one block after its commit applies");
   assert.equal(ok.deployer, ADDR, "deployer = the committer (the carrier's address), not vout0's or a signer's");
-  const why = (over = {}, ctx = {}) => revealRejection({ ...reveal, ...over }, { isDeployed: deployed, commit: open, height: 969_401, ...ctx });
+  const why = (over = {}, ctx = {}) => revealRejection({ ...reveal, ...over }, { isDeployed: deployed, commit: open, height: 969_701, ...ctx });
   assert.equal(why(), null);
   assert.equal(why({ payload: { op: "DEPLOY", ticker: "NEW", salt: null } }), "commit_required", "the old 3-field DEPLOY never applies");
   assert.equal(why({}, { commit: null }), "no_commit");
   assert.equal(why({}, { commit: { ...open, status: "invalid" } }), "commit_invalid");
-  assert.equal(routeDecision({ ...reveal, inputs: [{ txid: TX("2"), vout: 1 }, { txid: TX("c"), vout: 0 }] }, { isDeployed: deployed, commitAt: at, height: 969_401 }).reason, "no_commit", "the carrier must be input 0");
+  assert.equal(routeDecision({ ...reveal, inputs: [{ txid: TX("2"), vout: 1 }, { txid: TX("c"), vout: 0 }] }, { isDeployed: deployed, commitAt: at, height: 969_701 }).reason, "no_commit", "the carrier must be input 0");
   assert.equal(why({ payloadText: `LUCKY-20|DEPLOY|NEW|${"cd".repeat(16)}` }), "hash_mismatch");
-  assert.equal(why({}, { commit: { ...open, height: 969_299 }, height: 969_300 }), "commit_before_activation");
-  assert.equal(why({}, { height: 969_400 }), "commit_too_recent", "same block as the commit");
-  assert.equal(why({}, { height: 969_400 + 2_016 }), null, "the last block of the window");
-  assert.equal(why({}, { height: 969_400 + 2_017 }), "commit_expired");
+  assert.equal(why({}, { commit: { ...open, height: 969_599 }, height: 969_600 }), "commit_before_activation");
+  assert.equal(why({}, { height: 969_700 }), "commit_too_recent", "same block as the commit");
+  assert.equal(why({}, { height: 969_700 + 2_016 }), null, "the last block of the window");
+  assert.equal(why({}, { height: 969_700 + 2_017 }), "commit_expired");
   assert.equal(why({ outputs: [out(0, { address: ADDR }), FEE(1, 546), out(2, { opReturn: true })] }), "fee_missing");
   assert.equal(why({ payload: { op: "DEPLOY", ticker: "LUCKY", salt: "ab".repeat(16) }, payloadText: `LUCKY-20|DEPLOY|LUCKY|${"ab".repeat(16)}` }, { commit: { ...open, hash: commitHashFor("LUCKY", "ab".repeat(16), SPK_A) } }), "ticker_taken");
   // The copy: Mallory's COMMIT of the owner's H, revealed with the owner's payload through HIS carrier → hash_mismatch,
   // even when his reveal is the only one (rule 2 comes before rule 7).
   const copied = { ...open, carrier_script: SPK_M, committer: MALLORY };
-  const front = routeDecision({ ...reveal, inputs: [{ txid: TX("e"), vout: 0 }, { txid: TX("3"), vout: 1 }] }, { isDeployed: deployed, commitAt: (k) => (k === `${TX("e")}:0` ? copied : null), height: 969_401 });
+  const front = routeDecision({ ...reveal, inputs: [{ txid: TX("e"), vout: 0 }, { txid: TX("3"), vout: 1 }] }, { isDeployed: deployed, commitAt: (k) => (k === `${TX("e")}:0` ? copied : null), height: 969_701 });
   assert.equal(front.applied, false);
   assert.equal(front.reason, "hash_mismatch", "a copied H never reveals through the copier's carrier");
   assert.equal(front.deployer, null);
@@ -581,10 +581,10 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const V = { ...reveal, payload: { op: "DEPLOY", ticker: "LUCKY", salt: "000102030405060708090a0b0c0d0e0f" }, payloadText: "LUCKY-20|DEPLOY|LUCKY|000102030405060708090a0b0c0d0e0f" };
   const V1 = "1ac55b4c608ed7c39eb3dbcecaf04c41222d5b3c37b6343477c9a91d4a6f33fc";
   const V4 = "740566381d71cf04e3ce2d5ffe62c03e65b13becf27bf963cd40e385d2e2bdf4";
-  const vc = (hash, script) => ({ hash, carrier_script: script, height: 969_400, committer: ADDR });
-  assert.equal(revealRejection(V, { commit: vc(V1, SPK_A), height: 969_401 }), null, "vector 1");
-  assert.equal(revealRejection(V, { commit: vc(V4, SPK_M), height: 969_401 }), null, "vector 4");
-  assert.equal(revealRejection(V, { commit: vc(V1, SPK_M), height: 969_401 }), "hash_mismatch", "vector 1's H through vector 4's script");
+  const vc = (hash, script) => ({ hash, carrier_script: script, height: 969_700, committer: ADDR });
+  assert.equal(revealRejection(V, { commit: vc(V1, SPK_A), height: 969_701 }), null, "vector 1");
+  assert.equal(revealRejection(V, { commit: vc(V4, SPK_M), height: 969_701 }), null, "vector 4");
+  assert.equal(revealRejection(V, { commit: vc(V1, SPK_M), height: 969_701 }), "hash_mismatch", "vector 1's H through vector 4's script");
   assert.equal(REVEAL_REASONS.length, 9);
   // §7.5: the payment is judged at the listed input's index, and only a
   // spend signed SIGHASH_SINGLE|ANYONECANPAY (the listing's own signature) fills.

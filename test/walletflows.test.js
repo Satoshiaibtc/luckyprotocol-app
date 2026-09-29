@@ -388,15 +388,15 @@ function mockSignPsbtAs(key, psbtHex, indexes) {
 
 // ---- 7. small texts ------------------------------------------------------------------------------
 {
-  assert.equal(filledLineText({ final: false, block_height: 969_412 }), "Filled in block #969,412 — final after 6 confirmations.");
+  assert.equal(filledLineText({ final: false, block_height: 969_712 }), "Filled in block #969,712 — final after 6 confirmations.");
   assert.equal(filledLineText({ final: false, block_height: null }), "Filled — final after 6 confirmations.", "never block #0");
   assert.ok(!/#0/.test(filledLineText({ final: false })));
   assert.equal(filledLineText({ final: true, block_height: 5 }), "Filled.");
-  // Tip 0 (an indexer that has not read its node yet) is unknown, never "969,299 blocks from now".
+  // Tip 0 (an indexer that has not read its node yet) is unknown, never "969,599 blocks from now".
   assert.equal(activationState(0).unknown, true);
-  assert.equal(activationState(chainTipOf({ tip_height: 0, indexed_height: 969_412 })).locked, false);
+  assert.equal(activationState(chainTipOf({ tip_height: 0, indexed_height: 969_712 })).locked, false);
   // The site banner names every paused action.
-  const sync = (x) => ({ indexed: 969_400, tip: 969_405, lag: 5, stalled: false, rebuilding: false, noPeers: false, networkLag: 0, synced: false, trustUnseen: false, ...x });
+  const sync = (x) => ({ indexed: 969_700, tip: 969_705, lag: 5, stalled: false, rebuilding: false, noPeers: false, networkLag: 0, synced: false, trustUnseen: false, ...x });
   for (const s of [sync({ rebuilding: true }), sync({ stalled: true, noPeers: true }), sync({ stalled: true }), sync({ networkLag: 3 }), sync({})]) {
     assert.match(syncWarningText(s), /Creating, mining, sending, listing and buying (are paused|resume)/);
   }
@@ -407,7 +407,7 @@ function mockSignPsbtAs(key, psbtHex, indexes) {
   assert.equal(canResendStep(step), true, "signed, no relay confirmed it: it may be sent again");
   assert.equal(canResendStep({ ...step, sentAt: 2 }), false, "sent and not unseen: nothing to resend");
   assert.equal(canResendStep({ ...step, sentAt: 2, unseenAt: 3 }), true, "lost sight of: it may be sent again");
-  assert.equal(canResendStep({ ...step, height: 969_400 }), false);
+  assert.equal(canResendStep({ ...step, height: 969_700 }), false);
   assert.equal(canResendStep(step, () => TX("b")), false, "a copy that is not this txid is never sent");
   assert.equal(canResendStep(step, () => TX("a")), true);
   assert.equal(switchStepTo({ ...step, replaces: [TX("c")] }, TX("c")).raw, null, "switched to another version: its copy is not this one");
@@ -415,10 +415,10 @@ function mockSignPsbtAs(key, psbtHex, indexes) {
   // A Speed up of a step: sent, it follows the faster copy; its broadcast
   // unknown, the step follows it UNSENT (checked, and Send again relays the
   // same copy) and every earlier version stays known — one may confirm instead.
-  const sentStep = normalizeStep({ txid: TX("a"), raw, signedAt: 1, sentAt: 2, sentTip: 969_400, feeSats: 300 });
-  const fast = { txid: TX("d"), psbt: "70736274ff", raw: "02000000000200", feeSats: 900, feeRateSatVb: 9, vsize: 100, tip: 969_401, now: 50 };
+  const sentStep = normalizeStep({ txid: TX("a"), raw, signedAt: 1, sentAt: 2, sentTip: 969_700, feeSats: 300 });
+  const fast = { txid: TX("d"), psbt: "70736274ff", raw: "02000000000200", feeSats: 900, feeRateSatVb: 9, vsize: 100, tip: 969_701, now: 50 };
   const sped = spedUpStep(sentStep, { ...fast, sent: true });
-  assert.deepEqual([sped.txid, sped.sentAt, sped.sentTip, sped.signedAt, sped.feeSats], [TX("d"), 50, 969_401, 1, 900]);
+  assert.deepEqual([sped.txid, sped.sentAt, sped.sentTip, sped.signedAt, sped.feeSats], [TX("d"), 50, 969_701, 1, 900]);
   assert.deepEqual(sped.replaces, [TX("a")]);
   const unsure = spedUpStep(sentStep, { ...fast, sent: false });
   assert.deepEqual([unsure.txid, unsure.sentAt, unsure.sentTip, unsure.signedAt, unsure.unseenAt, unsure.height], [TX("d"), null, null, 50, null, null], "signed now, not known to be sent");

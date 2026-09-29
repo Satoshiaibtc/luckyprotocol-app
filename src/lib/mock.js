@@ -55,7 +55,7 @@ import { seedWaitFields, serverErrorText } from "./httpError.js";
 import { FINAL_DEPTH, MARKET_OPEN_DELAY, confirmationsAt } from "./finality.js";
 import { COMMIT_CARRIER_LISTING_TEXT, MAX_OPEN_LISTINGS_PER_ADDRESS, WITHDRAW_FIRST_TEXT, sellerCapError } from "./listingRules.js";
 
-const BASE_TIP = 969_800;
+const BASE_TIP = 970_100;
 const CONFIRM_AFTER_MS = 20_000;
 // After a simulated tx confirms, the simulated chain keeps growing — one
 // block per CONFIRM_AFTER_MS — for this many blocks, so its confirmations
@@ -178,21 +178,21 @@ function blockTimeAt(height) {
 // ---- seeded world (lazy) -------------------------------------------------------------------
 
 const TOKEN_SEEDS = [
-  { ticker: "LUCKY", minted: 1_234_567, deploy_block: 969_500, holders: 412, base: 48, deployerType: "tr" },
+  { ticker: "LUCKY", minted: 1_234_567, deploy_block: 969_800, holders: 412, base: 48, deployerType: "tr" },
   // BLOK is minted out: its market is the one open market of the mock world.
-  // The MINE that completed the supply confirmed at block 965,000 (~33 days
+  // The MINE that completed the supply confirmed at block 965,300 (~33 days
   // before the tip), before the earliest seeded fill, so the 30 days of
   // trade history keep their spread (1d candles, 7d vs 24h windows).
-  { ticker: "BLOK", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: 965_000, deploy_block: 960_000, holders: 3_310, base: 12.5, deployerType: "tr" },
-  { ticker: "SATS", minted: 8_400_000, deploy_block: 969_505, holders: 1_904, base: 3.2, deployerType: "wpkh" },
-  { ticker: "ORE", minted: 42_021, deploy_block: 969_512, holders: 57, base: 310, deployerType: "wpkh" },
-  { ticker: "NODE", minted: 620_500, deploy_block: 969_530, holders: 233, base: 85, deployerType: "tr" },
-  { ticker: "GRID", minted: 210_000, deploy_block: 969_600, holders: 120, base: 140, deployerType: "tr" },
-  { ticker: "PIXEL", minted: 3_150, deploy_block: 969_790, holders: 9, base: 1_200, deployerType: "wpkh" },
+  { ticker: "BLOK", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: 965_300, deploy_block: 960_300, holders: 3_310, base: 12.5, deployerType: "tr" },
+  { ticker: "SATS", minted: 8_400_000, deploy_block: 969_805, holders: 1_904, base: 3.2, deployerType: "wpkh" },
+  { ticker: "ORE", minted: 42_021, deploy_block: 969_812, holders: 57, base: 310, deployerType: "wpkh" },
+  { ticker: "NODE", minted: 620_500, deploy_block: 969_830, holders: 233, base: 85, deployerType: "tr" },
+  { ticker: "GRID", minted: 210_000, deploy_block: 969_900, holders: 120, base: 140, deployerType: "tr" },
+  { ticker: "PIXEL", minted: 3_150, deploy_block: 970_090, holders: 9, base: 1_200, deployerType: "wpkh" },
   // DUNE was minted out two blocks before the tip: its market opens once that
   // block has FINAL_DEPTH confirmations (no fills or asks until then).
-  { ticker: "DUNE", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: BASE_TIP - 2, deploy_block: 969_700, holders: 880, base: 0, deployerType: "wpkh" },
-  { ticker: "VOLT", minted: 0, deploy_block: 969_799, holders: 0, base: 0, deployerType: "tr" }, // brand-new: no mines, no trades, no asks
+  { ticker: "DUNE", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: BASE_TIP - 2, deploy_block: 970_000, holders: 880, base: 0, deployerType: "wpkh" },
+  { ticker: "VOLT", minted: 0, deploy_block: 970_099, holders: 0, base: 0, deployerType: "tr" }, // brand-new: no mines, no trades, no asks
 ];
 
 // Roughly the model mix over 20 rows: 1–2 × 1000, ~6 × 500, ~6 × 200, ~6 × 100.
@@ -1283,7 +1283,7 @@ function seedMyListings(floorUnit) {
 
 /**
  * Dev knob for the activation countdown: `sessionStorage["lp.mock.healthTip"]
- * = "969299"` makes /health report that tip (and indexed height) in THIS
+ * = "969599"` makes /health report that tip (and indexed height) in THIS
  * tab only, so the pre-activation banner and locks can be checked in mock
  * mode. Only /health reads it — the simulated chain stays at BASE_TIP.
  */

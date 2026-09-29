@@ -168,7 +168,7 @@ const rows = sendCarrierRows({ tokenUtxos, btcUtxos, orders, pendingSpent: new S
   store.add(SELF, { txid: TX("6"), kind: "send", ticker: "ORE", inputs: [] });
   assert.deepEqual(pendingSendsOf(store.list(SELF), "LUCKY").map((r) => r.txid), [TX("5")]);
   now += 60_000;
-  const answers = { [TX("5")]: { confirmed: true, seen: true, block_height: 969_815 }, [TX("6")]: { confirmed: false, seen: true } };
+  const answers = { [TX("5")]: { confirmed: true, seen: true, block_height: 970_115 }, [TX("6")]: { confirmed: false, seen: true } };
   await refreshTxRecords(SELF, async (t) => answers[t], { store, now: () => now });
   assert.deepEqual(pendingSendsOf(store.list(SELF), "LUCKY"), [], "the confirmed send left the list");
   assert.equal(pendingSendsOf(store.list(SELF), "ORE").length, 1, "a pending one stays");

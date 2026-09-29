@@ -99,7 +99,7 @@ export default function ProbabilityPage() {
 
   const heightAt = useCallback((i) => (rec ? rec.from + i : null), [rec]);
 
-  // "1,008 blocks · #968,793 → #969,800" — the count is whatever the window
+  // "1,008 blocks · #969,093 → #970,100" — the count is whatever the window
   // holds; it is never compared with a nominal blocks-per-day figure.
   const held =
     !rec || n === 0 ? null : (
@@ -214,7 +214,7 @@ function cellSize(width, cols) {
   return Math.max(CELL_MIN, Math.min(CELL_MAX, Math.floor(width / cols)));
 }
 
-/** "#969,800 · digit c → 500" */
+/** "#970,100 · digit c → 500" */
 function cellTitle(height, digit) {
   return `#${fmtInt(height)} · digit ${digit} → ${fmtInt(yieldOfDigit(digit))}`;
 }

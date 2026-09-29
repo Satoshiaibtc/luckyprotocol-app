@@ -36,7 +36,7 @@ function serveBtcUtxos(rows, { withTotal = true, maxLimit = 500, onRequest = nul
     const all = [...rows()].sort(btcUtxoOrder);
     const limit = Math.max(1, Math.min(maxLimit, Number(u.searchParams.get("limit") || 200)));
     const offset = Math.max(0, Number(u.searchParams.get("offset") || 0));
-    const body = { address: ADDR, scanned_at_height: 969_500, utxos: all.slice(offset, offset + limit) };
+    const body = { address: ADDR, scanned_at_height: 969_800, utxos: all.slice(offset, offset + limit) };
     if (withTotal) Object.assign(body, { total: all.length, limit, offset });
     return { ok: true, status: 200, headers: { get: () => null }, json: async () => body, text: async () => JSON.stringify(body) };
   };
@@ -56,8 +56,8 @@ async function withFetch(fetch, fn) {
 // ---- 1. /btc-utxos: every page -----------------------------------------------------------------
 {
   // 10 plain outputs and 1,250 carriers of 546 sats: 1,260 rows, carriers on pages 1–3.
-  const plain = Array.from({ length: 10 }, (_, i) => ({ txid: txidOf("aa", i), vout: 0, sats: 20_000 + i, confirmed: true, block_height: 969_400 }));
-  const carriers = Array.from({ length: 1_250 }, (_, i) => ({ txid: txidOf("cc", i), vout: 0, sats: 546, confirmed: true, block_height: 969_401 }));
+  const plain = Array.from({ length: 10 }, (_, i) => ({ txid: txidOf("aa", i), vout: 0, sats: 20_000 + i, confirmed: true, block_height: 969_700 }));
+  const carriers = Array.from({ length: 1_250 }, (_, i) => ({ txid: txidOf("cc", i), vout: 0, sats: 546, confirmed: true, block_height: 969_701 }));
   const srv = serveBtcUtxos(() => [...plain, ...carriers]);
   const rows = await withFetch(srv.fetch, () => indexer.btcUtxos(ADDR));
   assert.equal(rows.length, 1_260, "every row");
@@ -154,7 +154,7 @@ async function withFetch(fetch, fn) {
 
 // ---- 3. /tokens: the whole registry --------------------------------------------------------------
 {
-  const reg = Array.from({ length: 1_234 }, (_, i) => ({ ticker: `T${i}`, supply: 21_000_000, minted: i, deployer: ADDR, deploy_txid: txidOf("ee", i), deploy_block: 969_300 + i }));
+  const reg = Array.from({ length: 1_234 }, (_, i) => ({ ticker: `T${i}`, supply: 21_000_000, minted: i, deployer: ADDR, deploy_txid: txidOf("ee", i), deploy_block: 969_600 + i }));
   const requests = [];
   const fetch = async (url) => {
     const u = new URL(String(url));

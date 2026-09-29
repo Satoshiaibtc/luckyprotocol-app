@@ -3,7 +3,7 @@ import { blockUrl, fmtAgo, fmtInt } from "../lib/format.js";
 import DigitChip from "./DigitChip.jsx";
 
 /**
- * `LATEST BLOCK  #969,800  …a91[c]  → 500 LUCKY · tier a–e · 5 of 16  12 min ago`
+ * `LATEST BLOCK  #970,100  …a91[c]  → 500 LUCKY · tier a–e · 5 of 16  12 min ago`
  * `remaining` (tokens left, or null): a minted-out ticker drops the arrow —
  * no MINE is credited anything — and near the cap the arrow reads
  * "at most N".

@@ -171,11 +171,11 @@ function keyFor(seed, type) {
   assert.equal(fillOutcome(base, { txid: mine, address: me }), null, "still open (the fill left the mempool): nothing concluded");
   assert.deepEqual(fillOutcome({ ...base, status: "filling", pending_spend_txid: TX("2") }, { txid: mine, address: me }), { kind: "replacing", txid: TX("2") });
   assert.equal(fillOutcome({ ...base, status: "filling", pending_spend_txid: mine }, { txid: mine, address: me }), null, "our own fill is the pending one");
-  assert.deepEqual(fillOutcome({ ...base, status: "filled", spent_txid: TX("3"), spent_block: 970_000, buyer: "bc1qother" }, { txid: mine, address: me }), { kind: "other", txid: TX("3") });
-  assert.deepEqual(fillOutcome({ ...base, status: "cancelled", spent_txid: TX("4"), spent_block: 970_000 }, { txid: mine, address: me }), { kind: "seller", txid: TX("4") });
-  assert.deepEqual(fillOutcome({ ...base, status: "filled", spent_txid: TX("5"), spent_block: 970_000, buyer: "bc1pseller" }, { txid: mine, address: me }), { kind: "seller", txid: TX("5") }, "the seller's own fill of it");
-  assert.deepEqual(fillOutcome({ ...base, status: "filled", spent_txid: TX("6"), spent_block: 970_000, buyer: me }, { txid: mine, address: me }), { kind: "mine", txid: TX("6") }, "our fill under another txid: followed, never \"your BTC did not move\"");
-  assert.equal(fillOutcome({ ...base, status: "filled", spent_txid: mine, spent_block: 970_000, buyer: me }, { txid: mine, address: me }), null, "our own fill confirmed: the tx status says so");
+  assert.deepEqual(fillOutcome({ ...base, status: "filled", spent_txid: TX("3"), spent_block: 970_300, buyer: "bc1qother" }, { txid: mine, address: me }), { kind: "other", txid: TX("3") });
+  assert.deepEqual(fillOutcome({ ...base, status: "cancelled", spent_txid: TX("4"), spent_block: 970_300 }, { txid: mine, address: me }), { kind: "seller", txid: TX("4") });
+  assert.deepEqual(fillOutcome({ ...base, status: "filled", spent_txid: TX("5"), spent_block: 970_300, buyer: "bc1pseller" }, { txid: mine, address: me }), { kind: "seller", txid: TX("5") }, "the seller's own fill of it");
+  assert.deepEqual(fillOutcome({ ...base, status: "filled", spent_txid: TX("6"), spent_block: 970_300, buyer: me }, { txid: mine, address: me }), { kind: "mine", txid: TX("6") }, "our fill under another txid: followed, never \"your BTC did not move\"");
+  assert.equal(fillOutcome({ ...base, status: "filled", spent_txid: mine, spent_block: 970_300, buyer: me }, { txid: mine, address: me }), null, "our own fill confirmed: the tx status says so");
   assert.equal(fillOutcome({ ...base, status: "cancelled", spent_txid: null }, { txid: mine, address: me }), null, "cancelled with no spend (a reorganization): our fill may still confirm");
   assert.match(fillOutcomeText({ kind: "other", txid: TX("3") }), /Another buyer's fill of this listing confirmed first.*your BTC did not move/);
   assert.match(fillOutcomeText({ kind: "seller", txid: TX("4") }), /The seller spent the listed UTXO first.*your BTC did not move/);

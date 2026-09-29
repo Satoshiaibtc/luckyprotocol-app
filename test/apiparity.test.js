@@ -155,10 +155,10 @@ globalThis.fetch = async (url) => {
   assert.equal((await indexer.fees()).ok, true, "/fees: ok");
   const toks = (await indexer.tokens({ limit: 200 })).items;
   const blok = toks.find((t) => t.ticker === "BLOK");
-  assert.deepEqual([blok.market_open, blok.market_opens_at_height], [true, 965_005], "minted out at 965,000: open from 965,005");
+  assert.deepEqual([blok.market_open, blok.market_opens_at_height], [true, 965_305], "minted out at 965,300: open from 965,305");
   const dune = toks.find((t) => t.ticker === "DUNE");
-  assert.deepEqual([dune.minted_out, dune.market_open, dune.market_opens_at_height], [true, false, 969_803], "minted out two blocks ago: not open yet");
-  assert.deepEqual([(await indexer.token("DUNE")).market_open, (await indexer.market("DUNE")).market_open, (await indexer.market("DUNE")).market_opens_at_height], [false, false, 969_803], "every token view carries the gate");
+  assert.deepEqual([dune.minted_out, dune.market_open, dune.market_opens_at_height], [true, false, 970_103], "minted out two blocks ago: not open yet");
+  assert.deepEqual([(await indexer.token("DUNE")).market_open, (await indexer.market("DUNE")).market_open, (await indexer.market("DUNE")).market_opens_at_height], [false, false, 970_103], "every token view carries the gate");
   const book = (await indexer.orders({ status: "open", limit: 200 })).items;
   assert.ok(book.length > 0 && book.every((o) => o.market_open === true), "order views carry market_open");
   const feed = (await indexer.minesFeed({ limit: 5 })).items;
@@ -166,7 +166,7 @@ globalThis.fetch = async (url) => {
   const ts = await indexer.txStatus(feed[0].txid);
   assert.deepEqual([ts.confirmed, ts.confirmations, ts.final], [true, feed[0].confirmations, feed[0].final], "/tx-status carries the same depth");
   const { mockPostJson } = await import("../src/lib/mock.js");
-  await assert.rejects(mockPostJson("/orders", { psbt: "00", ticker: "DUNE", amount: 100, price_sats: 1_000 }), (e) => e.status === 409 && e.message === "market opens at block 969803", "POST /orders before the market opens: 409 market opens at block N");
+  await assert.rejects(mockPostJson("/orders", { psbt: "00", ticker: "DUNE", amount: 100, price_sats: 1_000 }), (e) => e.status === 409 && e.message === "market opens at block 970103", "POST /orders before the market opens: 409 market opens at block N");
   console.log("apiparity depth: health, fees.ok, market_open / market_opens_at_height, order market_open, mine + tx-status confirmations / final");
 }
 

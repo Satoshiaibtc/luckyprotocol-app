@@ -32,10 +32,10 @@ console.log("blocks: true weight occupancy, unknown data, full labels and bounde
 {
   const A = "0".repeat(63) + "a";
   const B = "0".repeat(63) + "b";
-  const cache = new Map([[969_800, { hash: A }], [969_799, { hash: "0".repeat(64) }], [969_798, { missing: true }]]);
-  assert.equal(hashesDisagree(cache, new Map([[969_801, { hash: B }], [969_800, { hash: B }]])), true, "h replaced while h+1 arrived");
-  assert.equal(hashesDisagree(cache, new Map([[969_801, { hash: B }], [969_800, { hash: A }]])), false, "the same chain, one more block");
-  assert.equal(hashesDisagree(cache, new Map([[969_798, { hash: B }]])), false, "a height cached as missing is not a disagreement");
+  const cache = new Map([[970_100, { hash: A }], [970_099, { hash: "0".repeat(64) }], [970_098, { missing: true }]]);
+  assert.equal(hashesDisagree(cache, new Map([[970_101, { hash: B }], [970_100, { hash: B }]])), true, "h replaced while h+1 arrived");
+  assert.equal(hashesDisagree(cache, new Map([[970_101, { hash: B }], [970_100, { hash: A }]])), false, "the same chain, one more block");
+  assert.equal(hashesDisagree(cache, new Map([[970_098, { hash: B }]])), false, "a height cached as missing is not a disagreement");
   assert.equal(hashesDisagree(new Map(), new Map([[1, { hash: A }]])), false);
   console.log("blocks: a replaced block anywhere in the window resets the tape");
 }
@@ -50,8 +50,8 @@ console.log("blocks: true weight occupancy, unknown data, full labels and bounde
   const saved = globalThis.fetch;
   globalThis.fetch = async (url) => {
     urls.push(String(url));
-    const blocks = Array.from({ length: RECENT_BLOCKS_LIMIT }, (_, i) => ({ height: 969_900 - i, hash: "0".repeat(63) + "a", time: 1_790_000_000, weight: 3_000_000, tx_count: 2_000 }));
-    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ tip_height: 969_900, blocks }) };
+    const blocks = Array.from({ length: RECENT_BLOCKS_LIMIT }, (_, i) => ({ height: 970_200 - i, hash: "0".repeat(63) + "a", time: 1_790_000_000, weight: 3_000_000, tx_count: 2_000 }));
+    return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ tip_height: 970_200, blocks }) };
   };
   try {
     const a = await indexer.recentBlocks();

@@ -17,7 +17,7 @@
 // and clock, the timing math, the texts) are tested in
 // test/deploylog.test.js; the React side is src/hooks/useCommitReveal.js.
 
-import { MAX_COMMIT_AGE, MIN_COMMIT_AGE, SALT_RE, SCRIPT_HEX_RE, TICKER_RE, commitHashFor } from "./payloads.js";
+import { ACTIVATION_HEIGHT, MAX_COMMIT_AGE, MIN_COMMIT_AGE, SALT_RE, SCRIPT_HEX_RE, TICKER_RE, commitHashFor } from "./payloads.js";
 import { blocksEtaText, blocksText } from "./activation.js";
 import { FINAL_DEPTH, confirmationsAt } from "./finality.js";
 
@@ -365,7 +365,7 @@ export function revealTiming(commitHeight, tip) {
 export const EXPIRY_WARN_BLOCKS = 144;
 
 /**
- * "Publish by block #971,311 — 2,009 blocks left (about 14 days)." — the
+ * "Publish by block #971,611 — 2,009 blocks left (about 14 days)." — the
  * last block Publish is open (PUBLISH_CUTOFF_BLOCKS before the expiry).
  */
 export function expiryText(timing) {
@@ -407,7 +407,7 @@ export function ownPublishTxids(rec) {
  *
  * → "idle" | "draft" | "reserve-unsent" | "reserve-pending" | "reserve-unseen"
  *   | "recording" | "settling" | "ready" | "taken-tentative" | "taken"
- *   | "closing" | "expired" | "invalid" | "carrier-spent"
+ *   | "closing" | "expired" | "invalid" | "carrier-spent" | "before-activation"
  *   | "publish-unsent" | "publish-pending" | "publish-unseen"
  *   | "publish-pending-taken" | "publish-confirmed"
  *   | "registered-provisional" | "registered" | "taken-after" | "refused"
@@ -445,6 +445,9 @@ export function deployPhase({ rec, commitStatus, commitInfo = null, row, rowAsOf
         return rowIsFinal(row, indexed) ? "taken" : "taken-tentative";
       }
       if (!Number.isInteger(rec.commit.height)) return rec.commit.unseenAt ? "reserve-unseen" : "reserve-pending";
+      // Confirmed below ACTIVATION_HEIGHT: the protocol ignores it, so it
+      // never becomes a reservation.
+      if (rec.commit.height < ACTIVATION_HEIGHT) return "before-activation";
       const t = revealTiming(rec.commit.height, tip);
       if (commitStatus === "invalid") return "invalid";
       if (commitStatus === "revealed") return commitInfo && ownPublishTxids(rec).has(commitInfo.spent_txid) ? "recording" : "carrier-spent";
@@ -508,7 +511,7 @@ export function rowConfirmations(row, indexed) {
 }
 
 /** Phases in which a reservation can only be abandoned (nothing left to publish). */
-export const DEAD_END_PHASES = new Set(["taken", "closing", "expired", "invalid", "carrier-spent", "taken-after", "refused"]);
+export const DEAD_END_PHASES = new Set(["taken", "closing", "expired", "invalid", "carrier-spent", "before-activation", "taken-after", "refused"]);
 
 // ---- chain reorganizations under a reservation -------------------------------------------------
 
@@ -522,6 +525,8 @@ export const DEAD_END_PHASES = new Set(["taken", "closing", "expired", "invalid"
  */
 export function commitRecheckNeeded({ commit, commitData, indexed, misses }) {
   if (!commit || !Number.isInteger(commit.height) || commitData !== null) return false;
+  // Below ACTIVATION_HEIGHT the indexer never records it: no re-check helps.
+  if (commit.height < ACTIVATION_HEIGHT) return false;
   if (!Number.isInteger(indexed) || indexed < commit.height + 1) return false;
   return misses >= 2;
 }

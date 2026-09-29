@@ -19,7 +19,7 @@ const agreeOutspend = { spent: false };
 const agreeTx = {
   txid: TXID,
   vout: [{ scriptpubkey: "0014" + "cd".repeat(20), value: 12_000 }, { scriptpubkey: SCRIPT, value: 546, scriptpubkey_type: "v1_p2tr" }, { scriptpubkey: FEE, value: 546 }, opret("LUCKY-20|SEND|LUCKY|1200|1|4"), { scriptpubkey: SCRIPT, value: 546 }],
-  status: { confirmed: true, block_height: 969_700, block_hash: "00".repeat(31) + "0f" },
+  status: { confirmed: true, block_height: 970_000, block_hash: "00".repeat(31) + "0f" },
 };
 
 // ---- URLs: txid + vout only, path segments, no query string ------------------------------------------
@@ -159,7 +159,7 @@ const agreeTx = {
 
 // ---- partial credits and amounts the second source cannot confirm -----------
 {
-  const CAP = 969_900;
+  const CAP = 970_200;
   const mineTx = (height, last = "f") => ({
     txid: TXID,
     vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret("LUCKY-20|MINE|LUCKY")],
@@ -176,10 +176,10 @@ const agreeTx = {
   assert.equal(partialNoCap.verdict, "unverified", "cap block unknown → cannot refuse, cannot confirm");
   const partialElsewhere = compareSecondSource(mine, { outspend: agreeOutspend, tx: mineTx(CAP - 5) });
   assert.equal(partialElsewhere.verdict, "disagree", "a partial credit outside the cap block is impossible");
-  assert.match(partialElsewhere.reasons[0], /only in the block that completed the LUCKY supply \(#969,900\); this one confirmed in block #969,895/);
+  assert.match(partialElsewhere.reasons[0], /only in the block that completed the LUCKY supply \(#970,200\); this one confirmed in block #970,195/);
   const fullAfterCap = compareSecondSource({ ...mine, amount: 1000 }, { outspend: agreeOutspend, tx: mineTx(CAP + 1) });
   assert.equal(fullAfterCap.verdict, "disagree", "after the cap block §3 credits 0 — a full tier there cannot be a credit");
-  assert.match(fullAfterCap.reasons[0], /after block #969,900 completed the LUCKY supply — §3 credits 0 there/);
+  assert.match(fullAfterCap.reasons[0], /after block #970,200 completed the LUCKY supply — §3 credits 0 there/);
   assert.equal(compareSecondSource({ ...mine, amount: 1000 }, { outspend: agreeOutspend, tx: mineTx(CAP) }).verdict, "agree", "a full tier IN the cap block is fine (mines before the crossing one)");
   assert.equal(compareSecondSource({ ...mine, amount: 1000 }, { outspend: agreeOutspend, tx: mineTx(CAP - 100) }).verdict, "agree", "a full tier before the cap block is verified");
   assert.equal(compareSecondSource({ ...mine, amount: 250 }, { outspend: agreeOutspend, tx: mineTx(CAP) }).verdict, "disagree", "credits are multiples of 100");
@@ -194,7 +194,7 @@ const agreeTx = {
   assert.match(carrierAmountCheck({ vout: 0, ticker: "LUCKY", amount: 0 }, mineTx(CAP)).reasons[0], /zero-token carrier/);
 
   // SEND: TO_OUT with AMT is verified; the residual output is not; an unusable CHANGE_OUT sends the residual to the default output
-  const sendTx = (text) => ({ txid: TXID, vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret(text), { scriptpubkey: SCRIPT, value: 546 }], status: { confirmed: true, block_height: 969_950, block_hash: "00".repeat(32) } });
+  const sendTx = (text) => ({ txid: TXID, vout: [{ scriptpubkey: SCRIPT, value: 546 }, { scriptpubkey: FEE, value: 546 }, opret(text), { scriptpubkey: SCRIPT, value: 546 }], status: { confirmed: true, block_height: 970_250, block_hash: "00".repeat(32) } });
   const to = { txid: TXID, vout: 0, carrierSats: 546, scriptHex: SCRIPT, ticker: "LUCKY", amount: 40 };
   assert.equal(compareSecondSource(to, { outspend: agreeOutspend, tx: sendTx("LUCKY-20|SEND|LUCKY|40|0|3") }).verdict, "agree");
   assert.equal(compareSecondSource({ ...to, vout: 3, amount: 9 }, { outspend: agreeOutspend, tx: sendTx("LUCKY-20|SEND|LUCKY|40|0|3") }).verdict, "unverified", "residual output");

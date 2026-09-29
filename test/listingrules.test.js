@@ -90,15 +90,15 @@ function listingWith({ version = 2, sequence = 0xffffffff, lockTime = 0 } = {}) 
 
 // ---- the first output of an open reservation is never listed ------------------------------------------------
 {
-  const open = { txid: TX("c"), status: "open", height: 969_400, expires_at_height: 971_416 };
+  const open = { txid: TX("c"), status: "open", height: 969_700, expires_at_height: 971_716 };
   assert.equal(commitCarrierProblem(0, open), COMMIT_CARRIER_PLAIN_TEXT);
   assert.match(COMMIT_CARRIER_PLAIN_TEXT, /publish that reserved ticker with you named as its creator/);
   assert.equal(commitCarrierProblem(1, open), null, "only vout 0 is the reserved output");
   assert.equal(commitCarrierProblem(0, null), null, "not a recorded reservation (a MINE carrier, a SEND output…)");
   for (const status of ["revealed", "invalid"]) assert.equal(commitCarrierProblem(0, { ...open, status }), null, status);
   // `open` is the indexer's own view of the window: never overruled by a height here.
-  assert.equal(commitCarrierProblem(0, open, 971_416), COMMIT_CARRIER_PLAIN_TEXT, "open is refused whatever the height");
-  assert.equal(commitCarrierProblem(0, open, 971_415), COMMIT_CARRIER_PLAIN_TEXT);
+  assert.equal(commitCarrierProblem(0, open, 971_716), COMMIT_CARRIER_PLAIN_TEXT, "open is refused whatever the height");
+  assert.equal(commitCarrierProblem(0, open, 971_715), COMMIT_CARRIER_PLAIN_TEXT);
   assert.equal(commitCarrierProblem(0, { ...open, spent_txid: TX("d") }), null, "a spent carrier is not this reservation's any more");
   // expired: refused until its last reveal block (E) has FINAL_DEPTH confirmations — the book's rule.
   const expired = { ...open, status: "expired" };

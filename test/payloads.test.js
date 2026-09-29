@@ -28,10 +28,10 @@ import {
 } from "../src/lib/payloads.js";
 
 assert.equal(PROTOCOL_PREFIX, "LUCKY-20");
-assert.equal(ACTIVATION_HEIGHT, 969_300, "activation height (must match the indexer)");
+assert.equal(ACTIVATION_HEIGHT, 969_600, "activation height (must match the indexer)");
 assert.equal(MIN_COMMIT_AGE, 1, "a REVEAL needs its COMMIT in an EARLIER block");
 assert.equal(MAX_COMMIT_AGE, 2_016, "a REVEAL must confirm within 2,016 blocks of its COMMIT");
-assert.equal(PROTOCOL_LOCKTIME, 969_299, "every COMMIT / REVEAL / MINE / SEND the app builds has nLockTime ACTIVATION_HEIGHT − 1");
+assert.equal(PROTOCOL_LOCKTIME, 969_599, "every COMMIT / REVEAL / MINE / SEND the app builds has nLockTime ACTIVATION_HEIGHT − 1");
 
 // ---- commit-reveal: the four spec vectors (§2.1) — identical on the indexer's side ----------------------
 // H = SHA-256( UTF-8 bytes of the exact REVEAL payload ‖ raw scriptPubKey of the COMMIT's vout0 ).

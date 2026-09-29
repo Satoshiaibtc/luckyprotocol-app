@@ -377,7 +377,7 @@ assert.throws(
       if (expectTap) assert.equal(hex.encode(inp.tapInternalKey), XONLY);
       else assert.equal(inp.tapInternalKey, undefined);
     }
-    assert.equal(tx.lockTime, PROTOCOL_LOCKTIME, `COMMIT ${label}: nLockTime 969,299`);
+    assert.equal(tx.lockTime, PROTOCOL_LOCKTIME, `COMMIT ${label}: nLockTime 969,599`);
     assert.equal(addrOf(outs[COMMIT_CARRIER_VOUT].script), address, `COMMIT ${label}: vout0 carrier → committer`);
     assert.equal(outs[0].amount, 546n);
     assert.equal(outs[1].script[0], 0x6a);
@@ -389,11 +389,11 @@ assert.throws(
     assert.deepEqual(expectPsbtPayload(r.psbtHex, { op: "COMMIT", hash: HASH, vout0Script: r.carrierScript, lockTime: PROTOCOL_LOCKTIME }), { op: "COMMIT", hash: HASH });
     assert.throws(() => expectPsbtPayload(r.psbtHex, { op: "COMMIT", hash: "0".repeat(64) }), /COMMIT hash/);
     assert.throws(() => expectPsbtPayload(r.psbtHex, { op: "COMMIT", hash: HASH, vout0Script: "0014" + "bb".repeat(20) }), /first output is not the reservation output/);
-    assert.throws(() => expectPsbtPayload(r.psbtHex, { op: "COMMIT", lockTime: 0 }), /nLockTime is 969299, expected 0/);
+    assert.throws(() => expectPsbtPayload(r.psbtHex, { op: "COMMIT", lockTime: 0 }), /nLockTime is 969599, expected 0/);
   }
   assert.throws(() => buildCommitPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "NEWTKN", salt: "xyz" }), /32 lowercase hex/);
   assert.throws(() => buildCommitPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "newtkn", salt: SALT }), /A-Z 0-9/);
-  console.log("psbt COMMIT: carrier at vout0, 80-byte COMMIT|H at vout1 with H bound to vout0's script, nLockTime 969,299, RBF inputs");
+  console.log("psbt COMMIT: carrier at vout0, 80-byte COMMIT|H at vout1 with H bound to vout0's script, nLockTime 969,599, RBF inputs");
 }
 
 // ---- REVEAL (§2.1, step 2): input 0 = the carrier; vout0 546 proof, vout1 5,460 fee, vout2 DEPLOY|T|SALT, vout3 change ----
@@ -431,7 +431,7 @@ assert.throws(
   assert.throws(() => buildRevealPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "NEWTKN", salt: SALT, carrier: { ...CARRIER, vout: 1 } }), /vout 0/);
   assert.throws(() => buildRevealPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "lucky", salt: SALT, carrier: CARRIER }), /A-Z 0-9/);
   assert.throws(() => buildRevealPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "NEWTKN", salt: "00", carrier: CARRIER }), /32 lowercase hex/);
-  console.log("psbt REVEAL: carrier as input 0 (nSequence 1: never in its COMMIT's block), proof / 5,460 fee / DEPLOY|T|SALT / change, nLockTime 969,299");
+  console.log("psbt REVEAL: carrier as input 0 (nSequence 1: never in its COMMIT's block), proof / 5,460 fee / DEPLOY|T|SALT / change, nLockTime 969,599");
 }
 
 // ---- nLockTime + RBF on MINE and SEND too ---------------------------------------------
@@ -440,10 +440,10 @@ assert.throws(
   const sd = buildSendPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, tokenUtxos: [{ txid: T(3), vout: 0, sats: 20_000 }], feeRateSatVb: 8, ticker: "LUCKY", amount: 1, toAddress: p2wpkhAddr });
   for (const [label, r] of [["MINE", m], ["SEND", sd]]) {
     const { tx, ins } = parse(r.psbtHex);
-    assert.equal(tx.lockTime, PROTOCOL_LOCKTIME, `${label}: nLockTime 969,299 — it cannot confirm before block 969,300`);
+    assert.equal(tx.lockTime, PROTOCOL_LOCKTIME, `${label}: nLockTime 969,599 — it cannot confirm before block 969,600`);
     for (const inp of ins) assert.equal(inp.sequence, 0xfffffffd, `${label}: sequence enables the lock time and signals RBF`);
   }
-  console.log("psbt locktime: MINE and SEND carry nLockTime 969,299 with RBF sequences");
+  console.log("psbt locktime: MINE and SEND carry nLockTime 969,599 with RBF sequences");
 }
 
 // ---- SEND recipients: any standard mainnet address (the sender stays bc1q / bc1p) -------------------

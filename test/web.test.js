@@ -191,7 +191,7 @@ import { MAX_OPEN_LISTINGS_PER_ADDRESS } from "../src/lib/listingRules.js";
   const served = readFileSync(join(here, "../public/PROTOCOL.md"), "utf8");
   assert.deepEqual(specConstantMismatches(served, payloads), [], "public/PROTOCOL.md §1 must match src/lib/payloads.js");
   const parsed = parseSpecConstants(served);
-  assert.equal(parsed.ACTIVATION_HEIGHT, 969_300);
+  assert.equal(parsed.ACTIVATION_HEIGHT, 969_600);
   assert.ok(!("SNAPSHOT_VERSION" in parsed), "the indexer's internal state-schema number is not a protocol constant and is not in the spec");
   // A stale copy is caught by the constant it changed.
   const stale = served.replace(/\| `MAX_COMMIT_AGE` \| [\d_]+ \|/, "| `MAX_COMMIT_AGE` | 144 |");

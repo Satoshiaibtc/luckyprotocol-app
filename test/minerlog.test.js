@@ -282,23 +282,23 @@ const keep = (l) => {
   assert.equal(tipLine({ height: null }, "LUCKY", null), null, "null tip height → no line");
   assert.equal(tipLine(null, "LUCKY", null), null);
   assert.equal(mempoolLine(null, "ab".repeat(32)).text, "mempool  1 mine awaiting block", "null next height → no '#—'");
-  assert.equal(mempoolLine(969_801, "ab".repeat(32)).text, "mempool  1 mine awaiting block #969,801");
+  assert.equal(mempoolLine(970_101, "ab".repeat(32)).text, "mempool  1 mine awaiting block #970,101");
   assert.equal(heartbeatLine(null, null).text, "awaiting block  ·  16 possible digits");
-  assert.equal(heartbeatLine(969_801, 256_000).text, "awaiting block #969,801  ·  4:16 since last block  ·  16 possible digits");
+  assert.equal(heartbeatLine(970_101, 256_000).text, "awaiting block #970,101  ·  4:16 since last block  ·  16 possible digits");
   assert.equal(blockFoundLine({ height: null, hash: "ff".repeat(32) }), null, "null block height → no line");
-  const withStats = blockFoundLine({ height: 969_801, hash: "ab".repeat(32), tx_count: 3412, weight: 3_996_000 });
+  const withStats = blockFoundLine({ height: 970_101, hash: "ab".repeat(32), tx_count: 3412, weight: 3_996_000 });
   assert.equal(withStats.tx_count, 3412);
   assert.equal(withStats.weight, 3_996_000, "raw capacity rides on the line for a later lit re-print");
-  assert.equal(blockFoundLine({ height: 969_801, hash: "ab".repeat(32) }).post, "", "no capacity → empty post");
+  assert.equal(blockFoundLine({ height: 970_101, hash: "ab".repeat(32) }).post, "", "no capacity → empty post");
 
   const u = untrackedLine("ab".repeat(32));
   assert.equal(u.kind, "sys");
   assert.ok(u.text.startsWith("mine no longer tracked on this page  tx "), u.text);
   assert.ok(!DENY.test(u.text.replace(BRAND, "")));
 
-  const noHash = settlementLine({ txid: "cd".repeat(32), ticker: "SATS", block_height: 969_700, sender: "bc1q" + "x".repeat(38), status: "settled", yield_smallest: 500 }, "SATS");
+  const noHash = settlementLine({ txid: "cd".repeat(32), ticker: "SATS", block_height: 970_000, sender: "bc1q" + "x".repeat(38), status: "settled", yield_smallest: 500 }, "SATS");
   assert.equal(noHash.tier, 500, "no block hash → tier from the yield");
-  assert.ok(noHash.text.includes("SATS mine settled  yield 500  block 969,700"), noHash.text);
+  assert.ok(noHash.text.includes("SATS mine settled  yield 500  block 970,000"), noHash.text);
   const doneNoRow = reconcileLine({ reconcile: "done", indexed: null, txid: "ef".repeat(32) });
   assert.equal(doneNoRow.text, "indexer has not indexed this mine yet");
   console.log("minerlog: move / null heights / untracked / edge rows ok");

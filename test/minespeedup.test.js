@@ -85,7 +85,7 @@ const built = buildMinePsbt({ address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, u
   assert.match(pendingMineRow(sped, "LUCKY").text, /sped up \(an earlier version may still confirm instead\)/);
   const unknown = { confirmed: false, seen: false };
   const inMempool = { confirmed: false, seen: true };
-  const confirmed = { confirmed: true, seen: true, block_height: 969_500, block_hash: `${"0".repeat(63)}f`, block_time: 1 };
+  const confirmed = { confirmed: true, seen: true, block_height: 969_800, block_hash: `${"0".repeat(63)}f`, block_time: 1 };
   // The earlier version confirmed: it is the MINE now.
   const pick = pickMineVersion(sped, [
     { txid: TX("b"), status: unknown },
@@ -95,7 +95,7 @@ const built = buildMinePsbt({ address: ADDR, pubkeyHex: MOCK_WALLET.pubkeyHex, u
   const switched = switchMineVersion(sped, pick.txid);
   assert.deepEqual([switched.txid, switched.replaces, switched.psbt], [TX("a"), [TX("b")], null]);
   const done = applyMineStatus(switched, pick.status, 2_000, 600_000);
-  assert.deepEqual([done.phase, done.txid, done.blockHeight], ["confirmed", TX("a"), 969_500], "confirmed in the earlier version's block");
+  assert.deepEqual([done.phase, done.txid, done.blockHeight], ["confirmed", TX("a"), 969_800], "confirmed in the earlier version's block");
   // Only the earlier version is in a mempool: still pending, the drop clock restarts.
   const seen = pickMineVersion(sped, [
     { txid: TX("b"), status: unknown },
