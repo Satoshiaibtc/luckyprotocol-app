@@ -245,7 +245,7 @@ export default function PortfolioPage() {
                 })}
               </ul>
               <p className="fineprint">
-                These outputs hold more than 546 sats of BTC. A wallet that spends one as plain BTC moves its tokens along with it. Move them to a 546-sat carrier with a send to
+                These outputs hold more than 546 sats of BTC. A wallet that spends one as plain BTC moves its tokens along with it. Move them to a 546-sat carrier with a transfer to
                 yourself; the BTC comes back as change.
               </p>
             </div>
