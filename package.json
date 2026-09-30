@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "lint": "eslint src/ test/ scripts/",
     "lint:fix": "eslint src/ test/ --fix",
-    "test": "node test/yield.vectors.test.js && node test/buckets.test.js && node test/mix.test.js && node test/blocks.test.js && node test/poll.test.js && node test/payloads.test.js && node test/payload.vectors.test.js && node test/createflow.test.js && node test/web.test.js && node test/minerlog.test.js && node test/deploylog.test.js && node test/digits.test.js && node test/flows.test.js && node test/journeys.test.js && node test/apiparity.test.js && node test/finality.test.js && node test/network.test.js && node test/footer.test.js && node test/internals.test.js",
+    "test": "node test/yield.vectors.test.js && node test/buckets.test.js && node test/mix.test.js && node test/blocks.test.js && node test/poll.test.js && node test/payloads.test.js && node test/payload.vectors.test.js && node test/createflow.test.js && node test/rivaldeploys.test.js && node test/web.test.js && node test/minerlog.test.js && node test/deploylog.test.js && node test/digits.test.js && node test/flows.test.js && node test/journeys.test.js && node test/apiparity.test.js && node test/finality.test.js && node test/network.test.js && node test/footer.test.js && node test/internals.test.js",
     "test:payloads": "node test/payloads.test.js",
     "test:web": "node test/web.test.js",
     "headers": "node scripts/gen-headers.mjs",

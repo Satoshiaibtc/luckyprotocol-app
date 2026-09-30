@@ -6,13 +6,27 @@ import { tokenHref } from "../hooks/useHashRoute.js";
 import { useDeployLog } from "../hooks/useMinerLog.js";
 import { useFeeRate } from "../hooks/useFeeRate.js";
 import { ownDeployFor, useCreate } from "../hooks/useCreate.js";
+import { usePendingDeploys } from "../hooks/usePendingDeploys.js";
 import { MAX_FEE_RATE_SAT_VB, estimateDeployFeeSats, speedUpFloorRate } from "../lib/psbt.js";
 import { DROP_GRACE_MS } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
 import { clampCustomFee, isUsableFeeRate, missingFeeHint, needsHighFeeAck } from "../lib/feechoice.js";
 import { DEPLOY_PROTOCOL_FEE_SATS, DUST_SATS, PROJECT_FEE_ADDRESS, REQUIRED_TOKEN_SUPPLY, TICKER_RE, buildDeployPayload, payloadToString } from "../lib/payloads.js";
 import { activationNotice, activationState, lockedHint } from "../lib/activation.js";
-import { deployLeds, headroomText, isOwnVerdict, ownDeployText, rowConfirmations, rowIsFinal } from "../lib/createFlow.js";
+import { deployLeds, deployVersions, headroomText, isOwnVerdict, ownDeployText, rowConfirmations, rowIsFinal } from "../lib/createFlow.js";
+import {
+  clickContext,
+  clickPauses,
+  fmtRate,
+  ownDeployRate,
+  pendingCheckLine,
+  readPendingDeploys,
+  rivalAheadText,
+  rivalWarningText,
+  rivalsAhead,
+  speedUpSuggested,
+  suggestedRivalRate,
+} from "../lib/rivalDeploys.js";
 import { FINAL_DEPTH, confirmationsAt, confirmationsText } from "../lib/finality.js";
 import { cleanTickerInput, cleanedCaret } from "../lib/tickerInput.js";
 import { readyText } from "../lib/statusText.js";
@@ -167,6 +181,25 @@ export default function CreatePage({ params, navigate }) {
         ? "checking"
         : "idle";
   const availFree = !holds && availState === "free";
+  const idleish = flow.phase === "idle" || flow.phase === "error" || flow.phase === "done" || flow.phase === "released";
+  const releasedNote = !holds && valid ? (cr.settling || []).find((n) => n.ticker === ticker && n.verdict === "released") : null;
+
+  // ---- other DEPLOYs of the ticker waiting in the mempool (/pending-deploys) ---------------------------
+  // Read while a free ticker stays in the field (every 15 s), again when
+  // Create is clicked (fresh), and every 15 s while the user's own DEPLOY
+  // waits. A read that fails only ever shows one quiet line.
+  const pendingMode = flow.phase === "pending" && !flow.takenRow;
+  const typingWatch = connected && idleish && availFree;
+  const pd = usePendingDeploys(pendingMode ? flow.ticker : typed, { enabled: pendingMode || typingWatch, delayMs: pendingMode ? 0 : 300 });
+  // This browser's earlier DEPLOY of the ticker (it left the mempool) is not another DEPLOY.
+  const typedOwn = releasedNote ? releasedNote.versions : [];
+  const typedView = typingWatch && pd.ticker === typed ? readPendingDeploys(pd.answer, typedOwn) : { status: "idle" };
+  const fastRate = createFee.presets.find((p) => p.id === "fast")?.satVb ?? null;
+  const typedSuggest = typedView.status === "ok" && typedView.rivals ? suggestedRivalRate(typedView.rivals.topRate, fastRate) : null;
+  const flowVersions = pendingMode ? deployVersions(flow) : [];
+  const pendingView = pendingMode && pd.ticker === flow.ticker ? readPendingDeploys(pd.answer, flowVersions) : { status: "idle" };
+  const ahead = pendingView.status === "ok" ? rivalsAhead(pd.answer, { own: flowVersions, current: flow.txid, localRate: ownDeployRate(flow) }) : null;
+  const rival = pendingMode ? { ahead, suggest: ahead ? suggestedRivalRate(ahead.topRate, fastRate) : null, line: pendingCheckLine(pendingView) } : null;
 
   // ---- fee preview ---------------------------------------------------------------------------------
   const estimate = useMemo(() => {
@@ -187,10 +220,87 @@ export default function CreatePage({ params, navigate }) {
   }, [valid, ticker]);
 
   // ---- actions ---------------------------------------------------------------------------------------
-  const idleish = flow.phase === "idle" || flow.phase === "error" || flow.phase === "done" || flow.phase === "released";
   const canCreate = connected && valid && availFree && sync.synced && !cr.busy && idleish && indexerOk && !preActivation && isUsableFeeRate(rate);
+  // The click reads the list of waiting DEPLOYs once more, bypassing every
+  // cache. When it shows another DEPLOY the page had not shown yet and the
+  // chosen rate does not pay more, nothing is signed: the warning is on
+  // screen and the next click goes ahead. A read that fails or is slow
+  // (CLICK_CHECK_TIMEOUT_MS) never holds the DEPLOY back.
+  const [checking, setChecking] = useState(false);
+  const [pausedFor, setPausedFor] = useState(null);
+  const checkingRef = useRef(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const clickRef = useRef(null);
+  clickRef.current = {
+    create: cr.create,
+    address,
+    typed,
+    settling: cr.settling,
+    own: typedOwn,
+    shownTop: typedView.status === "ok" && typedView.rivals ? typedView.rivals.topRate : null,
+  };
+  // What the user had seen and accepted when the last click went ahead: the
+  // review's Sign stops only for another DEPLOY beyond it.
+  const acceptedRef = useRef({ own: [], shownTop: null });
+  const createChecked = async (t, r) => {
+    if (checkingRef.current) return;
+    checkingRef.current = true;
+    const at = clickRef.current;
+    const ctx = clickContext(t, at);
+    setChecking(true);
+    setPausedFor(null);
+    let stop = false;
+    try {
+      stop = await clickPauses(() => pd.checkNow(t), { own: ctx.own, shownTopRate: ctx.shownTop, rate: r });
+    } finally {
+      checkingRef.current = false;
+      setChecking(false);
+    }
+    // The page was left, or another account connected, while the list was read: nothing is created.
+    if (!mountedRef.current || clickRef.current.address !== at.address) return;
+    if (stop) {
+      // The warning is shown for the ticker in the field.
+      if (!ctx.same) setTickerState(cleanTickerInput(t));
+      setPausedFor(t);
+      return;
+    }
+    acceptedRef.current = { own: ctx.own, shownTop: ctx.shownTop };
+    clickRef.current.create(t, r);
+  };
+  // The review can stay open for minutes: its Sign reads the list once
+  // more. Another DEPLOY that arrived meanwhile and that this DEPLOY's rate
+  // does not beat cancels the review, with nothing signed; the form then
+  // shows the warning.
+  const signReviewed = async () => {
+    if (checkingRef.current) return;
+    checkingRef.current = true;
+    const at = clickRef.current;
+    const t = flow.ticker;
+    const accepted = acceptedRef.current;
+    setChecking(true);
+    let stop = false;
+    try {
+      stop = await clickPauses(() => pd.checkNow(t), { own: accepted.own, shownTopRate: accepted.shownTop, rate: flow.feeRateSatVb });
+    } finally {
+      checkingRef.current = false;
+      setChecking(false);
+    }
+    if (!mountedRef.current || clickRef.current.address !== at.address) return;
+    if (stop) {
+      cr.cancelReview();
+      setPausedFor(t);
+      return;
+    }
+    cr.confirmCreate();
+  };
   const onCreate = () => {
-    if (canCreate) cr.create(ticker, rate);
+    if (canCreate) createChecked(ticker, rate);
   };
 
   // A reviewed DEPLOY signs exactly the transaction it shows (its rate and
@@ -340,7 +450,6 @@ export default function CreatePage({ params, navigate }) {
   };
   const yieldsLine = `${BUCKETS.map((b) => b.yield).join(" / ")} by the confirming block's last hex digit (${BUCKETS.map((b) => b.label).join(" / ")}) · expected ${fmtDec(EXPECTED_YIELD)}`;
   const otherPending = cr.otherPending && !holds ? cr.otherPending : null;
-  const releasedNote = !holds && valid ? (cr.settling || []).find((n) => n.ticker === ticker && n.verdict === "released") : null;
   const totalSats = estimate ? DEPLOY_PROTOCOL_FEE_SATS + DUST_SATS + estimate.feeSats : null;
   const showForm = connected && !holds && flow.phase !== "done";
 
@@ -371,7 +480,7 @@ export default function CreatePage({ params, navigate }) {
                 autoComplete="off"
                 autoCapitalize="characters"
                 spellCheck={false}
-                disabled={cr.busy || holds}
+                disabled={cr.busy || holds || checking}
                 aria-describedby="ticker-help"
               />
               <Led state={AVAIL_LED[availState] || "idle"} />
@@ -430,7 +539,16 @@ export default function CreatePage({ params, navigate }) {
 
           {showForm && (
             <>
-              <FeeSelector fee={createFee} disabled={cr.busy} />
+              <FeeSelector fee={createFee} disabled={cr.busy || checking} />
+              <RivalWarning
+                view={typedView}
+                ticker={ticker}
+                rate={rate}
+                suggest={typedSuggest}
+                onUse={createFee.pickRate}
+                disabled={cr.busy || checking}
+                paused={pausedFor !== null && pausedFor === ticker}
+              />
               <p className="fineprint">
                 While your DEPLOY waits for a block, anyone who reads the mempool can see {valid ? ticker : "the ticker"} in it and send another DEPLOY of {valid ? ticker : "it"} that
                 pays a higher fee. The first DEPLOY to confirm takes the name. If another one confirms first, yours is ignored, and its{" "}
@@ -442,11 +560,11 @@ export default function CreatePage({ params, navigate }) {
           {!connected ? (
             <ConnectPrompt action="create a token" />
           ) : flow.phase === "review" ? (
-            <Review key={flow.startedAt} cr={cr} flow={flow} />
+            <Review key={flow.startedAt} cr={cr} flow={flow} onSign={signReviewed} checking={checking} />
           ) : showForm ? (
             <>
-              <button className="btn btn-primary btn-lg" type="button" onClick={onCreate} disabled={!canCreate}>
-                {cr.busy ? "Working…" : `Create ${valid ? ticker : "token"}`}
+              <button className="btn btn-primary btn-lg" type="button" onClick={onCreate} disabled={!canCreate || checking}>
+                {cr.busy ? "Working…" : checking ? "Checking…" : `Create ${valid ? ticker : "token"}`}
               </button>
               {releasedNote && (
                 <p className="notice">
@@ -465,7 +583,9 @@ export default function CreatePage({ params, navigate }) {
               fees={fees.data}
               indexed={sync.indexed ?? tipNow}
               idle={{ indexerOk, preActivation, valid, availState, typed, sync, fee: createFee, rate, assetSafe: walletState.assetSafe }}
-              onRetry={() => cr.create(flow.ticker || ticker, rate)}
+              rival={rival}
+              retryBusy={checking}
+              onRetry={() => createChecked(flow.ticker || ticker, rate)}
             />
           )}
 
@@ -530,11 +650,43 @@ function AvailHelp({ availState, holds, ticker, typed, valid, avail, sync }) {
 }
 
 /**
+ * Before signing: other DEPLOYs of the typed ticker waiting in the mempool
+ * (`view` = src/lib/rivalDeploys.js readPendingDeploys). Offers the rate
+ * `suggest` while the chosen `rate` is below it; the user may keep a rate
+ * of their own or pick another ticker. `paused`: the last click on Create
+ * stopped here, with nothing signed. A list that could not be read is one
+ * quiet line.
+ */
+function RivalWarning({ view, ticker, rate, suggest, onUse, disabled, paused }) {
+  const quiet = pendingCheckLine(view);
+  if (quiet) return <p className="fineprint">{quiet}</p>;
+  if (view.status !== "ok" || !view.rivals) return null;
+  const offer = suggest !== null && !(Number.isFinite(rate) && rate >= suggest);
+  return (
+    <div className="notice notice-raise" role="alert">
+      <div>{rivalWarningText(ticker, view.rivals)}</div>
+      {offer ? (
+        <div className="notice-row">
+          <button className="btn btn-sm" type="button" onClick={() => onUse(suggest)} disabled={disabled}>
+            Use {fmtRate(suggest)} sat/vB
+          </button>
+          <span className="muted">Or keep a rate of your own, or pick another ticker.</span>
+        </div>
+      ) : Number.isFinite(rate) ? (
+        <div className="muted">Your DEPLOY pays {fmtRate(rate)} sat/vB.</div>
+      ) : null}
+      {paused && <div className="muted">Nothing was signed. Check the fee rate, then click Create again.</div>}
+    </div>
+  );
+}
+
+/**
  * The Speed up headroom warning of a built DEPLOY (the headroom review): signed only
  * after "Create {T} anyway" is ticked. Keyed on the build, so a new build
- * starts unticked.
+ * starts unticked. `onSign` reads the list of waiting DEPLOYs once more
+ * before it signs (`checking` meanwhile).
  */
-function Review({ cr, flow }) {
+function Review({ cr, flow, onSign, checking }) {
   const [ack, setAck] = useState(false);
   return (
     <div className="status" role="status" aria-live="polite">
@@ -551,15 +703,15 @@ function Review({ cr, flow }) {
       </div>
       <div className="notice-row">
         <label className="ack">
-          <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} disabled={cr.busy} />
+          <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} disabled={cr.busy || checking} />
           <span>Create {flow.ticker} anyway</span>
         </label>
       </div>
       <div className="actions">
-        <button className="btn btn-primary" type="button" onClick={cr.confirmCreate} disabled={!ack || cr.busy}>
-          Sign DEPLOY {flow.ticker}
+        <button className="btn btn-primary" type="button" onClick={onSign} disabled={!ack || cr.busy || checking}>
+          {checking ? "Checking…" : `Sign DEPLOY ${flow.ticker}`}
         </button>
-        <button className="btn btn-sm" type="button" onClick={cr.cancelReview} disabled={cr.busy}>
+        <button className="btn btn-sm" type="button" onClick={cr.cancelReview} disabled={cr.busy || checking}>
           Cancel
         </button>
       </div>
@@ -570,16 +722,24 @@ function Review({ cr, flow }) {
 /**
  * "Speed up" for the pending DEPLOY: the same transaction with a higher fee
  * taken from its change (replace-by-fee). The suggested rate is the Fast
- * estimate, or the lowest rate a replacement may use when that is higher;
- * the user may enter a rate of their own (in a rush the estimates lag), and
- * one above the high-fee threshold is confirmed before it can be signed.
+ * estimate, or the lowest rate a replacement may use when that is higher,
+ * or `rivalRate` (the rate offered against another DEPLOY of the ticker
+ * that pays more) when that is higher still — while the panel is open, the
+ * highest such rate it has offered, so a read of the list that fails never
+ * lowers it. The user may enter a rate of their own (in a rush the
+ * estimates lag), and one of their own above the high-fee threshold is
+ * confirmed before it can be signed.
  */
-function SpeedUp({ cr, flow, fees }) {
+function SpeedUp({ cr, flow, fees, rivalRate = null }) {
   const inputId = useId();
   const [open, setOpen] = useState(false);
   // A rate of the user's own ("" = the suggested one); a high one is confirmed once, for that rate.
   const [customText, setCustomText] = useState("");
   const [ackRate, setAckRate] = useState(null);
+  const [heldRival, setHeldRival] = useState(null);
+  useEffect(() => {
+    if (open && Number(rivalRate) > 0) setHeldRival((h) => Math.max(Number(h) || 0, Number(rivalRate)));
+  }, [open, rivalRate]);
   const floor = useMemo(() => {
     try {
       return flow.psbt ? speedUpFloorRate(flow.psbt, fees?.incrementalrelayfee ?? undefined) : null;
@@ -588,17 +748,18 @@ function SpeedUp({ cr, flow, fees }) {
     }
   }, [flow.psbt, fees?.incrementalrelayfee]);
   const fast = Number(fees?.fastestFee) || 0;
-  const suggested = floor ? Math.max(fast, floor) : null;
+  const suggested = speedUpSuggested(fast, floor, rivalRate, open ? heldRival : null);
   const custom = customText.trim() === "" ? null : clampCustomFee(customText);
   const rate = custom ? custom.value : suggested;
-  // A typo here costs real sats: above the usual threshold the rate is confirmed first.
-  const high = rate !== null && rate > (floor ?? 0) && needsHighFeeAck(rate, fees);
+  // A typo here costs real sats: a rate the user typed above the usual threshold is confirmed first.
+  const high = custom !== null && rate !== null && rate > (floor ?? 0) && needsHighFeeAck(rate, fees);
   const quote = open && rate ? cr.speedUpQuote(rate) : null;
   const busy = !!cr.speeding;
   const close = () => {
     setOpen(false);
     setCustomText("");
     setAckRate(null);
+    setHeldRival(null);
   };
   if (!cr.canSpeedUp) return null;
   const rateInput = (
@@ -678,7 +839,7 @@ function SpeedUp({ cr, flow, fees }) {
  * is off (idle), the in-flight step with its signing detail, the pending
  * DEPLOY with its Speed up and notices, and the verdict.
  */
-function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, onRetry }) {
+function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, rival, retryBusy, onRetry }) {
   const who = providerName || "your wallet";
   const t = flow.ticker;
   let led = "idle";
@@ -720,7 +881,7 @@ function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, onRet
       detail = signingDetail;
       break;
     case "pending":
-      body = <Pending cr={cr} flow={flow} tipNow={tipNow} fees={fees} indexed={indexed} />;
+      body = <Pending cr={cr} flow={flow} tipNow={tipNow} fees={fees} indexed={indexed} rival={rival} />;
       break;
     case "confirmed":
       led = "busy";
@@ -777,7 +938,7 @@ function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, onRet
       text = flow.error || "Failed.";
       actions = (
         <>
-          <button className="btn btn-sm" type="button" onClick={onRetry}>
+          <button className="btn btn-sm" type="button" onClick={onRetry} disabled={retryBusy}>
             Retry
           </button>
           {dismissBtn("Dismiss")}
@@ -805,8 +966,13 @@ function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, onRet
   );
 }
 
-/** The pending DEPLOY, and its taken-while-pending notice: sent and waiting for a block. */
-function Pending({ cr, flow, tipNow, fees, indexed }) {
+/**
+ * The pending DEPLOY, and its taken-while-pending notice: sent and waiting
+ * for a block. `rival`: another DEPLOY of the ticker that pays more
+ * (`ahead`, src/lib/rivalDeploys.js rivalsAhead) and the rate to offer
+ * against it (`suggest`), or the quiet line when the list could not be read.
+ */
+function Pending({ cr, flow, tipNow, fees, indexed, rival }) {
   const t = flow.ticker;
   const taken = flow.takenRow;
   const unseenMinutes = cr.newestUnseen ? Math.max(Math.round(DROP_GRACE_MS / 60_000), Math.round((Date.now() - (cr.unseenAt ?? Date.now()) + DROP_GRACE_MS) / 60_000)) : 0;
@@ -841,8 +1007,14 @@ function Pending({ cr, flow, tipNow, fees, indexed }) {
             </p>
           )}
           {cr.newestUnseen && <p className="notice">The node has not seen your DEPLOY for {unseenMinutes} minutes — it may have been replaced or dropped. Still checking.</p>}
-          <SpeedUp cr={cr} flow={flow} fees={fees} />
+          {rival?.ahead && (
+            <p className="notice" role="alert">
+              {rivalAheadText(t, rival.ahead, { canSpeedUp: cr.canSpeedUp })}
+            </p>
+          )}
+          <SpeedUp cr={cr} flow={flow} fees={fees} rivalRate={rival?.ahead ? rival.suggest : null} />
           {cr.speedError && !cr.canSpeedUp && <p className="err">{cr.speedError}</p>}
+          {rival?.line && <p className="fineprint">{rival.line}</p>}
         </>
       )}
     </div>

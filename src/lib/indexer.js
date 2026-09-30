@@ -24,6 +24,7 @@
 //   GET  /mines/by-txid/:txid       mineByTxid
 //   GET  /tokens?limit&offset       tokens / allTokens (rows carry market_24h)
 //   GET  /tokens/:ticker            token
+//   GET  /pending-deploys/:ticker   pendingDeploys    (DEPLOYs of the ticker waiting in the node's mempool)
 //   GET  /tokens/:ticker/holders    tokenHolders
 //   GET  /tokens/:ticker/market     market            (?window=24h|7d)
 //   GET  /tokens/:ticker/candles    candles           (?interval=1h|1d&limit)
@@ -1021,6 +1022,58 @@ export async function token(ticker, signal) {
   return clean;
 }
 
+// A DEPLOY's vsize is a few hundred vB; anything past the largest standard
+// transaction is not a DEPLOY row the page can use.
+const _MAX_TX_VSIZE = 400_000;
+
+// One /pending-deploys row. `package_fee_rate` is the rate the node mines
+// the transaction at; it may be above `fee_rate` (a child pays for it) or
+// below (it waits on an unconfirmed parent that pays less). An answer
+// without it reads as `fee_rate`.
+function _sanitizePendingDeployRow(r) {
+  if (!r || typeof r !== "object") return null;
+  if (!_TXID_RE.test(String(r.txid || ""))) return null;
+  const feeRate = _safeFloat(r.fee_rate, 1_000_000);
+  if (feeRate === null) return null;
+  const pkg = _safeFloat(r.package_fee_rate, 1_000_000);
+  return {
+    txid: String(r.txid).toLowerCase(),
+    fee_rate: feeRate,
+    fee_sats: _safeInt(r.fee_sats, _MAX_SATS),
+    vsize: _safeInt(r.vsize, _MAX_TX_VSIZE),
+    first_seen: _safeTime(r.first_seen),
+    package_fee_rate: pkg !== null && pkg > 0 ? pkg : feeRate,
+  };
+}
+
+/**
+ * The /pending-deploys answer for `ticker` → `{ ticker, registered, pending, as_of, watching }`,
+ * `pending` sorted by `fee_rate` (highest first). An answer about another
+ * ticker, or without a `pending` list, THROWS (unreadable, never "none").
+ */
+function _sanitizePendingDeploys(env, ticker) {
+  if (!env || typeof env !== "object" || env.ticker !== ticker || !Array.isArray(env.pending)) {
+    throw new Error(`the indexer returned an unreadable list of pending DEPLOYs for ${ticker}`);
+  }
+  const registered = env.registered === true;
+  const pending = registered ? [] : env.pending.map(_sanitizePendingDeployRow).filter(Boolean);
+  pending.sort((a, b) => b.fee_rate - a.fee_rate || (a.first_seen ?? 0) - (b.first_seen ?? 0) || (a.txid < b.txid ? -1 : a.txid > b.txid ? 1 : 0));
+  return { ticker, registered, pending, as_of: _safeTime(env.as_of), watching: env.watching === true };
+}
+
+/**
+ * GET /pending-deploys/:ticker → the DEPLOYs of `ticker` waiting in the
+ * node's mempool: `{ ticker, registered, pending: [{ txid, fee_rate, fee_sats, vsize, first_seen, package_fee_rate }], as_of, watching }`.
+ * `fresh`: bypass every cache (the route answers with max-age=5 and ignores
+ * the query parameter that varies the URL) — the read made when the user
+ * clicks Create. Any failure throws; the caller treats it as "not known".
+ */
+export async function pendingDeploys(ticker, signal, { fresh = false } = {}) {
+  const bust = fresh ? `?t=${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` : "";
+  const env = await _httpGet(`/pending-deploys/${encodeURIComponent(ticker)}${bust}`, signal, { fresh });
+  return _sanitizePendingDeploys(env, ticker);
+}
+
 /** GET /tokens/:ticker/holders?limit&offset */
 export async function tokenHolders(ticker, opts = {}, signal) {
   const env = await _httpGet(
@@ -1399,4 +1452,5 @@ export {
   _sanitizeDigitsByDays,
   _sanitizeMineRow,
   _sanitizeTxStatus,
+  _sanitizePendingDeploys,
 };

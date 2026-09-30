@@ -24,7 +24,10 @@
 //   7. the mock's /txouts follows the simulated chain like the indexer: an
 //      output a pending tx spends is still unspent, one spent in a block is
 //      not (and a spent carrier carries no tokens), and depth is counted
-//      from the indexed height (the `lp.mock.indexerLag` knob).
+//      from the indexed height (the `lp.mock.indexerLag` knob);
+//   8. GET /pending-deploys/:ticker: the mock's rows carry every key the
+//      route table's row names, its ticker check and refusal are the
+//      indexer's, and the reader reads it through the real HTTP path.
 //
 // Plain Node, no framework.
 import assert from "node:assert/strict";
@@ -112,6 +115,8 @@ const ROUTES = [
   ["/blocks/recent?limit=4", "/blocks/recent?limit"],
   ["/tokens/LUCKY/market", "/tokens/:ticker/market?window=24h\\|7d"],
   ["/fees", "/fees"],
+  ["/pending-deploys/NEW", "/pending-deploys/:ticker"],
+  ["/pending-deploys/LUCKY", "/pending-deploys/:ticker"],
 ];
 for (const [path, route] of ROUTES) {
   const env = await mockGet(path);
@@ -369,6 +374,58 @@ if (TABLE) {
     else delete globalThis.localStorage;
   }
   console.log("apiparity txouts: the mock follows pending and confirmed spends and the indexed height like the indexer");
+}
+
+// ---- 8. GET /pending-deploys/:ticker: the documented row keys, the ticker check, the reader ----------------------
+{
+  const store = new Map([["lp.mock.rivalDeploy", "NEW@12.25,NEW@8"]]);
+  const local = new Map();
+  const stub = (m) => ({ getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) });
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  const savedLocal = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, writable: true, value: stub(store) });
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: stub(local) });
+  try {
+    const env = await mockGet("/pending-deploys/new");
+    assert.deepEqual([env.ticker, env.registered, env.watching, env.pending.map((r) => r.fee_rate)], ["NEW", false, true, [12.25, 8]], "the canonical ticker; rows highest fee rate first");
+    await assert.rejects(mockGet("/pending-deploys/NOT-OK"), (e) => e.status === 400 && e.detail === mock.PENDING_DEPLOYS_REFUSAL, "a ticker outside [A-Z0-9]{1,8}: 400");
+    await assert.rejects(mockGet("/pending-deploys/"), (e) => e.status === 404, "an empty ticker is not the route");
+    // The indexer trims Unicode white space and upper-cases ASCII letters only.
+    for (const bad of ["%C3%9F", "%EF%BB%BFNEW", "%C4%B1"]) {
+      await assert.rejects(mockGet(`/pending-deploys/${bad}`), (e) => e.status === 400 && e.detail === mock.PENDING_DEPLOYS_REFUSAL, bad);
+    }
+    assert.equal((await mockGet("/pending-deploys/%C2%85new")).ticker, "NEW", "U+0085 is white space");
+    // While the index rebuilds or is more than one block behind, the indexer's watch pauses: the last rows, watching false.
+    local.set("lp.mock.indexerLag", "2");
+    const lagging = await mockGet("/pending-deploys/NEW");
+    assert.deepEqual([lagging.watching, lagging.pending.length], [false, 2], "two blocks behind: not watching, the last rows served");
+    local.set("lp.mock.indexerLag", "1");
+    assert.equal((await mockGet("/pending-deploys/NEW")).watching, true, "one block behind is a block being fetched");
+    local.delete("lp.mock.indexerLag");
+    store.set("lp.mock.health", JSON.stringify({ rebuilding: true }));
+    assert.equal((await mockGet("/pending-deploys/NEW")).watching, false, "rebuilding: not watching");
+    store.delete("lp.mock.health");
+    if (TABLE) {
+      const rowKeys = specItemKeys("/pending-deploys/:ticker", "pending");
+      assert.deepEqual(rowKeys, ["txid", "fee_rate", "fee_sats", "vsize", "first_seen"]);
+      for (const r of env.pending) assert.deepEqual(rowKeys.filter((k) => !(k in r)), [], `mock /pending-deploys row ${r.txid} lacks documented keys`);
+      const docRow = TABLE.split("\n").find((l) => l.startsWith("| `GET /pending-deploys/:ticker` | "));
+      assert.ok(docRow.includes(`"error": "${mock.PENDING_DEPLOYS_REFUSAL}"`), "the route table names the refusal the mock answers");
+      assert.ok(docRow.includes("package_fee_rate"), "the route table names the package rate the app compares");
+    }
+    // The reader, through the real HTTP path (the fetch above serves the mock).
+    const read = await indexer.pendingDeploys("NEW");
+    assert.deepEqual([read.ticker, read.registered, read.watching, read.pending.length, read.pending[0].fee_rate, read.pending[0].package_fee_rate], ["NEW", false, true, 2, 12.25, 12.25]);
+    const fresh = await indexer.pendingDeploys("NEW", undefined, { fresh: true });
+    assert.equal(fresh.pending.length, 2, "a fresh read's cache-busting parameter is ignored by the route");
+    assert.deepEqual((await indexer.pendingDeploys("LUCKY")).pending, [], "a registered ticker");
+  } finally {
+    if (saved) Object.defineProperty(globalThis, "sessionStorage", saved);
+    else delete globalThis.sessionStorage;
+    if (savedLocal) Object.defineProperty(globalThis, "localStorage", savedLocal);
+    else delete globalThis.localStorage;
+  }
+  console.log("apiparity pending-deploys: the mock's rows carry the documented keys; the ticker check and refusal are the indexer's; watching pauses as the indexer's does; the reader reads them");
 }
 
 console.log(

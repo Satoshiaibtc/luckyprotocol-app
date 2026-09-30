@@ -45,6 +45,7 @@ function writeStoredChoice(choice) {
  *                          custom rate is above max(50, 2 × fastestFee): satVb stays
  *                          null until fee.ackHighFee()
  *   fee.pickPreset(id) / fee.pickCustom() / fee.setCustomText(text) / fee.ackHighFee()
+ *   fee.pickRate(satVb)  → that exact custom rate, already confirmed (a button that names it)
  *
  * Options: `{ preset, persist = true }` — `preset` starts from that preset
  * instead of the stored choice, and `persist: false` keeps the choice local
@@ -94,6 +95,16 @@ export function useFeeRate(feesData, { preset = null, persist = true } = {}) {
     : null;
   const ackHighFee = useCallback(() => setAckedRate(customRate), [customRate]);
 
+  // A button that names the exact rate ("Use 14 sat/vB") sets it as the
+  // custom rate; pressing it is the confirmation a high rate asks for.
+  const pickRate = useCallback((value) => {
+    const { value: v } = clampCustomFee(String(value ?? ""));
+    if (v === null) return;
+    setCustomText(String(v));
+    setChoice({ kind: "custom", value: v });
+    setAckedRate(v);
+  }, []);
+
   return {
     choice,
     satVb,
@@ -106,6 +117,7 @@ export function useFeeRate(feesData, { preset = null, persist = true } = {}) {
     ackHighFee,
     pickPreset,
     pickCustom,
+    pickRate,
     setCustomText: onCustomText,
   };
 }

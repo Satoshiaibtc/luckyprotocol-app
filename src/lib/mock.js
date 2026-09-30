@@ -792,7 +792,8 @@ export function simulateBroadcast(rawHex, { at = null, height: loggedHeight = nu
     if (isOpReturnOut(o)) continue;
     w.created.set(`${d.txid}:${o.vout}`, { txid: d.txid, vout: o.vout, sats: o.sats, address: o.address || null, balances: {}, confirmed: false, block_height: null });
   }
-  w.sim.set(d.txid, { at: at ?? Date.now(), height, decoded: d, applied: false, ...(hold ? { hold } : {}) });
+  // Its own fee and size stay with it: /pending-deploys lists a waiting DEPLOY with them.
+  w.sim.set(d.txid, { at: at ?? Date.now(), height, decoded: d, applied: false, feeSats: pending.pending_fee_sats, vsize: pending.pending_vsize, ...(hold ? { hold } : {}) });
   return d.txid;
 }
 
@@ -810,6 +811,108 @@ function mockTakeTicker() {
   } catch {
     return null;
   }
+}
+
+/**
+ * Dev knob for the Create page's warnings about other DEPLOYs of a ticker:
+ * `sessionStorage["lp.mock.rivalDeploy"] = "NAME@RATE"` (several joined by
+ * commas, e.g. "NEW@12.5,NEW@8"; RATE in sat/vB, MOCK_RIVAL_RATE when left
+ * out) makes /pending-deploys/NAME list a DEPLOY of NAME from another
+ * wallet paying RATE, waiting in the simulated mempool until NAME is
+ * registered (this tab only). A new RATE is a new transaction (a
+ * replacement), as a sped-up copy would be. Returns the rows for `ticker`.
+ */
+export const MOCK_RIVAL_RATE = 6;
+const MOCK_RIVAL_VSIZE = 250;
+function mockRivalDeploys(ticker) {
+  let raw = null;
+  try {
+    raw = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("lp.mock.rivalDeploy") : null;
+  } catch {
+    raw = null;
+  }
+  if (!raw) return [];
+  const rows = [];
+  String(raw)
+    .split(",")
+    .forEach((part, i) => {
+      const [name, rateText] = part.trim().split("@");
+      if (String(name || "").toUpperCase() !== ticker) return;
+      const asked = rateText === undefined || rateText.trim() === "" ? MOCK_RIVAL_RATE : Number(rateText);
+      if (!Number.isFinite(asked) || asked < 1 || asked > 1_000_000) return;
+      const feeSats = Math.ceil(asked * MOCK_RIVAL_VSIZE);
+      const feeRate = Math.round((feeSats / MOCK_RIVAL_VSIZE) * 100) / 100;
+      rows.push({ txid: fakeTxid(`rival-deploy:${ticker}:${i}:${asked}`), fee_rate: feeRate, fee_sats: feeSats, vsize: MOCK_RIVAL_VSIZE, first_seen: LOAD_TS - 60 * (i + 1), package_fee_rate: feeRate });
+    });
+  return rows;
+}
+
+/**
+ * Dev knob for a mempool watch that says nothing: `sessionStorage["lp.mock.deployWatch"]`
+ * = "off" makes /pending-deploys answer `watching: false` (the watch has not
+ * completed a pass, or is failing), "down" makes it answer the server's busy
+ * 503 (the only 503 the route can get; a failing watch answers
+ * `watching: false`) (this tab only).
+ */
+function mockDeployWatch() {
+  try {
+    const v = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("lp.mock.deployWatch") : null;
+    return v === "off" || v === "down" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The indexer's refusal of a /pending-deploys ticker, word for word. */
+export const PENDING_DEPLOYS_REFUSAL = "ticker must match [A-Z0-9]{1,8}";
+
+/** The indexer's ticker normalisation: Unicode white space trimmed, ASCII letters upper-cased (no other letter). */
+function normalizeTickerLikeIndexer(text) {
+  return String(text)
+    .replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "")
+    .replace(/[a-z]/g, (c) => c.toUpperCase());
+}
+
+/**
+ * GET /pending-deploys/:ticker as the indexer answers it: the simulated
+ * DEPLOYs of the ticker that still wait (read with the mock's own DEPLOY
+ * rule — a DEPLOY without the exact fee output can never register the
+ * ticker, so it is not listed) and the rival knob's rows, highest fee rate
+ * first; none once the ticker is registered. `watching` is false while the
+ * simulated index is rebuilding or more than one block behind, as on the
+ * indexer; the last rows are served meanwhile.
+ */
+function mockPendingDeploys(path, tickerText) {
+  const w = world();
+  let t = "";
+  try {
+    t = normalizeTickerLikeIndexer(decodeURIComponent(tickerText));
+  } catch {
+    t = "";
+  }
+  if (!/^[A-Z0-9]{1,8}$/.test(t)) throw http400(path, PENDING_DEPLOYS_REFUSAL);
+  const watch = mockDeployWatch();
+  if (watch === "down") {
+    const text = "server busy; retry shortly";
+    throw Object.assign(new Error(`Indexer ${path} -> HTTP 503: ${text}`), { status: 503, detail: text, retryAfter: 1 });
+  }
+  const registered = w.tokens.has(t);
+  const rows = [];
+  if (!registered) {
+    for (const [txid, e] of w.sim) {
+      const p = e.decoded.payload;
+      if (simConfirmed(e) || !p || p.op !== "DEPLOY" || p.ticker !== t) continue;
+      if (routeDecision(e.decoded, {}).reason === "fee_missing") continue;
+      if (!Number.isInteger(e.feeSats) || !Number.isInteger(e.vsize) || e.vsize <= 0) continue;
+      const feeRate = Math.round((e.feeSats / e.vsize) * 100) / 100;
+      rows.push({ txid, fee_rate: feeRate, fee_sats: e.feeSats, vsize: e.vsize, first_seen: Math.floor(e.at / 1000), package_fee_rate: feeRate });
+    }
+    rows.push(...mockRivalDeploys(t));
+  }
+  rows.sort((a, b) => b.fee_rate - a.fee_rate || a.first_seen - b.first_seen || (a.txid < b.txid ? -1 : a.txid > b.txid ? 1 : 0));
+  const at = now();
+  const paused = mockIndexerLag() > 1 || mockHealthOverride().state_rebuilding === true;
+  return { ticker: t, registered, pending: rows, as_of: watch === "off" ? at - 200 : at, watching: watch !== "off" && !paused };
 }
 
 /**
@@ -1878,6 +1981,9 @@ export async function mockGet(path) {
     if (!t) throw notFound(p);
     return tokenView(t);
   }
+  if ((m = p.match(/^\/pending-deploys\/([^/]+)$/))) {
+    return mockPendingDeploys(path, m[1]);
+  }
   if ((m = p.match(/^\/transfers\/([^/]+)$/))) {
     const addr = decodeURIComponent(m[1]);
     const all = [...w.simSends, ...w.history.sends].filter((s) => s.sender === addr || s.to === addr).sort((a, b) => b.block_height - a.block_height);
@@ -2177,7 +2283,7 @@ export async function mockPostJson(path, body) {
   const psbt = body.psbt;
   const amount = Number(body.amount);
   const price_sats = Number(body.price_sats);
-  const ticker = body.ticker.trim().toUpperCase();
+  const ticker = normalizeTickerLikeIndexer(body.ticker);
   if (!/^[A-Z0-9]{1,8}$/.test(ticker)) throw bad("ticker must match [A-Z0-9]{1,8}");
   // 0. The market gate comes first, before anything in the listing is read,
   //    then the book's ability to save it — as the live book checks them. A
