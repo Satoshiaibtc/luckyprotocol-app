@@ -13,7 +13,7 @@ import { addPendingTokenOutpoints, withPending } from "../lib/pending.js";
 import { isConflictError } from "../lib/walletShapes.js";
 import { fundingMessage } from "../lib/funding.js";
 import { forgetTx, markTxConfirmed, markTxUnconfirmed, recordBroadcastTx, txRecords } from "../lib/txrecords.js";
-import { sendPendingOutpoints, sendVersions, switchSendVersion } from "../lib/send.js";
+import { followConfirmedTransfer, followTransfer, keepsReplacedVersion, sendPendingOutpoints, sendVersions, switchSendVersion, transferFromRecord, transferRecordKeeps } from "../lib/send.js";
 
 const IDLE = { phase: "idle" };
 const BUSY = new Set(["building", "signing", "broadcasting", "pending"]);
@@ -57,6 +57,15 @@ const VERSION_POLL_MS = 15_000;
  * then follows the new txid — and keeps asking about the versions it
  * replaced: when a block confirms one of those instead, the flow follows
  * that one. `speedUpQuote(rate)` previews it.
+ *
+ * A transfer (kind "send", the Transfer page) also keeps, in its broadcast
+ * record, the unsigned PSBT, its change output and the versions it
+ * replaced, and a Speed up keeps the earlier version's record until one
+ * version confirms (src/lib/txrecords.js does not drop it meanwhile).
+ * `follow(record)` takes such a record up — a transfer listed after a
+ * reload or made in another tab — so it can be sped up here: an idle flow
+ * follows it, a flow on an earlier version of it moves to it.
+ * Withdrawals and splits keep neither.
  * A confirmed tx is tracked until its block is final (`status.final`): a
  * chain reorganization can still put it back in the mempool — the chain
  * then returns to "pending" and its record guards its inputs again. A
@@ -81,6 +90,8 @@ export function useSendToSelf({ onSettled } = {}) {
       // Confirmed, not final: the record keeps guarding its inputs until
       // the block is final (a chain reorganization could undo it).
       if (address && chain.txid) markTxConfirmed(address, chain.txid, s.block_height ?? null);
+      // A transfer that was sped up: the versions that did not confirm go now.
+      if (address && chain.txid && keepsReplacedVersion(chain.kind)) for (const t of sendVersions(chain)) if (t !== chain.txid) forgetTx(address, t);
       setChain((c) => ({ ...c, phase: "confirmed" }));
       refreshAll();
       settledRef.current?.();
@@ -204,7 +215,9 @@ export function useSendToSelf({ onSettled } = {}) {
         setChain((c) => ({ ...c, phase: "broadcasting" }));
         let txid;
         try {
-          txid = await wallet.broadcastSignedPsbt(signed, { kind: "send", ticker, address });
+          // A transfer's record keeps its unsigned PSBT and change output: a Speed up after a reload rebuilds from them.
+          const keep = transferRecordKeeps(kind, { psbt: built.psbtHex, changeVout: built.changeVout });
+          txid = await wallet.broadcastSignedPsbt(signed, { kind: "send", ticker, address, ...keep });
         } catch (e) {
           if (kind === "cancel" && isConflictError(e) && /insufficient fee|replacement/i.test(String(e?.message || e))) {
             throw new Error(
@@ -268,10 +281,12 @@ export function useSendToSelf({ onSettled } = {}) {
         // sent still keeps its record.
         const signed = await wallet.signPsbt(q.psbtHex, { inputIndexes: q.inputIndexes, address, replaces: sendVersions(c) });
         setChain((x) => ({ ...x, speeding: "broadcasting" }));
+        // A transfer's faster version keeps what a further Speed up needs, and the versions it replaces.
+        const keep = transferRecordKeeps(c.kind, { psbt: q.psbtHex, changeVout: c.changeVout, replaces: [...(c.replaces || []), c.txid] });
         let txid;
         let unsure = null;
         try {
-          txid = await wallet.broadcastSignedPsbt(signed, { kind: "send", ticker: c.ticker, address });
+          txid = await wallet.broadcastSignedPsbt(signed, { kind: "send", ticker: c.ticker, address, ...keep });
         } catch (e) {
           // Neither relay confirmed the faster copy, but it may still reach
           // the network (it is recorded): the flow follows it and keeps
@@ -281,8 +296,9 @@ export function useSendToSelf({ onSettled } = {}) {
           unsure = e;
         }
         // The replacement spends the same inputs: the old record's guard is
-        // redundant now (it stays while the faster copy is not known to be sent).
-        if (!unsure) forgetTx(address, c.txid);
+        // redundant now (it stays while the faster copy is not known to be
+        // sent). A transfer keeps it until one version confirms.
+        if (!unsure && !keepsReplacedVersion(c.kind)) forgetTx(address, c.txid);
         addPendingTokenOutpoints(sendPendingOutpoints(txid, { toSelf: c.toAddress === address }), address);
         const speedError = unsure ? friendlyError(unsure) : null;
         setChain((x) => (x.txid === c.txid ? { ...x, phase: "pending", note: null, txid, psbt: q.psbtHex, feeSats: q.feeSats, feeRateSatVb: q.feeRateSatVb, speeding: null, speedError, replaces: [...(x.replaces || []), c.txid] } : { ...x, speeding: null, speedError }));
@@ -293,6 +309,31 @@ export function useSendToSelf({ onSettled } = {}) {
     [address, incrementalRelayFee],
   );
 
+  /**
+   * Follow a pending transfer from its record (transferFromRecord: the
+   * record holds this transaction's unsigned PSBT, spending this address's
+   * outputs), so it can be sped up here: an idle flow takes it up; a flow
+   * waiting on an earlier version of it (a Speed up made in another tab)
+   * moves to it. A confirmed record of another version of the transfer
+   * the flow waits on (sped up in another tab, confirmed before this flow
+   * saw it): the flow moves to that version, whose status check then
+   * settles it (followConfirmedTransfer). Anything else is left as it is.
+   * Returns whether the record can be followed.
+   */
+  const follow = useCallback(
+    (rec) => {
+      if (address && rec?.confirmed && rec.kind === "send") {
+        setChain((c) => followConfirmedTransfer(c, rec, address));
+        return true;
+      }
+      const t = address ? transferFromRecord(rec, address) : null;
+      if (!t) return false;
+      setChain((c) => followTransfer(c, t));
+      return true;
+    },
+    [address],
+  );
+
   const reset = useCallback(() => setChain(IDLE), []);
-  return { chain, status, run, reset, busy: BUSY.has(chain.phase) || !!chain.speeding, speedUpQuote, speedUp };
+  return { chain, status, run, reset, busy: BUSY.has(chain.phase) || !!chain.speeding, speedUpQuote, speedUp, follow };
 }

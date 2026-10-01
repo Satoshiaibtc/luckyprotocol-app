@@ -18,11 +18,16 @@
 //   parseSendAmount   the amount field → whole tokens ("1,000" allowed)
 //   sendFormHint      the one line saying why Review is still off
 //   sendReviewModel   what the confirm screen shows — frozen at signing
-//   pendingSendsOf    this browser's unconfirmed sends of a ticker
+//   pendingSendsOf    this browser's unconfirmed sends of a ticker, one row per transfer
 //   sendVersions      every version of a sped-up send (switchSendVersion follows one)
+//   transferRecordKeeps     what a transfer's broadcast record keeps for a later Speed up
+//   transferFromRecord      a listed transfer as the flow follows it (Speed up after a reload)
+//   followTransfer          the flow after it takes such a transfer up
+//   followConfirmedTransfer the flow after another tab's faster version confirmed
+//   transferSpeedUpState    whether a listed transfer can be sped up here
 
-import { checkRecipientAddress } from "./psbt.js";
-import { DUST_SATS, PROJECT_FEE_ADDRESS, SEND_PROTOCOL_FEE_SATS, SEND_RESIDUAL_VOUT, SEND_TO_VOUT } from "./payloads.js";
+import { checkRecipientAddress, expectPsbtPayload, RBF_SEQUENCE, sendPsbtFacts } from "./psbt.js";
+import { DUST_SATS, PROJECT_FEE_ADDRESS, PROTOCOL_LOCKTIME, SEND_PROTOCOL_FEE_SATS, SEND_RESIDUAL_VOUT, SEND_TO_VOUT } from "./payloads.js";
 import { fmtUnit } from "./format.js";
 
 const key = (u) => `${String(u.txid).toLowerCase()}:${Number(u.vout)}`;
@@ -266,9 +271,161 @@ export function sendReviewModel({ rows, keys, ticker, amount, toAddress, self, p
   };
 }
 
-/** This browser's unconfirmed SEND records of `ticker` (txrecords rows). */
+/**
+ * This browser's unconfirmed SEND records of `ticker` (txrecords rows),
+ * one per transaction the user made: a version a Speed up replaced is
+ * left out (the faster version stands for it), and so is a faster version
+ * whose earlier version confirmed. Two faster versions of one transfer
+ * (sped up in two tabs): the newest stands for it.
+ */
 export function pendingSendsOf(records, ticker) {
-  return (records || []).filter((r) => !r.confirmed && r.kind === "send" && r.ticker === ticker);
+  const all = records || [];
+  const confirmed = new Set(all.filter((r) => r.confirmed).map((r) => r.txid));
+  const replaced = new Set(all.flatMap((r) => r.replaces || []));
+  const live = all.filter((r) => !r.confirmed && r.kind === "send" && r.ticker === ticker && !replaced.has(r.txid) && !(r.replaces || []).some((t) => confirmed.has(t)));
+  const seen = new Set();
+  const out = [];
+  for (const r of [...live].reverse()) {
+    const versions = [r.txid, ...(r.replaces || [])];
+    if (versions.some((t) => seen.has(t))) continue;
+    for (const t of versions) seen.add(t);
+    out.push(r);
+  }
+  return out.reverse();
+}
+
+/**
+ * What the broadcast record of a SEND keeps besides its inputs (the meta
+ * wallet.broadcastSignedPsbt records): a transfer (`kind` "send", the
+ * Transfer page) its unsigned PSBT, its BTC change output and the versions
+ * it replaces — what a Speed up after a reload rebuilds from; a withdrawal
+ * or a split (`kind` "cancel" / "split") nothing more.
+ */
+export function transferRecordKeeps(kind, { psbt = null, changeVout = null, replaces = [] } = {}) {
+  if (kind !== "send") return {};
+  return { psbt, changeVout: Number.isInteger(changeVout) ? changeVout : null, replaces: [...(replaces || [])] };
+}
+
+/**
+ * Does a Speed up keep the earlier version's record until one version
+ * confirms? A transfer's does; a withdrawal's or a split's goes once the
+ * faster version is known to be out (its record guards the same inputs).
+ */
+export const keepsReplacedVersion = (kind) => kind === "send";
+
+/** The first version of a listed transfer (a stable key while Speed ups change its txid). */
+export function transferRootOf(record) {
+  return record?.replaces?.length ? record.replaces[0] : record?.txid ?? null;
+}
+
+/**
+ * A listed transfer (a txrecords row) as the flow follows it — `{ ticker,
+ * amount, toAddress, txid, psbt, changeVout, replaces, inputs, feeSats,
+ * feeRateSatVb, vsize }` — or null when its record cannot rebuild it:
+ * the record must hold the unsigned PSBT of this very transaction (its id
+ * is the record's txid), a SEND of the record's ticker in the reference
+ * layout whose every input is an output of `address`.
+ */
+export function transferFromRecord(record, address) {
+  if (!record || record.kind !== "send" || record.confirmed || !record.psbt || !address) return null;
+  const f = sendPsbtFacts(record.psbt, address);
+  if (!f || f.txid !== record.txid || f.ticker !== record.ticker || !f.fromSelf || !f.toAddress || !(f.vsize > 0)) return null;
+  try {
+    expectPsbtPayload(record.psbt, { op: "SEND", ticker: f.ticker, amount: f.amount, lockTime: PROTOCOL_LOCKTIME, inputsSequence: RBF_SEQUENCE, layout: { self: address, to: f.toAddress } });
+  } catch {
+    return null;
+  }
+  return {
+    ticker: f.ticker,
+    amount: f.amount,
+    toAddress: f.toAddress,
+    txid: record.txid,
+    psbt: record.psbt,
+    changeVout: Number.isInteger(record.changeVout) ? record.changeVout : null,
+    replaces: [...(record.replaces || [])],
+    inputs: [...(record.inputs || [])],
+    feeSats: f.feeSats,
+    feeRateSatVb: Math.round((f.feeSats / f.vsize) * 100) / 100,
+    vsize: f.vsize,
+  };
+}
+
+/**
+ * The flow (useSendToSelf's chain) after `follow` of a transfer read from
+ * its record (`transfer` = transferFromRecord): an idle flow takes it up,
+ * pending; a transfer flow waiting on an earlier version of it (a Speed up
+ * made in another tab) moves to it. Any other flow is returned unchanged
+ * (the same object).
+ */
+export function followTransfer(chain, transfer) {
+  if (!chain || !transfer) return chain;
+  if (chain.phase === "idle") return { phase: "pending", kind: "send", rule: null, note: null, ...transfer };
+  const waiting = (chain.phase === "pending" || chain.phase === "unseen") && chain.kind === "send" && !chain.speeding;
+  if (waiting && chain.txid !== transfer.txid && (transfer.replaces || []).includes(chain.txid)) return { ...chain, ...transfer, phase: "pending", note: null, speedError: null };
+  return chain;
+}
+
+/**
+ * The flow after another version of its transfer confirmed — one a Speed
+ * up in another tab made, read from its record (`record.confirmed`) before
+ * this flow saw it: a transfer flow waiting on a version that record shares
+ * (the one it replaced, or an earlier one both replaced) moves to it. Every
+ * other version becomes `replaces` (forgotten once it confirms here too),
+ * the unsigned PSBT goes, and the fee shown is that version's when its
+ * record names it. It is pending until its own status check says confirmed,
+ * which settles it. Any other flow or record: the flow unchanged (the same object).
+ */
+export function followConfirmedTransfer(chain, record, address = null) {
+  if (!chain || !record || !record.confirmed || record.kind !== "send" || !record.txid) return chain;
+  const waiting = (chain.phase === "pending" || chain.phase === "unseen") && chain.kind === "send" && !chain.speeding;
+  const mine = sendVersions(chain);
+  if (!waiting || mine.includes(record.txid) || !(record.replaces || []).some((t) => mine.includes(t))) return chain;
+  const replaces = [...new Set([...(record.replaces || []), ...[...mine].reverse()])].filter((t) => t !== record.txid);
+  const f = record.psbt && address ? sendPsbtFacts(record.psbt, address) : null;
+  const fee = f && f.txid === record.txid && f.vsize > 0 ? { feeSats: f.feeSats, feeRateSatVb: Math.round((f.feeSats / f.vsize) * 100) / 100, vsize: f.vsize } : {};
+  return { ...chain, ...fee, txid: record.txid, replaces, psbt: null, phase: "pending", note: null, speedError: null };
+}
+
+/**
+ * Speed up for a row of the "unconfirmed transfers" list (a pendingSendsOf
+ * row), where `followed` = the versions the transfer form follows
+ * (sendVersions of its flow while it waits):
+ *   "no-change" — the record's transaction has no BTC change output to take
+ *                 a higher fee from: no Speed up anywhere (TRANSFER_NO_CHANGE)
+ *   "form"  — the form's own transfer: its Speed up is there
+ *   "yes"   — the record holds what a replacement needs (transferFromRecord)
+ *   "page"  — it does not: only the page or tab that made it can speed it up
+ *   "no"    — its inputs are not this address's: never offered
+ */
+export function transferSpeedUpState(record, { address, followed = [] } = {}) {
+  if (!record) return "no";
+  const t = record.psbt ? transferFromRecord(record, address) : null;
+  if (t && !Number.isInteger(t.changeVout)) return "no-change";
+  const versions = [record.txid, ...(record.replaces || [])];
+  if (versions.some((x) => followed.includes(x))) return "form";
+  if (record.psbt) {
+    const f = sendPsbtFacts(record.psbt, address);
+    if (f && !f.fromSelf) return "no";
+    if (t) return "yes";
+  }
+  return "page";
+}
+
+/** A transfer without a BTC change output: nothing to take a higher fee from (the words MINE uses). */
+export const TRANSFER_NO_CHANGE = "No change output to take a higher fee from — it confirms when a block includes it.";
+
+/** Why a pending transfer is worth speeding up (SpeedUpSend's note); `toSelf`: a transfer to your own address. */
+export function transferSpeedUpNote(toSelf = false) {
+  return `A transfer waiting for a block confirms sooner with a higher fee. ${toSelf ? "The tokens are on your new carrier" : "The recipient receives the tokens"} once it confirms.`;
+}
+
+/** A listed transfer whose record holds nothing to rebuild it from. */
+export const TRANSFER_SPEEDUP_ELSEWHERE = "This transfer can only be sped up from the page or tab that sent it.";
+
+/** The line a listed transfer shows: waiting, and whether it was sped up. */
+export function pendingTransferText(record) {
+  const wait = "waiting for a block — its carriers are left out of new transfers until it confirms or drops";
+  return record?.replaces?.length ? `sped up · ${wait}` : wait;
 }
 
 /**

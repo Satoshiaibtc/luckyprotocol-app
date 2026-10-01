@@ -468,6 +468,40 @@ export function psbtPayload(psbtHex) {
   }
 }
 
+/**
+ * What an unsigned SEND PSBT says about itself, or null when it is not one
+ * or does not read (never throws):
+ * `{ txid, ticker, amount, toAddress, fromSelf, feeSats, vsize }`.
+ * `txid` is the id its transaction has once signed (a segwit
+ * transaction's id leaves the witnesses out), `toAddress` the address
+ * vout1 pays (null when it pays none), `fromSelf` whether every input
+ * spends an output of `self`.
+ */
+export function sendPsbtFacts(psbtHex, self) {
+  try {
+    const tx = btc.Transaction.fromPSBT(hex.decode(psbtHex), { allowUnknownOutputs: true });
+    const scripts = [];
+    for (let i = 0; i < tx.outputsLength; i++) scripts.push(tx.getOutput(i).script);
+    const payload = protocolPayloadOfScripts(scripts).payload;
+    if (!payload || payload.op !== "SEND" || tx.outputsLength <= SEND_RESIDUAL_VOUT) return null;
+    const selfHex = scriptHexOfAddress(self);
+    let fromSelf = !!selfHex && tx.inputsLength > 0;
+    for (let i = 0; i < tx.inputsLength; i++) {
+      const w = tx.getInput(i).witnessUtxo;
+      if (!w || hex.encode(w.script) !== selfHex) fromSelf = false;
+    }
+    let toAddress = null;
+    try {
+      toAddress = btc.Address(NETWORK).encode(btc.OutScript.decode(tx.getOutput(SEND_TO_VOUT).script));
+    } catch {
+      toAddress = null;
+    }
+    return { txid: tx.id, ticker: payload.ticker, amount: Number(payload.amount), toAddress, fromSelf, feeSats: psbtFeeSats(psbtHex), vsize: Math.ceil(psbtVsize(psbtHex)) };
+  } catch {
+    return null;
+  }
+}
+
 const hex8 = (n) => `0x${(Number(n) >>> 0).toString(16).padStart(8, "0")}`;
 
 /** The mainnet scriptPubKey (hex) of `address`, or null when it does not decode. */

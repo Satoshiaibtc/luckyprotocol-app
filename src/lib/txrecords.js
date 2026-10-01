@@ -99,9 +99,9 @@ export function normalizeTxRecord(r, now = Date.now()) {
     confirmedAt: confirmed ? stamp(r.confirmedAt) : null,
     // the page that shows its result has shown it; kept only to guard its inputs until final
     done: r.done === true,
-    // A DEPLOY's or MINE's unsigned PSBT and BTC change output (what a Speed
-    // up rebuilds from after a reload), and the txids of the versions it
-    // replaced.
+    // A DEPLOY's, MINE's or transfer's unsigned PSBT and BTC change output
+    // (what a Speed up rebuilds from after a reload), and the txids of the
+    // versions it replaced.
     psbt: typeof r.psbt === "string" && r.psbt.length > 0 && r.psbt.length <= TXREC_PSBT_MAX && r.psbt.length % 2 === 0 && HEX_RE.test(r.psbt.toLowerCase()) ? r.psbt.toLowerCase() : null,
     changeVout: Number.isInteger(r.changeVout) && r.changeVout >= 0 && r.changeVout < 1_000 ? r.changeVout : null,
     replaces: Array.isArray(r.replaces) ? [...new Set(r.replaces.map((t) => String(t).toLowerCase()).filter((t) => TXID_RE.test(t) && t !== txid))].slice(-20) : [],
@@ -412,12 +412,22 @@ export const KEEP_WHEN_CONFIRMED = new Set(["deploy", "mine"]);
  *     is unconfirmed again. A confirmed record is asked about at most
  *     every CONFIRMED_RECHECK_MS (each build refreshes the records, and a
  *     heavy miner holds dozens of them for the hour before they are final).
+ *   - a transfer a Speed up replaced is not dropped while its newest
+ *     version (the record naming it in `replaces` that no other record
+ *     replaces) waits and no version of it has confirmed: any of them may
+ *     still confirm.
  *
  * Returns the surviving records with a `state` ("confirmed" | "pending" | "unknown").
  */
 export async function refreshTxRecords(address, txStatus, { store = DEFAULT_STORE, now = Date.now, graceMs = DROP_GRACE_MS, tip = indexedTip, trustUnseen = unseenTrusted } = {}) {
   const out = [];
-  for (const r of store.list(address)) {
+  const list = store.list(address);
+  const confirmedTxids = new Set(list.filter((r) => r.confirmed).map((r) => r.txid));
+  const replacedTxids = new Set(list.flatMap((r) => r.replaces));
+  const waitingFaster = new Set(
+    list.filter((r) => r.kind === "send" && !r.confirmed && !replacedTxids.has(r.txid) && !r.replaces.some((t) => confirmedTxids.has(t))).flatMap((r) => r.replaces),
+  );
+  for (const r of list) {
     if (r.confirmed && recordIsFinal(r, tip, now())) {
       if (r.done || !KEEP_WHEN_CONFIRMED.has(r.kind)) {
         store.remove(address, r.txid);
@@ -452,6 +462,10 @@ export async function refreshTxRecords(address, txStatus, { store = DEFAULT_STOR
       continue;
     }
     const state = classifyTxStatus(r, s, now(), graceMs, { trustUnseen });
+    if (state === "dropped" && r.kind === "send" && waitingFaster.has(r.txid)) {
+      out.push({ ...r, state: "pending", status: s });
+      continue;
+    }
     if (state === "dropped") {
       store.remove(address, r.txid);
       continue;

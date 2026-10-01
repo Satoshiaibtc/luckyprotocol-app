@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useApp } from "../context.js";
 import * as indexer from "../lib/indexer.js";
 import { usePoll } from "../hooks/usePoll.js";
@@ -9,6 +9,7 @@ import Identicon from "../components/Identicon.jsx";
 import TransferEmpty from "../components/TransferEmpty.jsx";
 import FeeSelector from "../components/FeeSelector.jsx";
 import TxProgress, { ConnectPrompt } from "../components/TxProgress.jsx";
+import SpeedUpSend from "../components/SpeedUpSend.jsx";
 import Panel from "../components/hud/Panel.jsx";
 import Led from "../components/hud/Led.jsx";
 import { SEND_OP_RETURN_VOUT, estimateSendFeeSats } from "../lib/psbt.js";
@@ -17,7 +18,27 @@ import { missingFeeHint } from "../lib/feechoice.js";
 import { pendingSpentOutpoints, refreshTxRecords, txRecords } from "../lib/txrecords.js";
 import { syncPauseText } from "../lib/sync.js";
 import { indexerErrorText, indexerErrorTitle } from "../lib/errors.js";
-import { ORDERS_INCOMPLETE_TEXT, carrierNote, carriersToSpend, parseSendAmount, pendingSendsOf, pickedAmount, recipientState, sendAmountError, sendCarrierRows, sendFormHint, sendReviewModel } from "../lib/send.js";
+import {
+  ORDERS_INCOMPLETE_TEXT,
+  TRANSFER_NO_CHANGE,
+  TRANSFER_SPEEDUP_ELSEWHERE,
+  carrierNote,
+  carriersToSpend,
+  followConfirmedTransfer,
+  parseSendAmount,
+  pendingSendsOf,
+  pendingTransferText,
+  pickedAmount,
+  recipientState,
+  sendAmountError,
+  sendCarrierRows,
+  sendFormHint,
+  sendReviewModel,
+  sendVersions,
+  transferRootOf,
+  transferSpeedUpNote,
+  transferSpeedUpState,
+} from "../lib/send.js";
 import { readSellerOrders } from "../lib/listingRules.js";
 import { fmtInt, fmtSats, shortAddr, shortTxid, txUrl } from "../lib/format.js";
 
@@ -39,7 +60,7 @@ const POLL_MS = 15_000;
  * called when a transfer settles.
  */
 export default function SendPage({ ticker, params = {}, embedded = false, onSettled = null }) {
-  const { wallet: w, address, fee, indexerOk, sync } = useApp();
+  const { wallet: w, address, fee, fees, indexerOk, sync } = useApp();
   const connected = w.status === "connected";
   const Shell = embedded ? "div" : "main";
   const shellClass = embedded ? "send-page send-embedded" : "page send-page";
@@ -57,7 +78,7 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
   );
   // Not every listing was read: no carrier is chosen automatically.
   const ordersIncomplete = !!orders.data && orders.data.complete === false;
-  const { chain, status, run, reset, busy } = useSendToSelf({
+  const transferFlow = useSendToSelf({
     onSettled: () => {
       tokenUtxos.refresh();
       values.refresh();
@@ -65,11 +86,23 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
       onSettled?.();
     },
   });
+  const { chain, status, run, reset, busy, follow } = transferFlow;
 
   // This browser's own unconfirmed transfers are re-checked on the page's poll:
   // a confirmed or dropped one leaves the store, so the
   // "unconfirmed transfers" list clears and its carriers are free again.
   const [recTick, setRecTick] = useState(0);
+  // A listed transfer that confirmed (followed by its row): re-read everything it changed.
+  const refreshCarriers = tokenUtxos.refresh;
+  const refreshValues = values.refresh;
+  const refreshOrders = orders.refresh;
+  const rowSettled = useCallback(() => {
+    refreshCarriers();
+    refreshValues();
+    refreshOrders();
+    setRecTick((t) => t + 1);
+    onSettled?.();
+  }, [refreshCarriers, refreshValues, refreshOrders, onSettled]);
   useEffect(() => {
     if (!address) return undefined;
     let alive = true;
@@ -91,13 +124,24 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
   }, [address]);
   // This browser's own unconfirmed broadcasts: their inputs cannot be spent again.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read the store on each poll / flow step
-  const records = useMemo(() => (address ? txRecords(address) : []), [address, tokenUtxos.data, chain.phase, recTick]);
+  const records = useMemo(() => (address ? txRecords(address) : []), [address, tokenUtxos.data, chain.phase, chain.txid, recTick]);
   const rows = useMemo(
     () => sendCarrierRows({ tokenUtxos: tokenUtxos.data, values: values.data, orders: orders.data?.items, expired: orders.data?.expired, pendingSpent: pendingSpentOutpoints(records), ticker }),
     [tokenUtxos.data, values.data, orders.data, records, ticker],
   );
   const total = rows.reduce((s, r) => s + r.amount, 0);
-  const pendingSends = pendingSendsOf(records, ticker);
+  const pendingSends = useMemo(() => pendingSendsOf(records, ticker), [records, ticker]);
+  // The versions of the transfer the form follows while it waits: its rows point at the form's Speed up.
+  const waiting = chain.phase === "pending" || chain.phase === "unseen";
+  const followed = useMemo(() => (waiting ? sendVersions(chain) : []), [waiting, chain]);
+  // The form's transfer was sped up in another tab: the form follows the faster
+  // version — or the version that confirmed, when one did before this page read it.
+  useEffect(() => {
+    if (!waiting) return;
+    const settled = records.find((r) => followConfirmedTransfer(chain, r, address) !== chain);
+    const newer = settled ?? pendingSends.find((r) => r.txid !== chain.txid && (r.replaces || []).includes(chain.txid));
+    if (newer) follow(newer);
+  }, [waiting, records, pendingSends, chain, address, follow]);
 
   // ---- form state -----------------------------------------------------------------------------
   const [toText, setToText] = useState(params.to === "self" && address ? address : "");
@@ -502,6 +546,11 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
                       : `Transferred. ${fmtInt(chain.amount ?? 0)} ${ticker} are on ${shortAddr(chain.toAddress || "", 8, 6)}'s new carrier.`,
                 }}
               />
+              {Number.isInteger(chain.changeVout) ? (
+                <SpeedUpSend send={transferFlow} fees={fees?.data} note={transferSpeedUpNote(chain.toAddress === address)} />
+              ) : waiting && chain.psbt ? (
+                <div className="muted">{TRANSFER_NO_CHANGE}</div>
+              ) : null}
             </div>
           </Panel>
           </div>
@@ -512,17 +561,49 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
         <Panel title={`Your unconfirmed ${ticker} transfers`} led="busy" aria-label="Unconfirmed transfers">
           <ul className="mine-pending-list">
             {pendingSends.map((r) => (
-              <li key={r.txid} className="mine-pending-row t-busy">
-                <Led state="busy" />
-                <a className="mono" href={txUrl(r.txid)} target="_blank" rel="noopener noreferrer" title={r.txid}>
-                  {shortTxid(r.txid, 6, 4)}
-                </a>
-                <span className="mine-pending-text">waiting for a block — its carriers are left out of new transfers until it confirms or drops</span>
-              </li>
+              <PendingTransferRow key={transferRootOf(r)} record={r} address={address} followed={followed} fees={fees?.data} onSettled={rowSettled} />
             ))}
           </ul>
         </Panel>
       )}
     </Shell>
+  );
+}
+
+/**
+ * One row of "Your unconfirmed transfers". A transfer whose record holds
+ * what a replacement needs is followed by the row's own flow, which offers
+ * Speed up and moves to the faster version afterwards; the form's own
+ * transfer points at the form; any other row says where it can be sped
+ * up. A transfer whose inputs are not this address's is never offered one.
+ */
+function PendingTransferRow({ record, address, followed, fees, onSettled }) {
+  const flow = useSendToSelf({ onSettled });
+  const { chain, follow } = flow;
+  const state = useMemo(() => transferSpeedUpState(record, { address, followed }), [record, address, followed]);
+  useEffect(() => {
+    if (state === "yes") follow(record);
+  }, [state, record, follow]);
+  const mine = !!chain.txid && sendVersions(chain).includes(record.txid);
+  const txid = mine ? chain.txid : record.txid;
+  return (
+    <li className="mine-pending-row t-busy">
+      <Led state="busy" />
+      <a className="mono" href={txUrl(txid)} target="_blank" rel="noopener noreferrer" title={txid}>
+        {shortTxid(txid, 6, 4)}
+      </a>
+      <span className="mine-pending-text">{pendingTransferText(mine ? chain : record)}</span>
+      {state === "yes" && mine ? (
+        <div className="mine-pending-extra">
+          <SpeedUpSend send={flow} fees={fees} note={transferSpeedUpNote(chain.toAddress === address)} />
+        </div>
+      ) : state === "form" ? (
+        <div className="mine-pending-extra muted">Its Speed up is in the transfer above.</div>
+      ) : state === "no-change" ? (
+        <div className="mine-pending-extra muted">{TRANSFER_NO_CHANGE}</div>
+      ) : state === "page" ? (
+        <div className="mine-pending-extra muted">{TRANSFER_SPEEDUP_ELSEWHERE}</div>
+      ) : null}
+    </li>
   );
 }
