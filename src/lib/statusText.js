@@ -52,13 +52,15 @@ export function waitingMineText(waiting, spare = null) {
 
 /**
  * Why a brand-new ticker cannot be mined yet: its DEPLOY needs
- * MINE_MIN_DEPLOY_CONFIRMATIONS confirmations first. A MINE in the DEPLOY's
- * own block is invalid, and a chain reorganization that replaces that
- * block could put a MINE ahead of the DEPLOY — invalid too, fees paid.
+ * MINE_MIN_DEPLOY_CONFIRMATIONS confirmation first, because a MINE in the
+ * DEPLOY's own block is invalid (fees paid, nothing credited).
  */
 export function deployWaitText(ticker, deployBlock) {
-  const opens = Number.isInteger(deployBlock) ? ` (block #${int(deployBlock + MINE_MIN_DEPLOY_CONFIRMATIONS - 1)})` : "";
-  return `${ticker} was just created. Mining opens at its ${MINE_MIN_DEPLOY_CONFIRMATIONS === 2 ? "2nd" : `${MINE_MIN_DEPLOY_CONFIRMATIONS}th`} confirmation${opens}, so a chain reorganization cannot leave a MINE ahead of the creation — such a MINE credits nothing.`;
+  if (!Number.isInteger(deployBlock)) {
+    return `${ticker} was just created. Mining opens once this page has caught up with its block — a MINE in the DEPLOY's own block credits nothing.`;
+  }
+  const reached = deployBlock + MINE_MIN_DEPLOY_CONFIRMATIONS - 1;
+  return `${ticker} was created in block #${int(deployBlock)}. Mining opens once this page has reached block #${int(reached)}; the first MINE can confirm in block #${int(reached + 1)}.`;
 }
 
 // ---- the end of the supply (MINEs queued in the mempool) ------------------------------------

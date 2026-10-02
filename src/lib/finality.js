@@ -28,7 +28,7 @@ export const FINAL_DEPTH = 6;
 export const MARKET_OPEN_DELAY = FINAL_DEPTH - 1;
 
 /** Confirmations a new ticker's DEPLOY needs before the console offers MINE. */
-export const MINE_MIN_DEPLOY_CONFIRMATIONS = 2;
+export const MINE_MIN_DEPLOY_CONFIRMATIONS = 1;
 
 /**
  * Confirmations of a block at `height` when the indexer has applied up to
@@ -75,9 +75,9 @@ export function finalityText(n) {
 /**
  * Has a new ticker's DEPLOY (confirmed at `deployBlock`) enough
  * confirmations at `tip` for the console to offer MINE? A MINE in the
- * DEPLOY's own block is invalid, and one that a chain reorganization puts
- * ahead of the DEPLOY is too — waiting for the second confirmation keeps a
- * one-block reorganization from doing that. Unknown heights fail closed.
+ * DEPLOY's own block is invalid, so MINE opens once the DEPLOY has
+ * confirmed: a MINE sent from then on lands in a later block, which is all
+ * the protocol asks. Unknown heights fail closed.
  */
 export function deployDeepEnough(tip, deployBlock) {
   const n = confirmationsAt(deployBlock, tip);

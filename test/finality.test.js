@@ -57,20 +57,23 @@ import { DROP_GRACE_MS } from "../src/lib/txrecords.js";
   console.log("finality market: minted_out_height + 5");
 }
 
-// ---- a new ticker is mined from its DEPLOY's 2nd confirmation -----------------------------------------------
+// ---- a new ticker is mined from its DEPLOY's 1st confirmation -----------------------------------------------
 {
-  assert.equal(MINE_MIN_DEPLOY_CONFIRMATIONS, 2);
-  assert.equal(deployDeepEnough(969_700, 969_700), false, "the DEPLOY's own block: a MINE sent now could be reordered ahead of it");
+  // The protocol only asks that a MINE land in a later block than the DEPLOY.
+  assert.equal(MINE_MIN_DEPLOY_CONFIRMATIONS, 1);
+  assert.equal(deployDeepEnough(969_699, 969_700), false, "the DEPLOY's block is not applied yet: a MINE sent now could share its block");
+  assert.equal(deployDeepEnough(969_700, 969_700), true, "the DEPLOY is confirmed: a MINE sent now lands in a later block");
   assert.equal(deployDeepEnough(969_701, 969_700), true);
   assert.equal(deployDeepEnough(null, 969_700), false, "unknown tip fails closed");
   assert.equal(deployDeepEnough(969_701, undefined), false);
   const why = deployWaitText("NEW", 969_700);
-  assert.match(why, /^NEW was just created\. Mining opens at its 2nd confirmation \(block #969,701\), so a chain reorganization cannot leave a MINE ahead of the creation/);
+  assert.equal(why, "NEW was created in block #969,700. Mining opens once this page has reached block #969,700; the first MINE can confirm in block #969,701.");
+  assert.match(deployWaitText("NEW", null), /^NEW was just created\. Mining opens once this page has caught up with its block/);
   const idle = { connected: true, indexerOk: true, preActivation: false, exhausted: false, lagText: null, ticker: "NEW" };
   assert.equal(mineIdleReason({ ...idle, deployBlock: 969_700, deployTooNew: true }), why);
   assert.equal(mineIdleReason({ ...idle, exhausted: true, deployTooNew: true }).startsWith("NEW is fully minted"), true, "exhausted says more");
   assert.equal(mineIdleReason({ ...idle }), null);
-  console.log("finality deploy gate: MINE opens at the DEPLOY's 2nd confirmation, said plainly");
+  console.log("finality deploy gate: MINE opens at the DEPLOY's 1st confirmation, said plainly");
 }
 
 // ---- near the end of the supply: queued MINEs may use up the rest ---------------------------------------------

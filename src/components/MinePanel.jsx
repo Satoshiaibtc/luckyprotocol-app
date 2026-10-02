@@ -120,9 +120,8 @@ export default function MinePanel({ ticker, tokenInfo, onSettled }) {
   // older than the chain: a ticker may already be exhausted in a block it
   // has not applied, and a MINE then pays 546 + fee for 0.
   const lagText = indexerOk ? syncPauseText(sync, "mining") : null;
-  // A brand-new ticker opens to mining at its DEPLOY's 2nd confirmation: a
-  // MINE in the DEPLOY's block is invalid, and one a reorganization puts
-  // ahead of the DEPLOY is too (fees paid for nothing).
+  // A brand-new ticker opens to mining once its DEPLOY is confirmed: a MINE
+  // in the DEPLOY's own block is invalid (fees paid for nothing).
   const deployBlock = Number.isInteger(tokenInfo?.deploy_block) ? tokenInfo.deploy_block : null;
   const deployTooNew = !!tokenInfo && !deployDeepEnough(sync.indexed, deployBlock);
   const canMine = connected && indexerOk && !lagText && !busy && !!tokenInfo && !exhausted && !preActivation && !deployTooNew && !!feeRate;
