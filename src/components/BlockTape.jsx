@@ -12,7 +12,8 @@ import { ledFromPoll } from "./hud/Led.jsx";
 import RingGauge from "./hud/RingGauge.jsx";
 import DigitChip from "./DigitChip.jsx";
 
-const MOBILE_COUNT = 3;
+// Phones: two complete blocks, then the next block as the third tile.
+const MOBILE_COUNT = 2;
 
 /**
  * A bounded row, oldest to newest. Fill height is actual block weight
@@ -78,15 +79,9 @@ export default function BlockTape() {
                 <Tile t={t} />
               </li>
             ))}
+            <NextTile h={nextHeight} />
           </ol>
-          <div className="tape-foot">
-            <span className="tape-next" aria-label="Next block, awaiting">
-              <RingGauge size={18} sweeping />
-              <span className="mono">next {nextHeight !== null ? `#${fmtInt(nextHeight)}` : "—"}</span>
-              <span className="label">awaiting</span>
-            </span>
-            {boardLink}
-          </div>
+          <div className="tape-foot">{boardLink}</div>
         </>
       ) : (
         <ol className="tape" ref={trackRef} aria-label={`Last ${COUNT} blocks, oldest to newest`} aria-busy={!loaded}>
@@ -95,14 +90,21 @@ export default function BlockTape() {
               <Tile t={t} narrow />
             </li>
           ))}
-          <li className="tile-next" aria-label="Next block, awaiting">
-            <Height h={nextHeight} />
-            <RingGauge size={28} sweeping />
-            <span className="label">awaiting</span>
-          </li>
+          <NextTile h={nextHeight} />
         </ol>
       )}
     </Panel>
+  );
+}
+
+/** The block the chain has not produced yet: the last tile of the tape. */
+function NextTile({ h }) {
+  return (
+    <li className="tile-next" aria-label="Next block, awaiting">
+      <Height h={h} />
+      <RingGauge size={28} sweeping />
+      <span className="label">awaiting</span>
+    </li>
   );
 }
 

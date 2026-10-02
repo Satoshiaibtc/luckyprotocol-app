@@ -1836,7 +1836,7 @@ input[type="search"]::-webkit-search-decoration {
   font-size: 9px;
   letter-spacing: 0;
 }
-/* Three complete blocks on phones, with the pending block below. */
+/* Two complete blocks on phones, then the next block as the third tile. */
 .tape-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1874,19 +1874,6 @@ input[type="search"]::-webkit-search-decoration {
   gap: 6px 14px;
   flex-wrap: wrap;
   font-size: 12px;
-}
-.tape-next {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.tape-next .label {
-  font-size: 9.5px;
-}
-.tape-next .gauge .track {
-  stroke: var(--surface-3);
 }
 @keyframes slide-in {
   from {
