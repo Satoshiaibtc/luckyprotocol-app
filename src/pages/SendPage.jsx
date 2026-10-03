@@ -211,7 +211,7 @@ export default function SendPage({ ticker, params = {}, embedded = false, onSett
     mode,
     freeTotal,
     ticker,
-    feeHint: !fee.satVb ? missingFeeHint(fee.choice, fee.satVb, "transfer", { awaitingAck: !!fee.highFee?.pending }) : null,
+    feeHint: !fee.satVb ? missingFeeHint(fee.choice, fee.satVb, "transfer", { awaitingAck: !!fee.highFee?.pending, reading: fee.reading }) : null,
     unknownValue: unknownPicked,
     ordersIncomplete,
   });

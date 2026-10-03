@@ -165,7 +165,7 @@ export function useSendToSelf({ onSettled } = {}) {
       try {
         if (picked.length === 0) throw new Error(`No ${ticker} carrier selected to spend.`);
         const chosen = fee.satVb;
-        if (!isUsableFeeRate(chosen)) throw new Error(missingFeeHint(fee.choice, chosen, label, { awaitingAck: !!fee.highFee?.pending }));
+        if (!isUsableFeeRate(chosen)) throw new Error(missingFeeHint(fee.choice, chosen, label, { awaitingAck: !!fee.highFee?.pending, reading: fee.reading }));
         // The cancel's own size (one carrier + one fee input) — the absolute-fee
         // floor of the replacement rule needs it; the real build may add inputs, which
         // only raises the absolute fee further.

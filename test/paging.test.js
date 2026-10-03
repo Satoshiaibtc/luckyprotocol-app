@@ -157,7 +157,7 @@ async function withFetch(fetch, fn) {
 
 // ---- 3. /tokens: the whole registry --------------------------------------------------------------
 {
-  const reg = Array.from({ length: 1_234 }, (_, i) => ({ ticker: `T${i}`, supply: 21_000_000, minted: i, deployer: ADDR, deploy_txid: txidOf("ee", i), deploy_block: 969_600 + i }));
+  const reg = Array.from({ length: 1_234 }, (_, i) => ({ ticker: `T${i}`, supply: 21_000_000, minted: i, deployer: ADDR, deploy_txid: txidOf("ee", i), deploy_block: 969_696 + i }));
   const requests = [];
   const fetch = async (url) => {
     const u = new URL(String(url));

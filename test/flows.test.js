@@ -30,9 +30,9 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
 
 // ---- the lag gate ------------------------------------------------------------------------------
 {
-  assert.deepEqual(syncStateOf({ indexed_height: 969_610, tip_height: 969_610, stalled: false }), {
-    indexed: 969_610,
-    tip: 969_610,
+  assert.deepEqual(syncStateOf({ indexed_height: 969_706, tip_height: 969_706, stalled: false }), {
+    indexed: 969_706,
+    tip: 969_706,
     lag: 0,
     stalled: false,
     rebuilding: false,
@@ -41,10 +41,10 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
     synced: true,
     trustUnseen: true,
   });
-  const cold = syncStateOf({ indexed_height: 969_600, tip_height: 970_112, stalled: false });
+  const cold = syncStateOf({ indexed_height: 969_696, tip_height: 970_208, stalled: false });
   assert.equal(cold.synced, false, "a cold scan is not synced even while it makes progress");
   assert.equal(cold.lag, 512);
-  assert.match(syncPauseText(cold, "creating PEPE"), /512 blocks behind the chain tip \(#969,600 of #970,112\), so creating PEPE would rely on stale state/);
+  assert.match(syncPauseText(cold, "creating PEPE"), /512 blocks behind the chain tip \(#969,696 of #970,208\), so creating PEPE would rely on stale state/);
   assert.equal(syncStateOf({ indexed_height: 5, tip_height: 5, stalled: true }).synced, false, "stalled is never synced");
   assert.equal(syncStateOf(null).synced, false, "unknown heights fail closed");
   assert.equal(syncStateOf({ indexed_height: null, tip_height: 7 }).lag, null);
@@ -78,10 +78,10 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   // inputs still guarded until final) until the page that shows their result
   // forgets them ("tracking resumes when you return")
   now += 10_000;
-  const answers = { [TX("a")]: { confirmed: true, seen: true, block_height: 969_700 }, [TX("b")]: { confirmed: true, seen: true, block_height: 969_700 } };
-  const after = await refreshTxRecords(ADDR, async (t) => answers[t], { store, now: () => now, tip: 969_700 });
+  const answers = { [TX("a")]: { confirmed: true, seen: true, block_height: 969_796 }, [TX("b")]: { confirmed: true, seen: true, block_height: 969_796 } };
+  const after = await refreshTxRecords(ADDR, async (t) => answers[t], { store, now: () => now, tip: 969_796 });
   assert.deepEqual(after.map((r) => [r.kind, r.state]), [["deploy", "confirmed"], ["mine", "confirmed"]]);
-  assert.ok(store.list(ADDR).every((r) => r.confirmed && r.blockHeight === 969_700), "both marked confirmed in the store, with their block");
+  assert.ok(store.list(ADDR).every((r) => r.confirmed && r.blockHeight === 969_796), "both marked confirmed in the store, with their block");
   assert.equal(pendingSpentOutpoints(store.list(ADDR)).size, 3, "a confirmed tx keeps its inputs excluded until its block is final");
   // a pending tx whose status cannot be read keeps its inputs excluded (fail closed)
   store.add(ADDR, { txid: TX("c"), kind: "send", ticker: "MOON", inputs: [`${TX("5")}:0`] });
@@ -110,34 +110,34 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const store = createTxRecordStore({ storage, now: () => now });
   const IN = `${TX("a")}:0`;
   store.add(ADDR, { txid: TX("1"), kind: "send", ticker: "MOON", inputs: [IN] });
-  let answer = { confirmed: true, seen: true, block_height: 969_800 };
+  let answer = { confirmed: true, seen: true, block_height: 969_896 };
   const refresh = (tip) => refreshTxRecords(ADDR, async () => answer, { store, now: () => now, tip, trustUnseen: true });
-  await refresh(969_800);
+  await refresh(969_896);
   let r = store.list(ADDR)[0];
-  assert.deepEqual([r.confirmed, r.blockHeight, r.confirmedAt], [true, 969_800, now]);
+  assert.deepEqual([r.confirmed, r.blockHeight, r.confirmedAt], [true, 969_896, now]);
   assert.ok(pendingSpentOutpoints(store.list(ADDR)).has(IN), "1 confirmation: the input stays excluded (a withdrawal cannot be undone by the next MINE)");
   // a chain reorganization puts it back in the mempool (seen at the next re-check)
   answer = { confirmed: false, seen: true, in_mempool: true };
   now += CONFIRMED_RECHECK_MS;
-  const back = await refresh(969_801);
+  const back = await refresh(969_897);
   assert.equal(back[0].state, "pending");
   r = store.list(ADDR)[0];
   assert.deepEqual([r.confirmed, r.blockHeight], [false, null], "unconfirmed again");
   assert.ok(pendingSpentOutpoints(store.list(ADDR)).has(IN));
   // confirms again in another block; kept until that block is 6 deep, then forgotten (a send has no result page)
-  answer = { confirmed: true, seen: true, block_height: 969_802 };
-  await refresh(969_802);
-  await refresh(969_806);
+  answer = { confirmed: true, seen: true, block_height: 969_898 };
+  await refresh(969_898);
+  await refresh(969_902);
   assert.equal(store.list(ADDR).length, 1, "5 confirmations: still guarding");
-  await refresh(969_807);
+  await refresh(969_903);
   assert.equal(store.list(ADDR).length, 0, "6 confirmations: final, forgotten");
   // unknown to the indexer while confirmed (it may be mid-reorganization): kept as it is
   store.add(ADDR, { txid: TX("2"), kind: "fill", inputs: [IN] });
-  answer = { confirmed: true, seen: true, block_height: 969_900 };
-  await refresh(969_900);
+  answer = { confirmed: true, seen: true, block_height: 969_996 };
+  await refresh(969_996);
   answer = { confirmed: false, seen: false };
   now += CONFIRMED_RECHECK_MS;
-  await refresh(969_901);
+  await refresh(969_997);
   assert.equal(store.list(ADDR)[0].confirmed, true, "an unknown answer does not unconfirm");
   // forget: a confirmed record is only marked done — it keeps guarding until final
   store.forget(ADDR, TX("2"));
@@ -146,15 +146,15 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const since = store.list(ADDR)[0].confirmedAt;
   assert.equal(recordIsFinal(store.list(ADDR)[0], null, since + FINAL_GUARD_MS - 1), false);
   assert.equal(recordIsFinal(store.list(ADDR)[0], null, since + FINAL_GUARD_MS), true);
-  assert.equal(recordIsFinal(store.list(ADDR)[0], 969_905, now), true, "the depth, when known, decides");
+  assert.equal(recordIsFinal(store.list(ADDR)[0], 970_001, now), true, "the depth, when known, decides");
   // an unconfirmed record is deleted by forget
   store.add(ADDR, { txid: TX("3"), kind: "send", inputs: [`${TX("b")}:1`] });
   store.forget(ADDR, TX("3"));
   assert.ok(!store.list(ADDR).some((x) => x.txid === TX("3")));
   // a done MINE is forgotten once final; one not shown yet stays for its result page
   store.add(ADDR, { txid: TX("4"), kind: "mine", ticker: "MOON", inputs: [] });
-  store.markConfirmed(ADDR, TX("4"), 969_900);
-  await refreshTxRecords(ADDR, async () => ({ confirmed: true, seen: true, block_height: 969_900 }), { store, now: () => now, tip: 969_910 });
+  store.markConfirmed(ADDR, TX("4"), 969_996);
+  await refreshTxRecords(ADDR, async () => ({ confirmed: true, seen: true, block_height: 969_996 }), { store, now: () => now, tip: 970_006 });
   assert.deepEqual(store.list(ADDR).map((x) => x.txid), [TX("4")], "the final done fill is forgotten; the unshown MINE stays");
   console.log("txrecords: confirmed txs guard their inputs until final; a reorganization back to the mempool unconfirms; forget keeps a confirmed guard");
 }
@@ -167,12 +167,12 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
   const store = createTxRecordStore({ storage, now: () => now });
   for (const c of ["1", "2", "3"]) store.add(ADDR, { txid: TX(c), kind: "mine", ticker: "MOON", inputs: [`${TX(c)}:0`] });
   let calls = 0;
-  let answer = { confirmed: true, seen: true, block_height: 970_000 };
+  let answer = { confirmed: true, seen: true, block_height: 970_096 };
   const refresh = () =>
     refreshTxRecords(ADDR, async () => {
       calls += 1;
       return answer;
-    }, { store, now: () => now, tip: 970_001, trustUnseen: true });
+    }, { store, now: () => now, tip: 970_097, trustUnseen: true });
   await refresh();
   assert.equal(calls, 3, "pending records are asked every time");
   calls = 0;
@@ -193,7 +193,7 @@ const ADDR = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
     refreshTxRecords(ADDR, async () => {
       calls += 1;
       throw new Error("HTTP 502");
-    }, { store, now: () => now, tip: 970_001 });
+    }, { store, now: () => now, tip: 970_097 });
   await failing();
   calls = 0;
   await failing();

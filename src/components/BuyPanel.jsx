@@ -261,7 +261,7 @@ export default function BuyPanel({ ticker, token, order, onClear, onSettled, usd
           <button className="btn btn-primary btn-lg buybar-confirm" type="button" onClick={open} disabled={!order || !quote || !indexerOk || busy || !marketOpen || (inFlight && flow.phase === "confirmed")}>
             {busy ? "Working…" : order ? `Confirm · buy ${fmtInt(order.amount)} ${ticker}` : "Select a listing"}
           </button>
-          {order && !fee.satVb && <div className="err">{missingFeeHint(fee.choice, fee.satVb, "buy", { awaitingAck: !!fee.highFee?.pending })}</div>}
+          {order && !fee.satVb && <div className={fee.reading ? "muted" : "err"}>{missingFeeHint(fee.choice, fee.satVb, "buy", { awaitingAck: !!fee.highFee?.pending, reading: fee.reading })}</div>}
           {order && !indexerOk && <div className="err">The indexer is not answering right now — fills are paused until it does.</div>}
           {order && !marketOpen && <div className="err">{marketPendingText(token || { ticker })}</div>}
         </div>

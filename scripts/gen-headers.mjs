@@ -21,8 +21,9 @@
 //     (src/lib/secondSource.js: GET /api/tx/<txid>/outspend/<vout>
 //     and GET /api/tx/<txid>; nothing but the outpoint in the URL);
 //   - every page compares the chain tip (GET /api/blocks/tip/height) with
-//     the indexer's node and reads the recommended fee rates
-//     (GET /api/v1/fees/recommended), each every 2 minutes
+//     the indexer's node every 2 minutes and, only while the indexer has
+//     no fee estimate, reads the projected blocks' fee rates
+//     (GET /api/v1/fees/mempool-blocks) on the same schedule
 //     (src/lib/network.js). These carry no user data, but mempool.space
 //     sees every visitor's IP address, not only the buyers'.
 // Nothing else is ever fetched or loaded (fonts are self-hosted). A
@@ -133,7 +134,7 @@ function originOf(opts) {
 /** The script-src directive; the generated middleware appends its per-response nonce to exactly this. */
 export const SCRIPT_SRC = "script-src 'self'";
 
-/** The second source (a listing's outpoint re-check, the network tip, fee rates) — connect-src only, never img-src. */
+/** The second source (a listing's outpoint re-check, the network tip, fee rates while the indexer has none) — connect-src only, never img-src. */
 export const SECOND_SOURCE_ORIGIN = "https://mempool.space";
 
 /** CSP directives for a build. Pure: (origin, nonce?) → string[]; a nonce extends script-src only. */
@@ -182,8 +183,8 @@ export function buildHeaders(opts = {}) {
     "# img-src names no remote origin (token pictures are inline SVG). The",
     "# remote origins are the indexer (connect-src, reads only) and",
     "# https://mempool.space (connect-src only: every page reads the network",
-    "# tip and fee rates there, and the buy flow re-checks a listing's",
-    "# outpoint there before signing).",
+    "# tip there, and fee rates only while the indexer has none; the buy flow",
+    "# re-checks a listing's outpoint there before signing).",
     "#",
     "# The HTML document itself is served by functions/_middleware.js (see",
     "# _routes.json), which sets these same headers plus a per-response",

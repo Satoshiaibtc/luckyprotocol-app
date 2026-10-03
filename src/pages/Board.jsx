@@ -99,7 +99,7 @@ export default function Board({ notice }) {
             <div className="hero-num">{fmtInt(health.data?.mine_count)}</div>
           </Panel>
           <Panel as="div" title="Tip block" led={led}>
-            {/* Phones drop the '#': "#970,100" ellipsizes in a 360px-wide three-up. */}
+            {/* Phones drop the '#': "#970,196" ellipsizes in a 360px-wide three-up. */}
             <div className="hero-num hero-num-tip">{chainTip ? `${mobile ? "" : "#"}${fmtInt(chainTip)}` : "—"}</div>
           </Panel>
         </div>

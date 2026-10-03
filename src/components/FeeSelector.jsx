@@ -1,11 +1,15 @@
 import { useId } from "react";
 import { MAX_FEE_RATE_SAT_VB } from "../lib/psbt.js";
-import { presetUnavailableText } from "../lib/feechoice.js";
+import { FEE_READING_TEXT } from "../lib/feechoice.js";
 
 /**
  * Compact segmented fee-rate control (fits 375 px): Fast / Normal / Slow /
- * Economy from the indexer's /fees, each with its sat/vB and ETA, plus a
- * Custom decimal input (1–1000, up to 2 decimal places).
+ * Economy from the indexer's /fees, each with its sat/vB, ETA and tooltip
+ * (Fast: from the next block — its median fee rate, or a rate it has room
+ * at — "next block"), plus a Custom decimal input (1–1000, up to 2 decimal
+ * places). With no estimate yet it says the rates are still being read
+ * while a read is outstanding (`fee.reading`), and that there are none
+ * only after.
  * `fee` is the object from useFeeRate.
  */
 export default function FeeSelector({ fee, disabled = false }) {
@@ -16,9 +20,10 @@ export default function FeeSelector({ fee, disabled = false }) {
     <div className="fee-sel">
       <div className="fee-sel-head">
         <span className="label">Fee rate</span>
-        {!fee.feesAvailable && !overCap && <span className="fee-sel-note">No fee estimates from the indexer or mempool.space — presets off, Custom still works.</span>}
+        {!fee.feesAvailable && !overCap && fee.reading && <span className="fee-sel-note">{FEE_READING_TEXT}</span>}
+        {!fee.feesAvailable && !overCap && !fee.reading && <span className="fee-sel-note">No fee estimates from the indexer or mempool.space — presets off, Custom still works.</span>}
         {fee.feesAvailable && fee.sourceNote && <span className="fee-sel-note">{fee.sourceNote}</span>}
-        {overCap && <span className="fee-sel-note">Fee estimate unavailable — the indexer reports rates above the {MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB safety cap; they are rejected, not clamped. Custom still works.</span>}
+        {overCap && <span className="fee-sel-note">The fee estimate is above the {MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB safety cap — rejected, not clamped. Custom still works.</span>}
       </div>
       <div className="fee-seg" role="radiogroup" aria-label="Fee rate">
         {fee.presets.map((p) => {
@@ -32,7 +37,7 @@ export default function FeeSelector({ fee, disabled = false }) {
               className={`fee-opt${on ? " on" : ""}`}
               disabled={disabled || p.satVb === null}
               onClick={() => fee.pickPreset(p.id)}
-              title={p.satVb !== null ? `${p.label} — ${p.satVb} sat/vB, ${p.eta}` : `${p.label} — ${presetUnavailableText(p.reason) || "estimate unavailable"}`}
+              title={p.title}
             >
               <span className="fo-l">{p.label}</span>
               <span className="fo-v">{p.satVb !== null ? p.satVb : "—"}</span>

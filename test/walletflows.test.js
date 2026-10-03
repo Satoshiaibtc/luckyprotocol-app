@@ -415,15 +415,15 @@ function mockSignPsbtAs(key, psbtHex, indexes) {
 
 // ---- 7. small texts ------------------------------------------------------------------------------
 {
-  assert.equal(filledLineText({ final: false, block_height: 969_712 }), "Filled in block #969,712 — final after 6 confirmations.");
+  assert.equal(filledLineText({ final: false, block_height: 969_808 }), "Filled in block #969,808 — final after 6 confirmations.");
   assert.equal(filledLineText({ final: false, block_height: null }), "Filled — final after 6 confirmations.", "never block #0");
   assert.ok(!/#0/.test(filledLineText({ final: false })));
   assert.equal(filledLineText({ final: true, block_height: 5 }), "Filled.");
-  // Tip 0 (an indexer that has not read its node yet) is unknown, never "969,599 blocks from now".
+  // Tip 0 (an indexer that has not read its node yet) is unknown, never "969,695 blocks from now".
   assert.equal(activationState(0).unknown, true);
-  assert.equal(activationState(chainTipOf({ tip_height: 0, indexed_height: 969_712 })).locked, false);
+  assert.equal(activationState(chainTipOf({ tip_height: 0, indexed_height: 969_808 })).locked, false);
   // The site banner names every paused action.
-  const sync = (x) => ({ indexed: 969_700, tip: 969_705, lag: 5, stalled: false, rebuilding: false, noPeers: false, networkLag: 0, synced: false, trustUnseen: false, ...x });
+  const sync = (x) => ({ indexed: 969_796, tip: 969_801, lag: 5, stalled: false, rebuilding: false, noPeers: false, networkLag: 0, synced: false, trustUnseen: false, ...x });
   for (const s of [sync({ rebuilding: true }), sync({ stalled: true, noPeers: true }), sync({ stalled: true }), sync({ networkLag: 3 }), sync({})]) {
     assert.match(syncWarningText(s), /Creating, mining, transferring, listing and buying (are paused|resume)/);
   }

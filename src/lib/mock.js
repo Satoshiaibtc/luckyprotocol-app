@@ -51,12 +51,13 @@ import { buildListingPsbt, parseListing, decodeRawTx, sellerPartialSig, LISTING_
 import { aggregateDaily } from "./activity.js";
 import { makeOpReturnScript } from "./psbt.js";
 import { compareSecondSource } from "./secondSource.js";
+import { networkFeesFromBlocks } from "./network.js";
 import { isOpReturnOut, listingSignedInputs, routeDecision, settleListingSpend } from "./mockRouting.js";
 import { serverErrorText } from "./httpError.js";
 import { FINAL_DEPTH, MARKET_OPEN_DELAY, confirmationsAt } from "./finality.js";
 import { MAX_OPEN_LISTINGS_PER_ADDRESS, WITHDRAW_FIRST_TEXT, sellerCapError } from "./listingRules.js";
 
-const BASE_TIP = 970_100;
+const BASE_TIP = 970_196;
 const CONFIRM_AFTER_MS = 20_000;
 // After a simulated tx confirms, the simulated chain keeps growing — one
 // block per CONFIRM_AFTER_MS — for this many blocks, so its confirmations
@@ -179,21 +180,21 @@ function blockTimeAt(height) {
 // ---- seeded world (lazy) -------------------------------------------------------------------
 
 const TOKEN_SEEDS = [
-  { ticker: "LUCKY", minted: 1_234_567, deploy_block: 969_800, holders: 412, base: 48, deployerType: "tr" },
+  { ticker: "LUCKY", minted: 1_234_567, deploy_block: 969_896, holders: 412, base: 48, deployerType: "tr" },
   // BLOK is minted out: its market is the one open market of the mock world.
-  // The MINE that completed the supply confirmed at block 965,300 (~33 days
+  // The MINE that completed the supply confirmed at block 965,396 (~33 days
   // before the tip), before the earliest seeded fill, so the 30 days of
   // trade history keep their spread (1d candles, 7d vs 24h windows).
-  { ticker: "BLOK", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: 965_300, deploy_block: 960_300, holders: 3_310, base: 12.5, deployerType: "tr" },
-  { ticker: "SATS", minted: 8_400_000, deploy_block: 969_805, holders: 1_904, base: 3.2, deployerType: "wpkh" },
-  { ticker: "ORE", minted: 42_021, deploy_block: 969_812, holders: 57, base: 310, deployerType: "wpkh" },
-  { ticker: "NODE", minted: 620_500, deploy_block: 969_830, holders: 233, base: 85, deployerType: "tr" },
-  { ticker: "GRID", minted: 210_000, deploy_block: 969_900, holders: 120, base: 140, deployerType: "tr" },
-  { ticker: "PIXEL", minted: 3_150, deploy_block: 970_090, holders: 9, base: 1_200, deployerType: "wpkh" },
+  { ticker: "BLOK", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: 965_396, deploy_block: 960_396, holders: 3_310, base: 12.5, deployerType: "tr" },
+  { ticker: "SATS", minted: 8_400_000, deploy_block: 969_901, holders: 1_904, base: 3.2, deployerType: "wpkh" },
+  { ticker: "ORE", minted: 42_021, deploy_block: 969_908, holders: 57, base: 310, deployerType: "wpkh" },
+  { ticker: "NODE", minted: 620_500, deploy_block: 969_926, holders: 233, base: 85, deployerType: "tr" },
+  { ticker: "GRID", minted: 210_000, deploy_block: 969_996, holders: 120, base: 140, deployerType: "tr" },
+  { ticker: "PIXEL", minted: 3_150, deploy_block: 970_186, holders: 9, base: 1_200, deployerType: "wpkh" },
   // DUNE was minted out two blocks before the tip: its market opens once that
   // block has FINAL_DEPTH confirmations (no fills or asks until then).
-  { ticker: "DUNE", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: BASE_TIP - 2, deploy_block: 970_000, holders: 880, base: 0, deployerType: "wpkh" },
-  { ticker: "VOLT", minted: 0, deploy_block: 970_099, holders: 0, base: 0, deployerType: "tr" }, // brand-new: no mines, no trades, no asks
+  { ticker: "DUNE", minted: REQUIRED_TOKEN_SUPPLY, minted_out_height: BASE_TIP - 2, deploy_block: 970_096, holders: 880, base: 0, deployerType: "wpkh" },
+  { ticker: "VOLT", minted: 0, deploy_block: 970_195, holders: 0, base: 0, deployerType: "tr" }, // brand-new: no mines, no trades, no asks
 ];
 
 // Roughly the model mix over 20 rows: 1–2 × 1000, ~6 × 500, ~6 × 200, ~6 × 100.
@@ -1409,7 +1410,7 @@ function seedMyListings(floorUnit) {
 
 /**
  * Dev knob for the activation countdown: `sessionStorage["lp.mock.healthTip"]
- * = "969599"` makes /health report that tip (and indexed height) in THIS
+ * = "969695"` makes /health report that tip (and indexed height) in THIS
  * tab only, so the pre-activation banner and locks can be checked in mock
  * mode. Only /health reads it — the simulated chain stays at BASE_TIP.
  */
@@ -1493,10 +1494,19 @@ export async function mockNetworkTip() {
   return (mockHealthTip() ?? tipHeight()) + mockNetworkAhead();
 }
 
-/** The mock second source's recommended fee rates (whole sat/vB, like mempool.space). */
+/**
+ * The mock second source's fee tiers, from projected blocks shaped like
+ * mempool.space's (`/api/v1/fees/mempool-blocks`, the next block first) —
+ * read only while the indexer has no estimate (`lp.mock.feesDown`).
+ */
 export async function mockNetworkFees() {
   await sleep(LATENCY_MS);
-  return { fastestFee: 3, halfHourFee: 2, hourFee: 2, economyFee: 1, minimumFee: 1 };
+  return networkFeesFromBlocks([
+    { blockVSize: 997_950.25, nTx: 3_912, medianFee: 3.1416, feeRange: [2.51, 2.8, 3.02, 3.14, 3.6, 5.2, 120] },
+    { blockVSize: 997_990.5, nTx: 4_208, medianFee: 2.0532, feeRange: [1.81, 1.9, 2.0, 2.05, 2.2, 2.4, 2.5] },
+    { blockVSize: 998_004, nTx: 4_455, medianFee: 1.5, feeRange: [1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8] },
+    { blockVSize: 2_310_400, nTx: 9_870, medianFee: 0.42, feeRange: [0.1, 0.2, 0.3, 0.42, 0.6, 0.9, 1.2] },
+  ]);
 }
 
 function senderOf(d) {
@@ -2089,8 +2099,9 @@ export async function mockGet(path) {
     // Fractional like the real indexer (a decimal rounded up to hundredths) so
     // mock mode exercises decimal rates end to end.
     // `ok: false` (the node could not estimate) serves 1 sat/vB floors, like the live indexer.
-    if (mockFeesDown()) return { ok: false, fastestFee: 1, halfHourFee: 1, hourFee: 1, economyFee: 1, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
-    return { ok: true, fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE };
+    // Fast is the median fee rate of the node's next block (`fastSource: "template"`).
+    if (mockFeesDown()) return { ok: false, fastestFee: 1, halfHourFee: 1, hourFee: 1, economyFee: 1, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE, nextBlockMedianFee: null, fastSource: null };
+    return { ok: true, fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02, minimumFee: 1, incrementalrelayfee: INCREMENTAL_RELAY_FEE, nextBlockMedianFee: 2.38, fastSource: "template" };
   }
   if ((m = p.match(/^\/orders\/by-address\/([^/]+)$/))) {
     // Paged like the live indexer (indexer API: limit default 50, max 200).

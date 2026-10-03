@@ -10,7 +10,7 @@
 //     (AMT), vout2 546 → self (the residual output, ALWAYS present), vout3
 //     OP_RETURN, and BTC change is a separate vout4 that folds into the fee
 //     when sub-dust
-//   * every tx: version 2, nLockTime 969,599, every input RBF_SEQUENCE
+//   * every tx: version 2, nLockTime 969,695, every input RBF_SEQUENCE
 //   * P2TR inputs carry tapInternalKey; P2WPKH inputs do not
 //   * inputs − outputs == reported fee
 //   * the sign-time guard (expectPsbtPayload) refuses a wrong payload, lock
@@ -111,7 +111,7 @@ const scriptOf = (address) => btc.OutScript.encode(btc.Address(btc.NETWORK).deco
 function checkInputs(label, r, { expectTap }) {
   const { tx, ins } = parse(r.psbtHex);
   assert.equal(tx.version, 2, `${label}: version 2`);
-  assert.equal(tx.lockTime, PROTOCOL_LOCKTIME, `${label}: nLockTime 969,599`);
+  assert.equal(tx.lockTime, PROTOCOL_LOCKTIME, `${label}: nLockTime 969,695`);
   assert.equal(ins.length, r.inputIndexes.length, `${label}: inputIndexes length`);
   r.inputIndexes.forEach((idx, i) => assert.equal(idx, i, `${label}: inputIndexes sequential`));
   for (const inp of ins) {
@@ -271,7 +271,7 @@ assert.throws(
   // Token outpoints and dust are never selected (checkCommon), and the ticker is validated.
   assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos, tokenOutpoints, feeRateSatVb: 8, ticker: "newtkn" }), /A-Z 0-9/);
   assert.throws(() => buildDeployPsbt({ address: p2trAddr, pubkeyHex: P2TR_PUB, utxos: [{ txid: T(1), vout: 0, sats: 546 }], tokenOutpoints: [], feeRateSatVb: 8, ticker: "NEWTKN" }), /no spendable BTC/);
-  console.log("psbt DEPLOY: proof / exact 5,460 fee / JSON deploy / change, version 2, nLockTime 969,599, RBF inputs; sub-dust change folds (changeVout null)");
+  console.log("psbt DEPLOY: proof / exact 5,460 fee / JSON deploy / change, version 2, nLockTime 969,695, RBF inputs; sub-dust change folds (changeVout null)");
 }
 
 // ---- SEND layout (§2.3) -------------------------------------------------------------------------
@@ -606,7 +606,7 @@ assert.throws(
   assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: "SEND" }), /OP_RETURN is MINE, expected SEND/);
   assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: "MINE", ticker: "ORE" }), /names ticker LUCKY, expected ORE/, "another ticker");
   assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: null }), /plain payment must not carry an OP_RETURN/);
-  assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: "MINE", lockTime: 0 }), /nLockTime is 969599, expected 0/);
+  assert.throws(() => expectPsbtPayload(mine.psbtHex, { op: "MINE", lockTime: 0 }), /nLockTime is 969695, expected 0/);
   const oneFinal = variant(mine.psbtHex, { sequence: (i, s) => (i === 1 ? 0xffffffff : s) });
   assert.throws(() => expectPsbtPayload(oneFinal, { op: "MINE", inputsSequence: RBF_SEQUENCE }), /input 1 has nSequence 0xffffffff, expected 0xfffffffd/, "one input without RBF");
   // A `|`-separated push is not a payload: the guard refuses it, psbtPayload reads nothing.

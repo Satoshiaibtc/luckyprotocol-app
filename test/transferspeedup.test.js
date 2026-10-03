@@ -348,7 +348,7 @@ const code = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\{\/\*[\s\
   assert.deepEqual(store.list(ADDR).map((r) => r.txid), [firstTxid, second, third], "every earlier version kept while the newest waits");
 
   // The newest one confirms: the others go — the hook forgets them, and the store's own re-check no longer keeps them.
-  answers[third] = { confirmed: true, seen: true, block_height: 970_200 };
+  answers[third] = { confirmed: true, seen: true, block_height: 970_296 };
   await refresh();
   recs = store.list(ADDR);
   assert.deepEqual(pendingSendsOf(recs, "LUCKY"), [], "nothing left waiting");
@@ -358,7 +358,7 @@ const code = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\{\/\*[\s\
   assert.deepEqual(store.list(ADDR).map((r) => r.txid), [third], "the unseen earlier versions are no longer kept");
   const hookCopy = memStore(clock);
   for (const r of recs) hookCopy.add(ADDR, r);
-  hookCopy.markConfirmed(ADDR, third, 970_200);
+  hookCopy.markConfirmed(ADDR, third, 970_296);
   if (keepsReplacedVersion(chain.kind)) for (const t of sendVersions(chain)) if (t !== third) hookCopy.forget(ADDR, t);
   assert.deepEqual(hookCopy.list(ADDR).map((r) => r.txid), [third], "the hook forgets them as soon as one version confirms");
   // The hook does so in onConfirmed.
@@ -372,7 +372,7 @@ const code = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\{\/\*[\s\
   const store2 = memStore(clock2);
   store2.add(ADDR, { txid: firstTxid, kind: "send", ticker: "LUCKY", inputs: built.inputs, ...transferRecordKeeps("send", { psbt: built.psbtHex, changeVout: 4 }) });
   store2.add(ADDR, { txid: TX("e"), kind: "send", ticker: "LUCKY", inputs: built.inputs, ...transferRecordKeeps("send", { psbt: null, changeVout: 4, replaces: [firstTxid] }) });
-  store2.markConfirmed(ADDR, firstTxid, 970_201);
+  store2.markConfirmed(ADDR, firstTxid, 970_297);
   assert.deepEqual(pendingSendsOf(store2.list(ADDR), "LUCKY"), [], "a faster version whose earlier version confirmed is not listed");
   // Two faster versions of one transfer (two tabs): one row, the newest.
   const store3 = memStore({ now: 6_000_000 });
@@ -444,7 +444,7 @@ const code = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\{\/\*[\s\
   store.add(ADDR, { txid: firstTxid, kind: "send", ticker: "LUCKY", inputs: built.inputs, ...transferRecordKeeps("send", { psbt: built.psbtHex, changeVout: 4 }) });
   store.add(ADDR, { txid: B, kind: "send", ticker: "LUCKY", inputs: built.inputs, ...transferRecordKeeps("send", { psbt: q.psbtHex, changeVout: 4, replaces: [firstTxid] }) });
   clock.now += 5 * 60_000;
-  await refreshTxRecords(ADDR, async (t) => (t === B ? { confirmed: true, seen: true, block_height: 970_000 } : { confirmed: false, seen: false }), { store, now: () => clock.now, tip: 969_999, trustUnseen: true });
+  await refreshTxRecords(ADDR, async (t) => (t === B ? { confirmed: true, seen: true, block_height: 970_096 } : { confirmed: false, seen: false }), { store, now: () => clock.now, tip: 970_095, trustUnseen: true });
   const records = store.list(ADDR);
   assert.deepEqual(pendingSendsOf(records, "LUCKY"), [], "no row waits: the faster version confirmed");
   assert.equal(transferFromRecord(records.find((r) => r.txid === B), ADDR), null, "and it is not followed as a waiting transfer");
@@ -459,7 +459,7 @@ const code = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\{\/\*[\s\
   // Its status check confirms B: the hook forgets every other version (as in onConfirmed).
   const hookCopy = memStore(clock);
   for (const r of records) hookCopy.add(ADDR, r);
-  hookCopy.markConfirmed(ADDR, B, 970_000);
+  hookCopy.markConfirmed(ADDR, B, 970_096);
   if (keepsReplacedVersion(moved.kind)) for (const t of sendVersions(moved)) if (t !== moved.txid) hookCopy.forget(ADDR, t);
   assert.deepEqual(hookCopy.list(ADDR).map((r) => r.txid), [B]);
   // A form that sped A up here too (A2), while the other tab's B confirmed: it moves to B, and names A2 among the others.

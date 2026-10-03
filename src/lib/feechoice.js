@@ -1,23 +1,33 @@
 // Fee-rate choice: presets from the indexer's /fees plus a custom rate.
 // Pure and window-free so test/wallet.test.js can exercise it in Node;
-// src/hooks/useFeeRate.js owns the localStorage side.
+// src/hooks/useFeeRate.js hands it the browser's localStorage.
 //
-// Stored form ('lp.feeChoice'): a preset id ("fast" | "normal" | "slow" |
+// Stored form ('lp.feeTier'): a preset id ("fast" | "normal" | "slow" |
 // "economy") or the custom rate as a decimal string ("27" or "1.25").
+// Only a choice the visitor makes is stored; until then the default applies.
 
 import { MAX_FEE_RATE_SAT_VB } from "./psbt.js";
 
-export const FEE_CHOICE_KEY = "lp.feeChoice";
+export const FEE_CHOICE_KEY = "lp.feeTier";
+// A retired key: never read, removed when found.
+export const RETIRED_FEE_CHOICE_KEY = "lp.feeChoice";
 export const MIN_FEE_RATE_SAT_VB = 1;
-export const DEFAULT_PRESET = "normal";
+// The recommended rate: Fast, normally the next block's live median fee
+// rate. A choice the visitor made is kept.
+export const DEFAULT_PRESET = "fast";
 
 export const FEE_PRESETS = [
-  // Fast aims at the next block or two (the node's estimator targets 2 blocks at best).
+  // Fast normally comes from the next block itself (`fastFromNextBlock` on
+  // the merged fees, src/lib/network.js) and then shows FAST_NEXT_BLOCK_ETA;
+  // this ETA is for the node's next-block estimate (2 blocks at best).
   { id: "fast", label: "Fast", key: "fastestFee", eta: "~10–20 min" },
   { id: "normal", label: "Normal", key: "halfHourFee", eta: "~30 min" },
   { id: "slow", label: "Slow", key: "hourFee", eta: "~1 h" },
   { id: "economy", label: "Economy", key: "economyFee", eta: "> 1 h" },
 ];
+
+/** Fast's ETA while it comes from the next block (its median, or a rate it has room at). */
+export const FAST_NEXT_BLOCK_ETA = "next block";
 
 const PRESET_IDS = new Set(FEE_PRESETS.map((p) => p.id));
 
@@ -81,8 +91,44 @@ export function serializeFeeChoice(choice) {
 }
 
 /**
+ * The visitor's stored choice from `storage` (a Storage, or null when there
+ * is none), else the default. Drops the retired key on the way. Never
+ * throws: blocked or failing storage reads as nothing stored.
+ */
+export function loadFeeChoice(storage) {
+  if (!storage) return parseFeeChoice(null);
+  try {
+    storage.removeItem(RETIRED_FEE_CHOICE_KEY);
+  } catch {
+    /* read-only storage: the retired key is ignored anyway */
+  }
+  try {
+    return parseFeeChoice(storage.getItem(FEE_CHOICE_KEY));
+  } catch {
+    return parseFeeChoice(null);
+  }
+}
+
+/**
+ * Store a choice the visitor just made. A custom choice without a usable
+ * rate (an empty or rejected entry) is not stored: the last choice made
+ * stays. Returns true when it was written. Never throws.
+ */
+export function saveFeeChoice(storage, choice) {
+  if (!storage || !choice) return false;
+  if (choice.kind === "custom" && !isUsableFeeRate(choice.value)) return false;
+  if (choice.kind !== "custom" && !(choice.kind === "preset" && isPresetId(choice.id))) return false;
+  try {
+    storage.setItem(FEE_CHOICE_KEY, serializeFeeChoice(choice));
+    return true;
+  } catch {
+    return false; // private mode / full storage: the choice just won't persist
+  }
+}
+
+/**
  * Why a preset has no usable rate: 'missing' (no /fees, or the key is
- * absent / malformed), 'over-cap' (the indexer's value exceeds the
+ * absent / malformed), 'over-cap' (the estimate exceeds the
  * MAX_FEE_RATE_SAT_VB safety cap — a wrong estimate is REJECTED, never
  * clamped to a number that still overpays), or null when it
  * resolves.
@@ -111,31 +157,58 @@ export function resolveFeeRate(choice, feesData) {
   return Number(feesData[preset.key]);
 }
 
+/** What the fee selector and the status lines say while fee rates are still on their way. */
+export const FEE_READING_TEXT = "Reading fee rates…";
+
 /**
  * Why there is no usable fee rate right now (for the idle status line),
  * or null when `satVb` is set. `action` completes the sentence ("mine").
+ * `reading`: no estimate yet, but a read that may bring one has not
+ * answered (useFeeRate's `reading`) — a preset then waits for it.
  */
-export function missingFeeHint(choice, satVb, action = "continue", { awaitingAck = false } = {}) {
+export function missingFeeHint(choice, satVb, action = "continue", { awaitingAck = false, reading = false } = {}) {
   if (Number.isFinite(satVb) && satVb >= MIN_FEE_RATE_SAT_VB) return null;
   if (choice && choice.kind === "custom" && awaitingAck) return `Confirm the high custom fee rate under "Fee rate" to ${action}.`;
   if (choice && choice.kind === "custom") return `Enter a custom fee rate (${MIN_FEE_RATE_SAT_VB}–${MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB) to ${action}.`;
+  if (reading) return FEE_READING_TEXT;
   return `No fee estimate from the indexer or mempool.space — choose Custom and enter a sat/vB to ${action}.`;
 }
 
-/** Preset rows for the selector: `{ id, label, eta, satVb | null, reason: null | 'missing' | 'over-cap' }`. */
+/**
+ * Preset rows for the selector: `{ id, label, eta, satVb | null, reason:
+ * null | 'missing' | 'over-cap', title }` — `title` is the preset's tooltip.
+ */
 export function presetRows(feesData) {
-  return FEE_PRESETS.map((p) => ({
-    id: p.id,
-    label: p.label,
-    eta: p.eta,
-    satVb: resolveFeeRate({ kind: "preset", id: p.id }, feesData),
-    reason: presetUnavailableReason(p.id, feesData),
-  }));
+  return FEE_PRESETS.map((p) => {
+    const satVb = resolveFeeRate({ kind: "preset", id: p.id }, feesData);
+    const reason = presetUnavailableReason(p.id, feesData);
+    const nextBlock = p.id === "fast" && satVb !== null && feesData.fastFromNextBlock === true;
+    const eta = nextBlock ? FAST_NEXT_BLOCK_ETA : p.eta;
+    return { id: p.id, label: p.label, eta, satVb, reason, title: presetTitle(p.label, satVb, eta, reason, nextBlock ? feesData : null) };
+  });
+}
+
+/**
+ * A preset's tooltip. `nextBlockOf` is the fees object when the rate comes
+ * from the next block: it is called the next block's median only when it
+ * is that median (`fastIsMedian`) — a median below the 1 sat/vB minimum is
+ * said, the rate then being the minimum — and otherwise a rate the next
+ * block has room at.
+ */
+function presetTitle(label, satVb, eta, reason, nextBlockOf) {
+  if (satVb === null) return `${label} — ${presetUnavailableText(reason) || "estimate unavailable"}`;
+  if (!nextBlockOf) return `${label} — ${satVb} sat/vB, ${eta}`;
+  if (nextBlockOf.fastIsMedian !== true) return `${label} — ${satVb} sat/vB, the next block has room at this rate`;
+  const m = nextBlockOf.nextBlockMedianFee;
+  if (Number.isFinite(m) && m < MIN_FEE_RATE_SAT_VB) {
+    return `${label} — ${satVb} sat/vB, the minimum: the next block's median fee rate is ${m} sat/vB right now`;
+  }
+  return `${label} — ${satVb} sat/vB, the next block's median fee rate right now`;
 }
 
 /** Short reason text for a preset without a rate (tooltip / note). */
 export function presetUnavailableText(reason) {
-  if (reason === "over-cap") return `estimate unavailable — the indexer's value is above the ${MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB safety cap and looks wrong`;
+  if (reason === "over-cap") return `estimate unavailable — the fee estimate is above the ${MAX_FEE_RATE_SAT_VB.toLocaleString("en-US")} sat/vB safety cap and looks wrong`;
   if (reason === "missing") return "estimate unavailable";
   return null;
 }
@@ -157,9 +230,7 @@ export function highFeeThreshold(feesData) {
 /**
  * Does this custom `value` need an explicit "use it anyway"? Only for a
  * usable rate above highFeeThreshold — presets never do (they are the
- * indexer's own estimates, rejected above the cap; a Fast raised to the
- * second source's rate is bounded where this confirmation would start,
- * see mergeFeeSources in network.js).
+ * fee estimates themselves, rejected above the cap).
  */
 export function needsHighFeeAck(value, feesData) {
   return isUsableFeeRate(value) && value > highFeeThreshold(feesData);

@@ -547,7 +547,7 @@ function StatusLine({ flow, waiting, spare, wallet, onReset, indexerOk, lagText,
     default: {
       const reason = mineIdleReason({ connected: wallet.status === "connected", indexerOk, preActivation, exhausted, lagText, ticker, deployBlock, deployTooNew });
       if (reason) text = reason;
-      else if (!feeRate) text = missingFeeHint(fee.choice, feeRate, "mine", { awaitingAck: !!fee.highFee?.pending });
+      else if (!feeRate) text = missingFeeHint(fee.choice, feeRate, "mine", { awaitingAck: !!fee.highFee?.pending, reading: fee.reading });
       else if (waiting) {
         led = "ok";
         text = waitingMineText(waiting, spare);

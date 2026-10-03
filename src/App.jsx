@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as indexer from "./lib/indexer.js";
 import { chainTipOf, syncStateOf, syncWarningText } from "./lib/sync.js";
-import { NETWORK_POLL_MS, confirmedNetworkLag, fetchNetworkFees, fetchNetworkTip, mergeFeeSources, networkLag } from "./lib/network.js";
+import {
+  INDEXER_FEES_WAIT_MS,
+  NETWORK_POLL_MS,
+  confirmedNetworkLag,
+  feesRereadAfterTip,
+  feesStillReading,
+  fetchNetworkFees,
+  fetchNetworkTip,
+  mergeFeeSources,
+  needNetworkFees,
+  networkLag,
+} from "./lib/network.js";
 import { setIndexedTip, setUnseenTrusted } from "./lib/txrecords.js";
 import { mockNetworkFees, mockNetworkTip } from "./lib/mock.js";
 import { usePoll } from "./hooks/usePoll.js";
@@ -110,21 +121,48 @@ export default function App() {
   const tokens = usePoll((s) => indexer.allTokens(s), 30_000, []);
   const tipHeight = chainTipOf(health.data);
   const feesPoll = usePoll((s) => indexer.fees(s), 30_000, [tipHeight]);
-  // The second source's recommended rates: the Fast tier follows it when it
-  // is higher, and it stands in when the indexer's node has no estimate —
-  // estimates the indexer marks `ok: false` are never used (network.js).
-  const netFees = usePoll(() => (MOCK ? mockNetworkFees() : fetchNetworkFees()), NETWORK_POLL_MS, []);
+  // A new tip re-reads /fees at once (above), which may still carry the
+  // previous block's median: the indexer reads the new next-block template
+  // about 12 s later. One more read follows FEES_REREAD_AFTER_TIP_MS
+  // after each tip change; a newer change or leaving the page drops it.
+  const refreshFees = feesPoll.refresh;
+  const feesTipRef = useRef(null);
+  useEffect(() => {
+    const delay = feesRereadAfterTip(feesTipRef.current, tipHeight);
+    feesTipRef.current = tipHeight;
+    if (delay === null) return undefined;
+    const id = setTimeout(refreshFees, delay);
+    return () => clearTimeout(id);
+  }, [tipHeight, refreshFees]);
+  // The second source's projected blocks stand in only while the indexer
+  // has no estimate to use (its read failed, or it answered without one:
+  // estimates it marks `ok: false` are never used), so they are read only
+  // then (network.js). A /fees that has not answered at all within
+  // INDEXER_FEES_WAIT_MS of the page load counts too, so a hanging indexer
+  // does not leave the page without a rate until its request times out.
+  const feesFirstPending = feesPoll.data === null && feesPoll.error == null;
+  const [feesWaitedOut, setFeesWaitedOut] = useState(false);
+  useEffect(() => {
+    if (!feesFirstPending) return undefined;
+    const id = setTimeout(() => setFeesWaitedOut(true), INDEXER_FEES_WAIT_MS);
+    return () => clearTimeout(id);
+  }, [feesFirstPending]);
+  const needNetFees = needNetworkFees(feesPoll, feesWaitedOut);
+  const netFees = usePoll(needNetFees ? () => (MOCK ? mockNetworkFees() : fetchNetworkFees()) : null, NETWORK_POLL_MS, [needNetFees]);
   const mergedFees = useMemo(
     () => mergeFeeSources(feesPoll.error ? null : feesPoll.data, netFees.error ? null : netFees.data),
     [feesPoll.data, feesPoll.error, netFees.data, netFees.error],
   );
   const hasFees = mergedFees.source !== null;
+  // No estimate yet, but a read that may bring one is outstanding: the fee
+  // selector says the rates are being read, not that there are none.
+  const feesReading = feesStillReading({ hasFees, feesPoll, needNet: needNetFees, netPoll: netFees });
   const fees = useMemo(
-    () => ({ ...feesPoll, data: feesPoll.data || hasFees ? mergedFees : null, error: hasFees ? null : feesPoll.error }),
-    [feesPoll, mergedFees, hasFees],
+    () => ({ ...feesPoll, data: feesPoll.data || hasFees ? mergedFees : null, error: hasFees ? null : feesPoll.error, reading: feesReading }),
+    [feesPoll, mergedFees, hasFees, feesReading],
   );
   // One fee choice (preset from /fees or custom sat/vB) for every builder.
-  const fee = useFeeRate(fees.error ? null : fees.data);
+  const fee = useFeeRate(fees.error ? null : fees.data, { reading: fees.reading });
   const tipBlock = usePoll(tipHeight ? (s) => indexer.blockInfo(tipHeight, s) : null, 0, [tipHeight]);
   // USD per BTC from /price — secondary and optional: null (or an error)
   // simply hides every USD sub-label; nothing else depends on it.

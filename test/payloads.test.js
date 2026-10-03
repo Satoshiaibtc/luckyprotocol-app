@@ -24,8 +24,8 @@ import {
 } from "../src/lib/payloads.js";
 
 assert.equal(PROTOCOL_ID, "lucky-20", "the value of every payload's p key");
-assert.equal(ACTIVATION_HEIGHT, 969_600, "activation height (must match the indexer)");
-assert.equal(PROTOCOL_LOCKTIME, 969_599, "every DEPLOY / MINE / SEND the app builds has nLockTime ACTIVATION_HEIGHT − 1");
+assert.equal(ACTIVATION_HEIGHT, 969_696, "activation height (must match the indexer)");
+assert.equal(PROTOCOL_LOCKTIME, 969_695, "every DEPLOY / MINE / SEND the app builds has nLockTime ACTIVATION_HEIGHT − 1");
 assert.equal(PROTOCOL_LOCKTIME, ACTIVATION_HEIGHT - 1);
 assert.equal(SEND_TO_VOUT, 1, "a SEND's AMT goes to vout1");
 assert.equal(SEND_RESIDUAL_VOUT, 2, "the rest of a SEND's pool goes to vout2");

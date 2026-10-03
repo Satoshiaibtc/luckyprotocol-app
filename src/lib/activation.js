@@ -3,9 +3,9 @@
 // test/journeys.test.js.
 //
 // Create and Mine unlock one block EARLY — at tip ACTIVATION_HEIGHT − 1
-// (969,599) — because every DEPLOY, MINE and SEND this app builds carries
-// nLockTime = PROTOCOL_LOCKTIME (969,599):
-// a node will not put such a transaction in any block below 969,600, so
+// (969,695) — because every DEPLOY, MINE and SEND this app builds carries
+// nLockTime = PROTOCOL_LOCKTIME (969,695):
+// a node will not put such a transaction in any block below 969,696, so
 // nothing sent through the app can confirm too early and be ignored. An
 // UNKNOWN tip still counts as locked (fail closed: a gate that cannot see
 // the tip must not open). This module puts that rule and its wording in
@@ -104,7 +104,7 @@ export function activationBannerText(tip) {
   );
 }
 
-/** Short idle hint for a locked action button ("Locked until block #969,599 (see above)."). */
+/** Short idle hint for a locked action button ("Locked until block #969,695 (see above)."). */
 export function lockedHint() {
   return `Locked until block ${at(UNLOCK_HEIGHT)} (see above).`;
 }

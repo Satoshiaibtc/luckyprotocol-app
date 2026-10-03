@@ -146,7 +146,7 @@ if (SPEC) {
   const served = SPEC;
   assert.deepEqual(specConstantMismatches(served, payloads), [], "the rulebook's §1 must match src/lib/payloads.js");
   const parsed = parseSpecConstants(served);
-  assert.equal(parsed.ACTIVATION_HEIGHT, 969_600);
+  assert.equal(parsed.ACTIVATION_HEIGHT, 969_696);
   assert.ok(!("SNAPSHOT_VERSION" in parsed), "the indexer's internal state-schema number is not a protocol constant and is not in the spec");
   // A stale copy is caught by the constant it changed.
   const stale = served.replace(/\| `SEND_PROTOCOL_FEE_SATS` \| [\d_]+ \|/, "| `SEND_PROTOCOL_FEE_SATS` | 600 |");

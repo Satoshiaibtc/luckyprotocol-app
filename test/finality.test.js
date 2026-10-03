@@ -22,18 +22,18 @@ import { DROP_GRACE_MS } from "../src/lib/txrecords.js";
 // ---- depth ------------------------------------------------------------------------------------------------
 {
   assert.equal(FINAL_DEPTH, 6);
-  assert.equal(confirmationsAt(969_700, 969_700), 1, "the tip block has 1 confirmation");
-  assert.equal(confirmationsAt(969_700, 969_705), 6);
-  assert.equal(confirmationsAt(969_701, 969_700), 0, "above the indexer's height: 0");
-  assert.equal(confirmationsAt(null, 969_700), null);
-  assert.equal(confirmationsAt(969_700, null), null);
-  assert.equal(isFinalAt(969_700, 969_704), false);
-  assert.equal(isFinalAt(969_700, 969_705), true);
-  assert.equal(isFinalAt(969_700, null), false, "unknown depth is never final");
-  assert.equal(isFinalAt(969_700, null, true), true, "…unless the indexer says final");
-  assert.equal(bestConfirmations(3, 969_700, 969_701), 3, "the server's count when the local tip is stale");
-  assert.equal(bestConfirmations(1, 969_700, 969_704), 5, "the local count when the server's answer is older");
-  assert.equal(bestConfirmations(null, 969_700, 969_700), 1);
+  assert.equal(confirmationsAt(969_796, 969_796), 1, "the tip block has 1 confirmation");
+  assert.equal(confirmationsAt(969_796, 969_801), 6);
+  assert.equal(confirmationsAt(969_797, 969_796), 0, "above the indexer's height: 0");
+  assert.equal(confirmationsAt(null, 969_796), null);
+  assert.equal(confirmationsAt(969_796, null), null);
+  assert.equal(isFinalAt(969_796, 969_800), false);
+  assert.equal(isFinalAt(969_796, 969_801), true);
+  assert.equal(isFinalAt(969_796, null), false, "unknown depth is never final");
+  assert.equal(isFinalAt(969_796, null, true), true, "…unless the indexer says final");
+  assert.equal(bestConfirmations(3, 969_796, 969_797), 3, "the server's count when the local tip is stale");
+  assert.equal(bestConfirmations(1, 969_796, 969_800), 5, "the local count when the server's answer is older");
+  assert.equal(bestConfirmations(null, 969_796, 969_796), 1);
   assert.equal(bestConfirmations(2, null, null), 2);
   assert.equal(bestConfirmations(null, null, null), null);
   assert.equal(confirmationsText(1), "1/6 confirmations");
@@ -48,10 +48,10 @@ import { DROP_GRACE_MS } from "../src/lib/txrecords.js";
 // ---- the market opens 6 confirmations after the completing block --------------------------------------------
 {
   assert.equal(MARKET_OPEN_DELAY, FINAL_DEPTH - 1);
-  const out = { ticker: "X", supply: 100, minted: 100, minted_out: true, minted_out_height: 969_800 };
-  assert.equal(marketOpensAt(out), 969_805, "at 969,805 the block 969,800 has 6 confirmations");
-  assert.equal(confirmationsAt(969_800, marketOpensAt(out)), FINAL_DEPTH);
-  assert.equal(marketOpensAt({ ...out, market_opens_at_height: 969_900 }), 969_900, "the indexer's own height wins");
+  const out = { ticker: "X", supply: 100, minted: 100, minted_out: true, minted_out_height: 969_896 };
+  assert.equal(marketOpensAt(out), 969_901, "at 969,901 the block 969,896 has 6 confirmations");
+  assert.equal(confirmationsAt(969_896, marketOpensAt(out)), FINAL_DEPTH);
+  assert.equal(marketOpensAt({ ...out, market_opens_at_height: 969_996 }), 969_996, "the indexer's own height wins");
   assert.equal(marketOpensAt({ ...out, minted: 5, minted_out: false }), null, "not minted out: no opening height");
   assert.equal(marketOpensAt({ ...out, minted_out_height: null }), null);
   console.log("finality market: minted_out_height + 5");
@@ -61,16 +61,16 @@ import { DROP_GRACE_MS } from "../src/lib/txrecords.js";
 {
   // The protocol only asks that a MINE land in a later block than the DEPLOY.
   assert.equal(MINE_MIN_DEPLOY_CONFIRMATIONS, 1);
-  assert.equal(deployDeepEnough(969_699, 969_700), false, "the DEPLOY's block is not applied yet: a MINE sent now could share its block");
-  assert.equal(deployDeepEnough(969_700, 969_700), true, "the DEPLOY is confirmed: a MINE sent now lands in a later block");
-  assert.equal(deployDeepEnough(969_701, 969_700), true);
-  assert.equal(deployDeepEnough(null, 969_700), false, "unknown tip fails closed");
-  assert.equal(deployDeepEnough(969_701, undefined), false);
-  const why = deployWaitText("NEW", 969_700);
-  assert.equal(why, "NEW was created in block #969,700. Mining opens once this page has reached block #969,700; the first MINE can confirm in block #969,701.");
+  assert.equal(deployDeepEnough(969_795, 969_796), false, "the DEPLOY's block is not applied yet: a MINE sent now could share its block");
+  assert.equal(deployDeepEnough(969_796, 969_796), true, "the DEPLOY is confirmed: a MINE sent now lands in a later block");
+  assert.equal(deployDeepEnough(969_797, 969_796), true);
+  assert.equal(deployDeepEnough(null, 969_796), false, "unknown tip fails closed");
+  assert.equal(deployDeepEnough(969_797, undefined), false);
+  const why = deployWaitText("NEW", 969_796);
+  assert.equal(why, "NEW was created in block #969,796. Mining opens once this page has reached block #969,796; the first MINE can confirm in block #969,797.");
   assert.match(deployWaitText("NEW", null), /^NEW was just created\. Mining opens once this page has caught up with its block/);
   const idle = { connected: true, indexerOk: true, preActivation: false, exhausted: false, lagText: null, ticker: "NEW" };
-  assert.equal(mineIdleReason({ ...idle, deployBlock: 969_700, deployTooNew: true }), why);
+  assert.equal(mineIdleReason({ ...idle, deployBlock: 969_796, deployTooNew: true }), why);
   assert.equal(mineIdleReason({ ...idle, exhausted: true, deployTooNew: true }).startsWith("NEW is fully minted"), true, "exhausted says more");
   assert.equal(mineIdleReason({ ...idle }), null);
   console.log("finality deploy gate: MINE opens at the DEPLOY's 1st confirmation, said plainly");
@@ -78,7 +78,7 @@ import { DROP_GRACE_MS } from "../src/lib/txrecords.js";
 
 // ---- near the end of the supply: queued MINEs may use up the rest ---------------------------------------------
 {
-  const tip = 970_100;
+  const tip = 970_196;
   const mine = (h, y, extra = {}) => ({ block_height: h, yield_smallest: y, status: "settled", cap_exhausted: false, ...extra });
   // 6 blocks, 3 × 1,000 + 1 × 500 per block → 3,500 per block
   const rows = [];
@@ -123,22 +123,22 @@ import { DROP_GRACE_MS } from "../src/lib/txrecords.js";
     if (r.reorg) reorgs.push(r.reorg);
     return r;
   };
-  let r = run({ confirmed: false, seen: true }, { now: 2_000, tip: 969_699 });
+  let r = run({ confirmed: false, seen: true }, { now: 2_000, tip: 969_795 });
   assert.deepEqual([r.next, fired.length], [15_000, 0], "pending: asked every intervalMs");
-  r = run(conf(A, 969_700), { now: 3_000, tip: 969_700 });
+  r = run(conf(A, 969_796), { now: 3_000, tip: 969_796 });
   assert.deepEqual([fired, r.next, r.set.confirmed, r.set.block_hash], [[A], CONFIRMED_POLL_MS, true, A], "confirmed: onConfirmed fires; checked until final");
-  run(conf(A, 969_700), { now: 4_000, tip: 969_701 });
+  run(conf(A, 969_796), { now: 4_000, tip: 969_797 });
   assert.equal(fired.length, 1, "the same confirmation is reported once");
-  r = run({ confirmed: false, seen: true }, { now: 5_000, tip: 969_701 });
+  r = run({ confirmed: false, seen: true }, { now: 5_000, tip: 969_797 });
   assert.deepEqual([reorgs, r.set.confirmed, r.set.backInMempool, r.set.reorged, r.next], [["mempool"], false, true, true, 15_000], "back in the mempool: a reorganization, pending again");
-  r = run(conf(B, 969_702), { now: 6_000, tip: 969_702 });
+  r = run(conf(B, 969_798), { now: 6_000, tip: 969_798 });
   assert.deepEqual(fired, [A, B], "confirmed again: onConfirmed fires again (the flow leaves 'pending', the reservation gets its height back)");
-  r = run(conf(C, 969_702), { now: 7_000, tip: 969_702 });
+  r = run(conf(C, 969_798), { now: 7_000, tip: 969_798 });
   assert.deepEqual([fired.length, reorgs, r.set.reorged], [2, ["mempool", "block"], true], "moved to another block: a reorganization, not a new confirmation");
-  r = run(conf(C, 969_702), { now: 8_000, tip: 969_707 });
+  r = run(conf(C, 969_798), { now: 8_000, tip: 969_803 });
   assert.equal(r.next, 0, "6 confirmations: the watch stops");
   // a new watch (the caller tracks the same txid again) reports its first confirmation again
-  const again = txWatchStep(newTxWatch(null, 9_000), conf(C, 969_702), { now: 9_000, tip: 969_703 });
+  const again = txWatchStep(newTxWatch(null, 9_000), conf(C, 969_798), { now: 9_000, tip: 969_799 });
   assert.equal(again.confirmed, true);
   console.log("finality watch: onConfirmed on every confirmation after a return to the mempool; a move to another block is a reorganization");
 }
@@ -147,14 +147,14 @@ import { DROP_GRACE_MS } from "../src/lib/txrecords.js";
 {
   const A = "a".repeat(64);
   const unknown = { confirmed: false, seen: false };
-  const w = txWatchStep(newTxWatch(0, 0), { confirmed: true, seen: true, block_hash: A, block_height: 969_800 }, { now: 1, tip: 969_800 }).watch;
-  let r = txWatchStep(w, unknown, { now: 2, tip: 969_803 });
+  const w = txWatchStep(newTxWatch(0, 0), { confirmed: true, seen: true, block_hash: A, block_height: 969_896 }, { now: 1, tip: 969_896 }).watch;
+  let r = txWatchStep(w, unknown, { now: 2, tip: 969_899 });
   assert.deepEqual([r.next, r.set.confirmed, r.reorg], [CONFIRMED_POLL_MS, undefined, null], "not final yet: the last answer is kept and asked again");
-  r = txWatchStep(w, unknown, { now: 3, tip: 969_805 });
+  r = txWatchStep(w, unknown, { now: 3, tip: 969_901 });
   assert.equal(r.next, 0, "final by the app's tip: the watch stops (the page shows 'final' now)");
-  assert.equal(txWatchErrorDelay(w, { tip: 969_805 }), 0, "a failed read stops too once final");
-  assert.equal(txWatchErrorDelay(w, { tip: 969_801 }), CONFIRMED_POLL_MS);
-  const counted = txWatchStep(newTxWatch(0, 0), { confirmed: true, seen: true, block_hash: A, block_height: 969_800, confirmations: 6 }, { now: 1, tip: null }).watch;
+  assert.equal(txWatchErrorDelay(w, { tip: 969_901 }), 0, "a failed read stops too once final");
+  assert.equal(txWatchErrorDelay(w, { tip: 969_897 }), CONFIRMED_POLL_MS);
+  const counted = txWatchStep(newTxWatch(0, 0), { confirmed: true, seen: true, block_hash: A, block_height: 969_896, confirmations: 6 }, { now: 1, tip: null }).watch;
   assert.equal(txWatchStep(counted, unknown, { now: 2, tip: null }).next, 0, "the server's own count counts");
   console.log("finality watch: an unknown answer after a confirmation is re-asked only until final");
 }

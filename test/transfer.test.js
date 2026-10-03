@@ -14,10 +14,10 @@ import { smallCarrierText } from "../src/lib/listingRules.js";
 import { syncWarningText } from "../src/lib/sync.js";
 
 const S = 21_000_000;
-const token = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted_out: minted >= S, minted_out_height: minted >= S ? 970_090 : null, market_open: minted >= S, ...extra });
+const token = (ticker, minted, extra = {}) => ({ ticker, supply: S, minted, minted_out: minted >= S, minted_out_height: minted >= S ? 970_186 : null, market_open: minted >= S, ...extra });
 const closed = token("LUCKY", 1_234_567);
 const opened = token("BLOK", S);
-const pending = token("DUNE", S, { minted_out_height: 970_098, market_open: false, market_opens_at_height: 970_103 });
+const pending = token("DUNE", S, { minted_out_height: 970_194, market_open: false, market_opens_at_height: 970_199 });
 
 // ---- the tab list per token state --------------------------------------------------------------
 {

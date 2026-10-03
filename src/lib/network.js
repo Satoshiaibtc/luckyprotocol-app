@@ -1,33 +1,37 @@
 // A second view of the Bitcoin network, next to the indexer's own node:
-// the chain tip and the fee estimates of the second source (mempool.space,
-// the same one the buyer-side outpoint check reads — src/lib/secondSource.js).
+// the chain tip and the projected next blocks of the second source
+// (mempool.space, the same one the buyer-side outpoint check reads —
+// src/lib/secondSource.js).
 //
 // Why: the indexer knows only what its one node knows. A node that lost
 // its peers, fell behind or was fed an old chain still reports "synced" to
-// itself; its fee estimator lags a sudden rush and has nothing at all after
-// a restart. Comparing with an independent tip catches the first, and
-// taking the higher fast estimate softens the second.
+// itself, and it may have no fee estimate at all (right after a restart).
+// Comparing with an independent tip catches the first; the second
+// source's projected blocks stand in for the second.
 //
 // Privacy: the two URLs carry no user data at all (no address, no txid),
-// no credentials and no body. Every visitor's browser reads them, each
-// every NETWORK_POLL_MS (2 minutes), on every page — so mempool.space sees
-// each visitor's IP address, not only the buyers'.
-// Pure parts (`networkLag`, `mergeFeeSources`) are unit-tested in
-// test/network.test.js; the fetchers take an injectable fetch.
+// no credentials and no body. Every visitor's browser reads the tip every
+// NETWORK_POLL_MS (2 minutes), on every page — so mempool.space sees each
+// visitor's IP address, not only the buyers'. The projected blocks are
+// read on the same schedule, but only while the indexer has no estimate
+// to use (see needNetworkFees).
+// Pure parts (`networkLag`, `networkFeesFromBlocks`, `needNetworkFees`,
+// `feesStillReading`, `feesRereadAfterTip`, `mergeFeeSources`) are
+// unit-tested in test/network.test.js; the fetchers take an injectable
+// fetch.
 
 import { SECOND_SOURCE_NAME, SECOND_SOURCE_ORIGIN, SECOND_SOURCE_TIMEOUT_MS } from "./secondSource.js";
-import { HIGH_FEE_FASTEST_MULTIPLE, HIGH_FEE_MIN_SAT_VB } from "./feechoice.js";
 
 export const NETWORK_TIP_URL = `${SECOND_SOURCE_ORIGIN}/api/blocks/tip/height`;
-export const NETWORK_FEES_URL = `${SECOND_SOURCE_ORIGIN}/api/v1/fees/recommended`;
-/** How often the app asks the second source (tip and fees each). */
+export const NETWORK_FEES_URL = `${SECOND_SOURCE_ORIGIN}/api/v1/fees/mempool-blocks`;
+/** How often the app asks the second source (tip and, when needed, fees). */
 export const NETWORK_POLL_MS = 120_000;
 /** Our node counts as behind the network when the second source's tip is at least this many blocks higher… */
 export const NETWORK_LAG_BLOCKS = 2;
 /** …on two reads at least this far apart (one read can race a new block). */
 export const NETWORK_LAG_CONFIRM_MS = 90_000;
 
-const FEE_KEYS = ["fastestFee", "halfHourFee", "hourFee", "economyFee", "minimumFee"];
+const TIER_KEYS = ["fastestFee", "halfHourFee", "hourFee", "economyFee"];
 
 async function getJson(url, { fetchImpl, timeoutMs = SECOND_SOURCE_TIMEOUT_MS } = {}) {
   const f = fetchImpl || (typeof fetch === "function" ? fetch : null);
@@ -53,25 +57,59 @@ export async function fetchNetworkTip(opts = {}) {
 }
 
 /**
- * The second source's recommended rates `{ fastestFee, halfHourFee,
- * hourFee, economyFee, minimumFee }` (sat/vB), or null when it cannot be
- * read. A malformed or absurd value is null.
+ * The second source's fee tiers, from its projected next blocks (see
+ * networkFeesFromBlocks), or null when they cannot be read.
  */
 export async function fetchNetworkFees(opts = {}) {
   const v = await getJson(NETWORK_FEES_URL, opts);
-  return sanitizeNetworkFees(v);
+  return networkFeesFromBlocks(v);
 }
 
-export function sanitizeNetworkFees(v) {
-  if (!v || typeof v !== "object") return null;
-  const out = {};
-  let any = false;
-  for (const k of FEE_KEYS) {
-    const n = Number(v[k]);
-    out[k] = Number.isFinite(n) && n >= 1 && n <= 1_000_000 ? n : null;
-    if (out[k] !== null) any = true;
-  }
-  return any ? out : null;
+/**
+ * A block's `medianFee` (sat/vB) when it is a sane JSON number ≥ 0, else
+ * null. 0 is a real median (the middle of the block pays nothing per vB);
+ * the tiers built from it still floor at 1.
+ */
+function blockMedian(block) {
+  const n = block && typeof block === "object" ? block.medianFee : undefined;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1_000_000 ? n : null;
+}
+
+/** Rounded up to hundredths, like the indexer's /fees (binary noise at an exact hundredth ignored). */
+function upToHundredths(v) {
+  const h = v * 100;
+  return Math.ceil(h - h * Number.EPSILON * 2) / 100;
+}
+
+/**
+ * The second source's projected blocks (`GET /api/v1/fees/mempool-blocks`:
+ * an array of `{ medianFee, … }`, the next block first) → tiers in the
+ * shape of the indexer's /fees, or null when there is no usable next block:
+ *
+ *   fastestFee  = the next block's median fee rate
+ *   halfHourFee = the second block's (Fast's when there is none)
+ *   hourFee     = the third block's (Normal's when there is none)
+ *   economyFee  = the last block's, else 1
+ *
+ * each rounded up to hundredths with a 1 sat/vB floor and never above the
+ * tier before it; minimumFee 1. `nextBlockMedianFee` is the next block's
+ * median itself, rounded up to hundredths (it may be below 1, or 0).
+ */
+export function networkFeesFromBlocks(v) {
+  if (!Array.isArray(v) || v.length === 0) return null;
+  const next = blockMedian(v[0]);
+  if (next === null) return null;
+  const tier = (m) => Math.max(1, upToHundredths(m));
+  const after = (i, prev) => {
+    const m = blockMedian(v[i]);
+    return m === null ? prev : Math.min(prev, tier(m));
+  };
+  const fastestFee = tier(next);
+  const halfHourFee = after(1, fastestFee);
+  const hourFee = after(2, halfHourFee);
+  const last = blockMedian(v[v.length - 1]);
+  const economyFee = Math.min(hourFee, last === null ? 1 : tier(last));
+  return { fastestFee, halfHourFee, hourFee, economyFee, minimumFee: 1, nextBlockMedianFee: upToHundredths(next) };
 }
 
 /**
@@ -99,75 +137,116 @@ export function confirmedNetworkLag(tracker, tip, now) {
   return n >= NETWORK_LAG_BLOCKS ? n : 0;
 }
 
+/** True when `fees` (sanitized /fees, or second-source tiers) carries at least one tier. */
+export function hasFeeEstimate(fees) {
+  return !!fees && TIER_KEYS.some((k) => Number.isFinite(fees[k]));
+}
+
+/** How long the indexer's first `/fees` answer may take before the second source is read meanwhile. */
+export const INDEXER_FEES_WAIT_MS = 10_000;
+
+/**
+ * Should the second source's projected blocks be read? `poll` is the
+ * indexer's `/fees` poll (`{ data, error, loading }`, src/hooks/usePoll.js):
+ * yes while its last read failed (its older answer is not used then either)
+ * or it answered without an estimate, and while its first answer is still
+ * outstanding once `waitedOut` (INDEXER_FEES_WAIT_MS passed). A re-read
+ * (a new tip) keeps the last answer or error, so this does not flip back
+ * while it runs and the stand-in does not blank out.
+ */
+export function needNetworkFees(poll, waitedOut = false) {
+  if (!poll || poll.error != null) return true;
+  if (poll.data == null) return !poll.loading || waitedOut === true;
+  return !hasFeeEstimate(poll.data);
+}
+
+/**
+ * Are fee rates still on their way? True while no estimate is in hand
+ * (`hasFees` false) and a read that may bring one has not answered yet:
+ * the indexer's first `/fees`, or the second source's projected blocks
+ * while they are needed (`needNet`, see needNetworkFees). `feesPoll` and
+ * `netPoll` are usePoll states; any answer, failed or empty, sets their
+ * `updatedAt`. The fee selector then says the rates are being read rather
+ * than that there are none.
+ */
+export function feesStillReading({ hasFees, feesPoll, needNet, netPoll }) {
+  if (hasFees) return false;
+  const unanswered = (p) => !!p && p.updatedAt == null && p.error == null;
+  return unanswered(feesPoll) || (needNet === true && unanswered(netPoll));
+}
+
+/**
+ * How long after a new chain tip `/fees` is read once more. The indexer
+ * re-reads its node's next-block template about 12 s after each new block,
+ * so the read the tip change itself triggers may still carry the previous
+ * block's median; this one carries the new one.
+ */
+export const FEES_REREAD_AFTER_TIP_MS = 15_000;
+
+/**
+ * Delay (ms) for that extra `/fees` read when the tip went from `prevTip`
+ * to `tip`, or null for none: only for a change between two known tips
+ * (the first tip the page learns is read with the page itself).
+ */
+export function feesRereadAfterTip(prevTip, tip) {
+  const known = (h) => Number.isSafeInteger(h) && h > 0;
+  if (!known(prevTip) || !known(tip) || prevTip === tip) return null;
+  return FEES_REREAD_AFTER_TIP_MS;
+}
+
+/**
+ * Is `fastestFee` the next block's median `median` (sat/vB, before the
+ * floor)? Both sources derive it as max(1, the median rounded up to
+ * hundredths); compared in whole hundredths.
+ */
+function isNextBlockMedian(fastestFee, median) {
+  if (!Number.isFinite(fastestFee) || !Number.isFinite(median) || median < 0) return false;
+  return Math.round(fastestFee * 100) === Math.round(Math.max(1, upToHundredths(median)) * 100);
+}
+
 /**
  * The fee estimates every builder uses, from the indexer's `/fees`
  * (already sanitized: tiers are null when it could not estimate, `ok:
- * false`) and the second source's recommended rates (or null):
+ * false`) and the second source's projected-block tiers (or null):
  *
- *   - the indexer answered: its tiers, with the FAST tier raised to the
- *     second source's when that is higher (a sudden rush shows there
- *     first; the node's estimator only learns from blocks already mined) —
- *     but never above max(HIGH_FEE_MIN_SAT_VB, HIGH_FEE_FASTEST_MULTIPLE ×
- *     the indexer's own fast estimate): a faulty second source (or anything
- *     in front of it) must not make every Fast payment overpay silently.
- *     That bound is where a custom rate starts asking for a confirmation;
- *     a higher rate stays possible through Custom, confirmed;
- *   - the indexer has no estimates: the second source's tiers, said so;
+ *   - the indexer answered: its tiers, as they are. Its Fast comes from
+ *     the node's next block (`fastSource: "template"`) — the block's median
+ *     fee rate, or a lower rate the block still has room at — or is the
+ *     node's next-block estimate when it cannot build one ("estimate");
+ *   - the indexer has no estimates: the second source's tiers, said so —
+ *     their Fast is the median of its projected next block;
  *   - neither: every tier null — the page says so and only Custom works.
  *
  * → the fees object plus `source` ("indexer" | "second" | null),
- * `fastFrom` ("indexer" | "second" | null, where the fast tier came from)
- * and `fastCapped` (the second source's fast rate was above the bound).
- * `incrementalrelayfee` is always the indexer's.
+ * `fastFromNextBlock` (Fast comes from the next block), `fastIsMedian`
+ * (Fast is that block's median fee rate right now: it equals max(1,
+ * `nextBlockMedianFee`)) and `nextBlockMedianFee` (that median before the
+ * 1 sat/vB floor, or null). `incrementalrelayfee` is always the indexer's.
  */
 export function mergeFeeSources(indexerFees, networkFees) {
   const own = indexerFees || null;
   const ext = networkFees || null;
-  const has = (f) => !!f && FEE_KEYS.slice(0, 4).some((k) => Number.isFinite(f[k]) && f[k] !== null);
   const base = { incrementalrelayfee: own?.incrementalrelayfee ?? null, ok: own ? own.ok !== false : false };
-  if (has(own)) {
-    const mine = Number.isFinite(own.fastestFee) ? own.fastestFee : null;
-    const ref = mine ?? (Number.isFinite(own.halfHourFee) ? own.halfHourFee : 0);
-    const cap = Math.max(HIGH_FEE_MIN_SAT_VB, ref * HIGH_FEE_FASTEST_MULTIPLE);
-    const quoted = ext && Number.isFinite(ext.fastestFee) ? ext.fastestFee : null;
-    const theirs = quoted !== null ? Math.min(quoted, cap) : null;
-    const raise = theirs !== null && (mine === null || theirs > mine);
-    return {
-      ...base,
-      fastestFee: raise ? theirs : mine,
-      halfHourFee: own.halfHourFee ?? null,
-      hourFee: own.hourFee ?? null,
-      economyFee: own.economyFee ?? null,
-      minimumFee: own.minimumFee ?? null,
-      source: "indexer",
-      fastFrom: raise ? "second" : mine === null ? null : "indexer",
-      // the second source quoted more than the bound: Fast stops there
-      fastCapped: raise && quoted > theirs,
-    };
-  }
-  if (has(ext)) {
-    return {
-      ...base,
-      fastestFee: ext.fastestFee ?? null,
-      halfHourFee: ext.halfHourFee ?? null,
-      hourFee: ext.hourFee ?? null,
-      economyFee: ext.economyFee ?? null,
-      minimumFee: ext.minimumFee ?? null,
-      source: "second",
-      fastFrom: ext.fastestFee != null ? "second" : null,
-      fastCapped: false,
-    };
-  }
-  return { ...base, fastestFee: null, halfHourFee: null, hourFee: null, economyFee: null, minimumFee: null, source: null, fastFrom: null, fastCapped: false };
+  const tiers = (f) => ({
+    fastestFee: f.fastestFee ?? null,
+    halfHourFee: f.halfHourFee ?? null,
+    hourFee: f.hourFee ?? null,
+    economyFee: f.economyFee ?? null,
+    minimumFee: f.minimumFee ?? null,
+  });
+  const nextBlock = (f, fromNextBlock) => {
+    const on = fromNextBlock && Number.isFinite(f.fastestFee);
+    const m = on && Number.isFinite(f.nextBlockMedianFee) ? f.nextBlockMedianFee : null;
+    return { fastFromNextBlock: on, fastIsMedian: on && isNextBlockMedian(f.fastestFee, m), nextBlockMedianFee: m };
+  };
+  if (hasFeeEstimate(own)) return { ...base, ...tiers(own), source: "indexer", ...nextBlock(own, own.fastSource === "template") };
+  if (hasFeeEstimate(ext)) return { ...base, ...tiers(ext), source: "second", ...nextBlock(ext, true) };
+  return { ...base, fastestFee: null, halfHourFee: null, hourFee: null, economyFee: null, minimumFee: null, source: null, fastFromNextBlock: false, fastIsMedian: false, nextBlockMedianFee: null };
 }
 
 /** One line for the fee selector about where the estimates came from, or null for the plain case. */
 export function feeSourceNote(fees) {
   if (!fees) return null;
   if (fees.source === "second") return `The indexer's node has no fee estimate right now — these are ${SECOND_SOURCE_NAME}'s.`;
-  if (fees.source === "indexer" && fees.fastFrom === "second" && fees.fastCapped) {
-    return `Fast follows ${SECOND_SOURCE_NAME}, which currently estimates much higher than the indexer's node — up to ${fees.fastestFee} sat/vB; pick Custom for more.`;
-  }
-  if (fees.source === "indexer" && fees.fastFrom === "second") return `Fast follows ${SECOND_SOURCE_NAME}, which currently estimates higher than the indexer's node.`;
   return null;
 }

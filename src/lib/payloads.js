@@ -32,7 +32,7 @@
 
 /** The value of the `p` key of every payload (§1 PROTOCOL_ID): the wire id of LUCKY-20. */
 export const PROTOCOL_ID = "lucky-20";
-export const ACTIVATION_HEIGHT = 969_600;          // spec §1; protocol txs below this height are ignored
+export const ACTIVATION_HEIGHT = 969_696;          // spec §1; protocol txs below this height are ignored
 export const REQUIRED_TOKEN_SUPPLY = 21_000_000;   // implicit on every DEPLOY
 export const DUST_SATS = 546;                      // token-carrier output value
 export const PROJECT_FEE_ADDRESS =
@@ -57,7 +57,7 @@ export const AMT_RE = /^[1-9][0-9]{0,7}$/;
  * nLockTime of every DEPLOY, MINE and SEND this app builds:
  * ACTIVATION_HEIGHT − 1, so such a transaction can only confirm in block
  * ACTIVATION_HEIGHT or later. That is what lets the Create and Mine gates
- * open one block early (at tip 969,599) with no risk of an ignored,
+ * open one block early (at tip 969,695) with no risk of an ignored,
  * pre-activation confirmation. Not a consensus constant: the indexer
  * ignores nLockTime; it is the app's own safety net. (A listing and its
  * fill keep nLockTime 0 — the seller's SINGLE|ANYONECANPAY signature

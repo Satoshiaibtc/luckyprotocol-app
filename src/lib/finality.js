@@ -95,7 +95,7 @@ export function marketOpensAt(t) {
   return Number.isInteger(t.minted_out_height) ? t.minted_out_height + MARKET_OPEN_DELAY : null;
 }
 
-/** "Minted out — the market opens at block #970,112." (or without the height when unknown). */
+/** "Minted out — the market opens at block #970,208." (or without the height when unknown). */
 export function marketPendingText(t) {
   const at = marketOpensAt(t);
   const ticker = t?.ticker ? `${t.ticker} is minted out` : "Minted out";

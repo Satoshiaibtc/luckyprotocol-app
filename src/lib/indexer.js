@@ -36,7 +36,7 @@
 //   GET  /block-info/:height        blockInfo
 //   GET  /digits?limit&before       digits            (last hex digit of every held block hash)
 //   GET  /digits?days               digitsByDays      (the same, over the last N days by header time)
-//   GET  /fees                      fees              (+ incrementalrelayfee)
+//   GET  /fees                      fees              (+ incrementalrelayfee, fastSource, nextBlockMedianFee)
 //   POST /broadcast                 broadcast         (text/plain raw hex)
 //   POST /orders                    postOrder         (JSON, §7.4)
 //   GET  /orders?ticker&status…     orders            (psbt omitted; status open|filling|all…)
@@ -689,7 +689,21 @@ function _sanitizeFees(f) {
     // The node's BIP125 increment (sat/vB), used by the cancel fee rule;
     // null when the indexer does not report it (the rule then assumes 1).
     incrementalrelayfee: _safeFloat(f && f.incrementalrelayfee, 1_000_000),
+    // Where fastestFee came from: "template" = the node's next block (its
+    // median fee rate, or a lower rate it still has room at), "estimate" =
+    // the node's next-block estimate (no template to read); null when the
+    // indexer does not say.
+    fastSource: ok && f && (f.fastSource === "template" || f.fastSource === "estimate") ? f.fastSource : null,
+    // The next block's median fee rate before the 1 sat/vB floor (it may
+    // be below 1, or 0), or null.
+    nextBlockMedianFee: ok ? _medianFee(f && f.nextBlockMedianFee) : null,
   };
+}
+
+// A fee-rate median is a JSON number ≥ 0: 0 is a real median (the middle
+// of the block pays nothing per vB), not a missing one.
+function _medianFee(v) {
+  return typeof v === "number" ? _safeFloat(v, 1_000_000) : null;
 }
 
 function _pageQuery(opts = {}) {
@@ -1243,7 +1257,11 @@ export async function digitsByDays(days = DAYS_DEFAULT, signal) {
   return _sanitizeDigitsByDays(env);
 }
 
-/** GET /fees → `{ fastestFee, halfHourFee, hourFee, economyFee, minimumFee }` sat/vB */
+/**
+ * GET /fees → `{ fastestFee, halfHourFee, hourFee, economyFee, minimumFee }`
+ * sat/vB plus `ok`, `incrementalrelayfee`, `fastSource` and
+ * `nextBlockMedianFee` (see _sanitizeFees)
+ */
 export async function fees(signal) {
   return _sanitizeFees(await _httpGet("/fees", signal));
 }

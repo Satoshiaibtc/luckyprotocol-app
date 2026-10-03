@@ -64,7 +64,7 @@ export default function CreatePage({ params, navigate }) {
   const { wallet: walletState, address, pubkeyHex, fees, indexerOk, sync, tipBlock, refreshAll, chainTip } = useApp();
   const connected = walletState.status === "connected";
   const providerName = walletState.providerName;
-  // Creating is locked below UNLOCK_HEIGHT (969,599); an UNKNOWN tip counts
+  // Creating is locked below UNLOCK_HEIGHT (969,695); an UNKNOWN tip counts
   // as locked — the gate fails closed. The app's lock time keeps anything
   // sent from confirming before ACTIVATION_HEIGHT.
   const tipNow = chainTip;
@@ -76,7 +76,7 @@ export default function CreatePage({ params, navigate }) {
   // The DEPLOY pays its own fee choice, "fast" by default: while it waits in
   // the mempool its ticker is public. Not persisted — every other builder
   // keeps the user's usual choice.
-  const createFee = useFeeRate(fees.error ? null : fees.data, { preset: "fast", persist: false });
+  const createFee = useFeeRate(fees.error ? null : fees.data, { preset: "fast", persist: false, reading: fees.reading });
   const rate = createFee.satVb;
 
   // `params.ticker` seeds the field; App keys this page on it.
@@ -948,7 +948,7 @@ function FlowStatus({ cr, flow, tipNow, providerName, fees, indexed, idle, rival
     default: {
       const reason = idleReason(idle);
       if (reason) text = reason;
-      else if (!idle.rate) text = missingFeeHint(idle.fee.choice, idle.rate, "deploy", { awaitingAck: !!idle.fee.highFee?.pending });
+      else if (!idle.rate) text = missingFeeHint(idle.fee.choice, idle.rate, "deploy", { awaitingAck: !!idle.fee.highFee?.pending, reading: idle.fee.reading });
       else text = readyText(idle.assetSafe, "Create");
     }
   }

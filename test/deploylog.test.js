@@ -78,9 +78,9 @@ const keep = (l) => {
   assert.equal(w.text, "wallet connected  bc1p…62s (UniSat)");
   const f = keep(feeQuoteLine({ fastestFee: 2.38, halfHourFee: 1.5, hourFee: 1.25, economyFee: 1.02 }, T0));
   assert.equal(f.text, "fee quote  fast 2.38 · normal 1.5 · slow 1.25 · economy 1.02 sat/vB");
-  const t = keep(tipLine({ height: 970_101, hash: HASH }, "deploy", null, T0));
-  assert.equal(t.text, "tip #970,101", "no token info on the create page → no minted %");
-  assert.equal(t.key, "tip:deploy:970101");
+  const t = keep(tipLine({ height: 970_197, hash: HASH }, "deploy", null, T0));
+  assert.equal(t.text, "tip #970,197", "no token info on the create page → no minted %");
+  assert.equal(t.key, "tip:deploy:970197");
   const s = keep(signLine("UniSat", T0, T0));
   assert.equal(s.text, "sign  waiting for UniSat…");
   assert.equal(s.key, `phase:signing:${T0}`, "keyed by the attempt");
@@ -89,8 +89,8 @@ const keep = (l) => {
   assert.equal(b.text, "signed · broadcasting…");
   const a = keep(acceptedLine(TXID, T0));
   assert.equal(a.text, "broadcast accepted by node  txid a3f9c…21e");
-  const bl = keep(blockFoundLine({ height: 970_102, hash: HASH, tx_count: 3412, weight: 3_996_000 }, { at: T0 }));
-  assert.equal(bl.text, `block 970,102 found  hash ${HASH}  txs 3,412  weight 99.9%`);
+  const bl = keep(blockFoundLine({ height: 970_198, hash: HASH, tx_count: 3412, weight: 3_996_000 }, { at: T0 }));
+  assert.equal(bl.text, `block 970,198 found  hash ${HASH}  txs 3,412  weight 99.9%`);
   assert.equal(bl.lit, false, "a deploy never lights a digit");
   assert.equal(bl.tier, null);
   const e = keep(errorLine("Signature request was cancelled in the wallet.", T0, T0));
@@ -110,31 +110,31 @@ const keep = (l) => {
   assert.equal(deployBuildLine({ txid: TXID }, "NEW", T0).key, `dphase:build:${TXID}`, "falls back to the txid, then the second");
   assert.equal(deployBuildLine({}, "NEW", T0).key, `dphase:build:${Math.floor(T0 / 1000)}`);
 
-  const m = keep(deployMempoolLine("NEW", 970_102, TXID, T0));
+  const m = keep(deployMempoolLine("NEW", 970_198, TXID, T0));
   assert.equal(m.kind, "act");
-  assert.equal(m.text, "mempool  DEPLOY NEW awaiting block #970,102");
+  assert.equal(m.text, "mempool  DEPLOY NEW awaiting block #970,198");
   assert.equal(m.key, `dmempool:${TXID}`);
   assert.equal(deployMempoolLine("NEW", null, TXID, T0).text, "mempool  DEPLOY NEW awaiting block", "null next height → no '#—'");
 
-  const hb = keep(deployHeartbeatLine(970_102, 256_000, T0));
+  const hb = keep(deployHeartbeatLine(970_198, 256_000, T0));
   assert.equal(hb.kind, "sys");
-  assert.equal(hb.text, "awaiting block #970,102  ·  4:16 since last block", "no digit count on a deploy heartbeat");
-  assert.equal(hb.key, `hb:970102:${Math.floor(T0 / 60_000)}`);
-  assert.equal(deployHeartbeatLine(970_102, 256_000, T0 + 30_000).key, hb.key, "one heartbeat key per minute");
+  assert.equal(hb.text, "awaiting block #970,198  ·  4:16 since last block", "no digit count on a deploy heartbeat");
+  assert.equal(hb.key, `hb:970198:${Math.floor(T0 / 60_000)}`);
+  assert.equal(deployHeartbeatLine(970_198, 256_000, T0 + 30_000).key, hb.key, "one heartbeat key per minute");
   assert.equal(deployHeartbeatLine(null, null, T0).text, "awaiting block");
 
-  const c = keep(deployConfirmedLine("NEW", 970_102, TXID, T0));
+  const c = keep(deployConfirmedLine("NEW", 970_198, TXID, T0));
   assert.equal(c.kind, "ok");
-  assert.equal(c.text, "DEPLOY NEW confirmed  block 970,102  ·  awaiting the indexer's verdict");
-  assert.equal(c.key, `dconfirmed:${TXID}:970102`);
-  assert.notEqual(deployConfirmedLine("NEW", 970_103, TXID, T0).key, c.key, "confirmed again in a new block after a reorganization: logged again");
+  assert.equal(c.text, "DEPLOY NEW confirmed  block 970,198  ·  awaiting the indexer's verdict");
+  assert.equal(c.key, `dconfirmed:${TXID}:970198`);
+  assert.notEqual(deployConfirmedLine("NEW", 970_199, TXID, T0).key, c.key, "confirmed again in a new block after a reorganization: logged again");
 
-  const y = keep(deployedLine("NEW", 970_102, TXID, T0));
+  const y = keep(deployedLine("NEW", 970_198, TXID, T0));
   assert.equal(y.kind, "ok");
   assert.equal(y.yours, true);
   assert.equal(y.tier, null, "the banner takes the accent, not a tier");
   assert.equal(y.sum, undefined, "no yield sum on a deploy");
-  assert.equal(y.text, "NEW deployed  block 970,102  ✓ yours");
+  assert.equal(y.text, "NEW deployed  block 970,198  ✓ yours");
   assert.equal(y.key, `deployed:${TXID}`);
   assert.equal(deployedLine("NEW", 5, null, T0).key, "deployed:5");
 
@@ -242,7 +242,7 @@ const keep = (l) => {
     assert.equal(m, null, `denied word "${m && m[0]}" in: ${l.text}`);
   }
   // Keys are deterministic per event: the same inputs always yield the same key (variants of one event share it on purpose).
-  assert.equal(deployedLine("NEW", 970_102, TXID, T0).key, deployedLine("NEW", 970_102, TXID, T0 + 999).key);
-  assert.equal(deployMempoolLine("NEW", 970_102, TXID, T0).key, deployMempoolLine("NEW", 970_102, TXID, T0 + 999).key);
+  assert.equal(deployedLine("NEW", 970_198, TXID, T0).key, deployedLine("NEW", 970_198, TXID, T0 + 999).key);
+  assert.equal(deployMempoolLine("NEW", 970_198, TXID, T0).key, deployMempoolLine("NEW", 970_198, TXID, T0 + 999).key);
   console.log(`deploylog: ${outputs.length} formatter outputs free of denied vocabulary, keys deterministic`);
 }

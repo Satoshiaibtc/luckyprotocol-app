@@ -60,13 +60,13 @@ export function deployBuildLine(flow, ticker, at = Date.now()) {
   });
 }
 
-/** `mempool  DEPLOY LUCKY awaiting block #970,102` */
+/** `mempool  DEPLOY LUCKY awaiting block #970,198` */
 export function deployMempoolLine(ticker, nextHeight, txid, at = Date.now()) {
   const h = Number.isInteger(nextHeight) ? ` #${fmtInt(nextHeight)}` : "";
   return line({ key: `dmempool:${txid ?? nextHeight}`, kind: "act", text: `mempool  DEPLOY ${ticker} awaiting block${h}`, ts: at });
 }
 
-/** `awaiting block #970,102  ·  4:16 since last block` — one per minute while pending (no digit count: a deploy has no digit). */
+/** `awaiting block #970,198  ·  4:16 since last block` — one per minute while pending (no digit count: a deploy has no digit). */
 export function deployHeartbeatLine(nextHeight, sinceMs, at = Date.now()) {
   let since = "";
   if (Number.isFinite(sinceMs)) {
@@ -78,7 +78,7 @@ export function deployHeartbeatLine(nextHeight, sinceMs, at = Date.now()) {
 }
 
 /**
- * `DEPLOY LUCKY confirmed  block 970,102  ·  awaiting the indexer's verdict` — tx-status says confirmed; registration is still the indexer's call.
+ * `DEPLOY LUCKY confirmed  block 970,198  ·  awaiting the indexer's verdict` — tx-status says confirmed; registration is still the indexer's call.
  * Keyed by block height too: after a chain reorganization took it out of its block, its confirmation in a new one is logged again.
  */
 export function deployConfirmedLine(ticker, height, txid, at = Date.now()) {
@@ -91,7 +91,7 @@ export function deployConfirmedLine(ticker, height, txid, at = Date.now()) {
 }
 
 /**
- * Banner: `LUCKY deployed  block 970,102  ✓ yours` (kind ok, no tier — styled
+ * Banner: `LUCKY deployed  block 970,198  ✓ yours` (kind ok, no tier — styled
  * by .ln.yours.ln-ok); `provisional` adds that it is final only after
  * FINAL_DEPTH confirmations.
  */
@@ -100,7 +100,7 @@ export function deployedLine(ticker, height, txid, at = Date.now(), { provisiona
   return line({ key: `deployed:${txid ?? height}`, kind: "ok", yours: true, text: `${ticker} deployed  block ${fmtInt(height)}  ✓ yours${note}`, ts: at });
 }
 
-/** `LUCKY final  block 970,102  6 confirmations  ·  the name is yours` — a created name whose block is final. */
+/** `LUCKY final  block 970,198  6 confirmations  ·  the name is yours` — a created name whose block is final. */
 export function createdFinalLine(ticker, height, txid, at = Date.now()) {
   const block = Number.isInteger(height) ? `  block ${fmtInt(height)}` : "";
   return line({ key: `cr:final:${txid ?? ticker}`, kind: "ok", text: `${ticker} final${block}  ${FINAL_DEPTH} confirmations  ·  the name is yours`, ts: at });
@@ -125,7 +125,7 @@ export function createdReorgLine(ticker, verdict, txid, otherTxid = null, at = D
 }
 
 /**
- * `DEPLOY a3f9c…21e left block #970,110 (chain reorganization) · waiting for it to confirm again` [err]
+ * `DEPLOY a3f9c…21e left block #970,206 (chain reorganization) · waiting for it to confirm again` [err]
  * — a confirmed DEPLOY the indexer no longer shows in that block. Its callers
  * emit it once per event, so the key carries the second: a DEPLOY that leaves
  * the same height a second time (a reorganization back and forth) is logged again.
@@ -213,7 +213,7 @@ export function speedUpLine(what, { oldFeeSats, feeSats, feeRateSatVb, txid }, a
 }
 
 /**
- * `DEPLOY a3f9c…21e missed block #970,103  ·  NEW is visible in the mempool — speed it up` [err]
+ * `DEPLOY a3f9c…21e missed block #970,199  ·  NEW is visible in the mempool — speed it up` [err]
  * — a block came without the pending DEPLOY. One line per missed height.
  */
 export function missedBlockLine(ticker, txid, height, at = Date.now()) {
@@ -234,7 +234,7 @@ export function stepUnseenLine(what, txid, at = Date.now()) {
   return line({ key: `cr:unseen:${txid}`, kind: "sys", text: `${what} ${short(txid)} not seen by the indexer's node for a few minutes · still checking (it may confirm)`, ts: at });
 }
 
-/** `DEPLOY a3f9c…21e found  confirmed in block #970,110` / `…found in the mempool` — an earlier or unseen version turned up. */
+/** `DEPLOY a3f9c…21e found  confirmed in block #970,206` / `…found in the mempool` — an earlier or unseen version turned up. */
 export function stepFoundLine(what, txid, height = null, at = Date.now()) {
   const where = Number.isInteger(height) ? `confirmed in block #${fmtInt(height)}` : "in the mempool";
   return line({ key: `cr:found:${txid}:${Number.isInteger(height) ? height : "mempool"}`, kind: "ok", text: `${what} ${short(txid)} found  ${where}`, ts: at });

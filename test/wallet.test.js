@@ -4,6 +4,7 @@
 // clamping, resolution against /fees). The funding path (the wallet's own
 // list checked with GET /txouts) is tested in test/unisat.test.js.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   PROVIDER_IDS,
   PROVIDER_META,
@@ -27,6 +28,10 @@ import {
   DEFAULT_PRESET,
   FEE_CHOICE_KEY,
   FEE_PRESETS,
+  FEE_READING_TEXT,
+  RETIRED_FEE_CHOICE_KEY,
+  loadFeeChoice,
+  saveFeeChoice,
   clampCustomFee,
   isUsableFeeRate,
   parseFeeChoice,
@@ -150,8 +155,9 @@ assert.equal(isConflictError(new Error("Signature declined")), false);
 assert.equal(isConflictError(Object.assign(new Error("x"), { conflict: true })), true);
 
 // ---- fee choice: presets ------------------------------------------------------------------------
-assert.equal(FEE_CHOICE_KEY, "lp.feeChoice");
-assert.equal(DEFAULT_PRESET, "normal");
+assert.equal(FEE_CHOICE_KEY, "lp.feeTier");
+assert.equal(RETIRED_FEE_CHOICE_KEY, "lp.feeChoice");
+assert.equal(DEFAULT_PRESET, "fast", "the recommended rate is Fast (the next block's median)");
 assert.deepEqual(FEE_PRESETS.map((p) => p.id), ["fast", "normal", "slow", "economy"]);
 assert.deepEqual(FEE_PRESETS.map((p) => p.key), ["fastestFee", "halfHourFee", "hourFee", "economyFee"]);
 
@@ -238,8 +244,9 @@ assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.lengt
 
 // ---- fee choice: persistence round-trip -----------------------------------------------------------
 {
-  assert.deepEqual(parseFeeChoice(null), { kind: "preset", id: "normal" }, "first visit → Normal");
-  assert.deepEqual(parseFeeChoice("garbage"), { kind: "preset", id: "normal" });
+  assert.deepEqual(parseFeeChoice(null), { kind: "preset", id: "fast" }, "first visit → Fast");
+  assert.deepEqual(parseFeeChoice("garbage"), { kind: "preset", id: "fast" });
+  assert.deepEqual(parseFeeChoice("normal"), { kind: "preset", id: "normal" }, "a stored choice is kept");
   assert.deepEqual(parseFeeChoice("fast"), { kind: "preset", id: "fast" });
   assert.deepEqual(parseFeeChoice("economy"), { kind: "preset", id: "economy" });
   assert.deepEqual(parseFeeChoice("27"), { kind: "custom", value: 27 });
@@ -251,11 +258,74 @@ assert.ok(presetRows(FEES).every((p) => typeof p.eta === "string" && p.eta.lengt
   assert.equal(resolveFeeRate({ kind: "custom", value: 5000 }, null), null, "an out-of-range custom value resolves to no rate");
   assert.equal(serializeFeeChoice({ kind: "preset", id: "slow" }), "slow");
   assert.equal(serializeFeeChoice({ kind: "custom", value: 42 }), "42");
-  assert.equal(serializeFeeChoice({ kind: "custom", value: null }), "normal", "an unusable custom falls back to the default");
-  assert.equal(serializeFeeChoice({ kind: "preset", id: "bogus" }), "normal");
+  assert.equal(serializeFeeChoice({ kind: "custom", value: null }), "fast", "an unusable custom falls back to the default");
+  assert.equal(serializeFeeChoice({ kind: "preset", id: "bogus" }), "fast");
   for (const c of [{ kind: "preset", id: "fast" }, { kind: "custom", value: 250 }, { kind: "custom", value: 1.25 }]) {
     assert.deepEqual(parseFeeChoice(serializeFeeChoice(c)), c, "round-trip");
   }
+}
+
+// ---- fee choice: stored only when the visitor makes one; the retired key is ignored ----------------
+{
+  const memStorage = (init = {}) => {
+    const m = new Map(Object.entries(init));
+    return {
+      m,
+      getItem: (k) => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => void m.set(k, String(v)),
+      removeItem: (k) => void m.delete(k),
+    };
+  };
+  // A browser that opened the site before has the retired key: ignored once, then gone.
+  const old = memStorage({ [RETIRED_FEE_CHOICE_KEY]: "normal" });
+  assert.deepEqual(loadFeeChoice(old), { kind: "preset", id: "fast" }, "the retired key is not read: the visitor starts on Fast");
+  assert.equal(old.m.has(RETIRED_FEE_CHOICE_KEY), false, "…and it is removed");
+  assert.equal(old.m.has(FEE_CHOICE_KEY), false, "loading stores nothing");
+  // A choice the visitor made is kept.
+  for (const [raw, choice] of [["normal", { kind: "preset", id: "normal" }], ["economy", { kind: "preset", id: "economy" }], ["2.5", { kind: "custom", value: 2.5 }]]) {
+    assert.deepEqual(loadFeeChoice(memStorage({ [FEE_CHOICE_KEY]: raw, [RETIRED_FEE_CHOICE_KEY]: "slow" })), choice, `stored ${raw} is kept`);
+  }
+  assert.deepEqual(loadFeeChoice(memStorage()), { kind: "preset", id: "fast" }, "nothing stored: Fast");
+  assert.deepEqual(loadFeeChoice(null), { kind: "preset", id: "fast" }, "no storage: Fast");
+  const throwing = { getItem: () => { throw new Error("SecurityError"); }, setItem: () => { throw new Error("QuotaExceeded"); }, removeItem: () => { throw new Error("SecurityError"); } };
+  assert.deepEqual(loadFeeChoice(throwing), { kind: "preset", id: "fast" }, "blocked storage reads as nothing stored");
+  assert.equal(saveFeeChoice(throwing, { kind: "preset", id: "slow" }), false, "a failing write never throws");
+  // Saving: presets and usable custom rates; an empty or rejected entry keeps the last choice.
+  const st = memStorage();
+  assert.equal(saveFeeChoice(st, { kind: "preset", id: "slow" }), true);
+  assert.equal(st.m.get(FEE_CHOICE_KEY), "slow");
+  assert.equal(saveFeeChoice(st, { kind: "custom", value: 1.25 }), true);
+  assert.equal(st.m.get(FEE_CHOICE_KEY), "1.25");
+  for (const bad of [{ kind: "custom", value: null }, { kind: "custom", value: 5000 }, { kind: "custom", value: 0.5 }, { kind: "preset", id: "bogus" }, { kind: "x" }, null]) {
+    assert.equal(saveFeeChoice(st, bad), false, `not stored: ${JSON.stringify(bad)}`);
+  }
+  assert.equal(st.m.get(FEE_CHOICE_KEY), "1.25", "the last choice made stays");
+  assert.equal(saveFeeChoice(null, { kind: "preset", id: "fast" }), false);
+  // The hook stores only from the visitor's own picks — never on mount or on a re-render.
+  const hook = readFileSync(new URL("../src/hooks/useFeeRate.js", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, "");
+  assert.doesNotMatch(hook, /useEffect/, "no effect stores the choice");
+  assert.equal((hook.match(/saveFeeChoice\(/g) || []).length, 1, "one place stores it…");
+  assert.match(hook, /const choose = useCallback\(\s*\(next\) => \{\s*setChoice\(next\);\s*if \(persist\) saveFeeChoice\(browserStorage\(\), next\);/, "…the visitor's choose()");
+  const segment = (name) => {
+    const at = hook.indexOf(`const ${name} = useCallback(`);
+    assert.ok(at > 0, `${name} exists`);
+    const end = hook.indexOf("\n  const ", at + 1);
+    return hook.slice(at, end > 0 ? end : undefined);
+  };
+  for (const fn of ["pickPreset", "pickCustom", "onCustomText", "pickRate"]) assert.match(segment(fn), /\bchoose\(\{/, `${fn} goes through choose()`);
+  assert.equal((hook.match(/\bsetChoice\(/g) || []).length, 1, "nothing else sets the choice");
+  console.log("fee choice: stored only when the visitor picks; the retired key is ignored and removed");
+}
+
+// ---- fee choice: rates still on their way are not called missing ---------------------------------
+{
+  assert.equal(FEE_READING_TEXT, "Reading fee rates…");
+  assert.equal(missingFeeHint({ kind: "preset", id: "fast" }, null, "mine", { reading: true }), "Reading fee rates…");
+  assert.match(missingFeeHint({ kind: "preset", id: "fast" }, null, "mine"), /^No fee estimate from the indexer or mempool\.space — choose Custom/);
+  assert.match(missingFeeHint({ kind: "custom", value: null }, null, "mine", { reading: true }), /^Enter a custom fee rate/, "a custom choice does not wait for estimates");
+  const sel = readFileSync(new URL("../src/components/FeeSelector.jsx", import.meta.url), "utf8");
+  assert.match(sel, /!fee\.feesAvailable && !overCap && fee\.reading && <span className="fee-sel-note">\{FEE_READING_TEXT\}<\/span>/, "the selector says the rates are being read");
+  assert.match(sel, /!fee\.feesAvailable && !overCap && !fee\.reading && <span className="fee-sel-note">No fee estimates/, "…and that there are none only after");
 }
 
 // ---- high custom rates need an explicit confirmation -----------------------------------

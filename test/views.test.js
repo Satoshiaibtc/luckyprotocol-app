@@ -62,7 +62,7 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 
 // ---- TradeView.self_trade ---------------------------------------------------------------------
 {
-  const t = { txid: TX, block_height: 970_000, block_time: 1790000000, ticker: "LUCKY", amount: 1200, price_sats: 60_000, unit_price: 50, seller: P2TR, buyer: P2WPKH };
+  const t = { txid: TX, block_height: 970_096, block_time: 1790000000, ticker: "LUCKY", amount: 1200, price_sats: 60_000, unit_price: 50, seller: P2TR, buyer: P2WPKH };
   assert.equal(tradeRow(t).self_trade, false, "absent → false");
   assert.equal(tradeRow({ ...t, self_trade: true }).self_trade, true);
   assert.equal(tradeRow({ ...t, self_trade: "yes" }).self_trade, false, "only an explicit true");
@@ -87,7 +87,7 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.deepEqual(market24h({ volume_sats: "x", trades: -1, change_pct: Infinity, buyers: 5.5 }), { volume_sats: null, trades: null, change_pct: null, buyers: null }, "each field bounded on its own");
   assert.equal(market24h(null), null);
   assert.equal(market24h("soon"), null);
-  const tok = { ticker: "LUCKY", supply: 21_000_000, minted: 1_234_567, deployer: P2TR, deploy_txid: TX, deploy_block: 969_800, holders: 412 };
+  const tok = { ticker: "LUCKY", supply: 21_000_000, minted: 1_234_567, deployer: P2TR, deploy_txid: TX, deploy_block: 969_896, holders: 412 };
   assert.equal(tokenRow(tok).market_24h, null, "a row without market_24h → null (the card shows —)");
   assert.deepEqual(tokenRow({ ...tok, market_24h: { volume_sats: 10, trades: 1, change_pct: 0, buyers: 1 } }).market_24h, { volume_sats: 10, trades: 1, change_pct: 0, buyers: 1 });
   assert.equal(tokenRow({ ...tok, market_24h: { change_pct: 1e12 } }).market_24h.change_pct, null, "absurd change → null");
@@ -101,24 +101,24 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 
 // ---- token rows' market gate: minted_out + minted_out_height ------------------------------------
 {
-  const tok = { ticker: "BLOK", supply: 21_000_000, minted: 1_234_567, deployer: P2TR, deploy_txid: TX, deploy_block: 969_801, holders: 3_310 };
+  const tok = { ticker: "BLOK", supply: 21_000_000, minted: 1_234_567, deployer: P2TR, deploy_txid: TX, deploy_block: 969_897, holders: 3_310 };
   const below = tokenRow(tok);
   assert.equal(below.minted_out, false, "absent flag, minted < supply → false");
   assert.equal(below.minted_out_height, null);
   const full = tokenRow({ ...tok, minted: 21_000_000 });
   assert.equal(full.minted_out, true, "absent flag → fallback minted >= supply");
   assert.equal(full.minted_out_height, null, "height unknown → null, never 0");
-  const flagged = tokenRow({ ...tok, minted: 21_000_000, minted_out: true, minted_out_height: 970_090 });
+  const flagged = tokenRow({ ...tok, minted: 21_000_000, minted_out: true, minted_out_height: 970_186 });
   assert.equal(flagged.minted_out, true);
-  assert.equal(flagged.minted_out_height, 970_090);
-  assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: 970_090 }).minted_out, true, "the indexer's flag is authoritative even below the supply");
+  assert.equal(flagged.minted_out_height, 970_186);
+  assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: 970_186 }).minted_out, true, "the indexer's flag is authoritative even below the supply");
   assert.equal(tokenRow({ ...tok, minted: 21_000_000, minted_out: false }).minted_out, true, "the cumulative reading wins: minted >= supply is minted out");
   assert.equal(tokenRow({ ...tok, minted_out: "yes" }).minted_out, false, "only an explicit true; otherwise the fallback");
   assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: -1 }).minted_out_height, null, "negative height → null");
-  assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: 970090.5 }).minted_out_height, null, "fractional → null");
-  assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: "970090" }).minted_out_height, 970_090, "numeric string accepted");
+  assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: 970186.5 }).minted_out_height, null, "fractional → null");
+  assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: "970186" }).minted_out_height, 970_186, "numeric string accepted");
   assert.equal(tokenRow({ ...tok, minted_out: true, minted_out_height: 0 }).minted_out_height, 0, "0 is a block height (int ≥ 0)");
-  assert.equal(tokenRow({ ...tok, minted_out_height: 970_090 }).minted_out_height, null, "a height on a token that is not minted out is dropped");
+  assert.equal(tokenRow({ ...tok, minted_out_height: 970_186 }).minted_out_height, null, "a height on a token that is not minted out is dropped");
   console.log("views /tokens: minted_out (flag, fallback minted >= supply) + minted_out_height (int ≥ 0 | null)");
 }
 
@@ -135,12 +135,12 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 
 // ---- /tokens/:ticker/market -------------------------------------------------------------------
 {
-  const raw = { ticker: "LUCKY", window: "24h", as_of: 1790452492, tip_height: 970_100, floor_unit_price: 45.35, open_orders: 2, listed_amount: 3_120, last_trade: { txid: TX, block_height: 970_099, block_time: 1790451650, ticker: "LUCKY", amount: 100, price_sats: 4_700, unit_price: 47, seller: P2TR, buyer: P2WPKH, self_trade: false }, trades: 7, volume_sats: 592_451, buyers: 5, sellers: 4, high_unit_price: 49.1, low_unit_price: 44.2, first_unit_price: 48.1, change_pct: -2.2, self_trades_excluded: 1 };
+  const raw = { ticker: "LUCKY", window: "24h", as_of: 1790452492, tip_height: 970_196, floor_unit_price: 45.35, open_orders: 2, listed_amount: 3_120, last_trade: { txid: TX, block_height: 970_195, block_time: 1790451650, ticker: "LUCKY", amount: 100, price_sats: 4_700, unit_price: 47, seller: P2TR, buyer: P2WPKH, self_trade: false }, trades: 7, volume_sats: 592_451, buyers: 5, sellers: 4, high_unit_price: 49.1, low_unit_price: 44.2, first_unit_price: 48.1, change_pct: -2.2, self_trades_excluded: 1 };
   const m = market(raw);
   assert.equal(m.ticker, "LUCKY");
   assert.equal(m.window, "24h");
   assert.equal(m.as_of, 1790452492);
-  assert.equal(m.tip_height, 970_100);
+  assert.equal(m.tip_height, 970_196);
   assert.equal(m.floor_unit_price, 45.35);
   assert.equal(m.open_orders, 2);
   assert.equal(m.listed_amount, 3_120);
@@ -169,7 +169,7 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.equal(market({ ...raw, minted_out: true }).minted_out, true);
   assert.equal(market({ ...raw, minted_out: 1 }).minted_out, false, "only an explicit true opens the market");
   assert.deepEqual([m.market_open, m.market_opens_at_height], [false, null], "the depth gate absent → closed, height unknown");
-  assert.deepEqual([market({ ...raw, minted_out: true, market_open: true, market_opens_at_height: 970_095 }).market_open, market({ ...raw, market_opens_at_height: 970_095 }).market_opens_at_height], [true, 970_095]);
+  assert.deepEqual([market({ ...raw, minted_out: true, market_open: true, market_opens_at_height: 970_191 }).market_open, market({ ...raw, market_opens_at_height: 970_191 }).market_opens_at_height], [true, 970_191]);
   console.log("views /market: every field bounded, negatives allowed for change_pct, unknown → null; minted_out strict");
 }
 
@@ -180,12 +180,12 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.equal(orderRow(o).market_open, true, "absent → open (an indexer that predates the flag)");
   assert.equal(orderRow({ ...o, market_open: false }).market_open, false);
   // MineView depth
-  const mv = mineRow({ txid: TX, ticker: "LUCKY", block_height: 970_101, block_hash: "0".repeat(63) + "f", sender: P2TR, status: "settled", yield_smallest: 1000, confirmations: 2, final: false });
+  const mv = mineRow({ txid: TX, ticker: "LUCKY", block_height: 970_197, block_hash: "0".repeat(63) + "f", sender: P2TR, status: "settled", yield_smallest: 1000, confirmations: 2, final: false });
   assert.deepEqual([mv.confirmations, mv.final], [2, false]);
-  const mvOld = mineRow({ txid: TX, ticker: "LUCKY", block_height: 970_101, sender: P2TR, status: "settled", yield_smallest: 1000 });
+  const mvOld = mineRow({ txid: TX, ticker: "LUCKY", block_height: 970_197, sender: P2TR, status: "settled", yield_smallest: 1000 });
   assert.deepEqual([mvOld.confirmations, mvOld.final], [null, null], "not reported → unknown, never 'final'");
   // /tx-status depth: only for a confirmed tx; final only when explicitly true
-  const ts = txStatus(TX, { confirmed: true, block_height: 970_101, block_hash: "0".repeat(64), confirmations: 6, final: true });
+  const ts = txStatus(TX, { confirmed: true, block_height: 970_197, block_hash: "0".repeat(64), confirmations: 6, final: true });
   assert.deepEqual([ts.confirmations, ts.final], [6, true]);
   assert.deepEqual([txStatus(TX, { confirmed: true, block_height: 1, block_hash: "0".repeat(64), final: "yes" }).final, txStatus(TX, { confirmed: false, seen: true, confirmations: 3 }).confirmations], [false, null]);
   assert.deepEqual([txStatus(TX, null, false).confirmations, txStatus(TX, null, false).final], [null, false]);
@@ -209,10 +209,10 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 
 // ---- /activity items --------------------------------------------------------------------------
 {
-  const trade = activityItem({ kind: "trade", txid: TX.toUpperCase(), block_height: 970_099, block_time: 1790451650, ticker: "SATS", amount: 2360, buyer: P2WPKH, seller: P2TR, price_sats: 7099, unit_price: 3.008, self_trade: true });
+  const trade = activityItem({ kind: "trade", txid: TX.toUpperCase(), block_height: 970_195, block_time: 1790451650, ticker: "SATS", amount: 2360, buyer: P2WPKH, seller: P2TR, price_sats: 7099, unit_price: 3.008, self_trade: true });
   assert.equal(trade.kind, "trade");
   assert.equal(trade.txid, TX, "lower-cased");
-  assert.equal(trade.block_height, 970_099);
+  assert.equal(trade.block_height, 970_195);
   assert.equal(trade.block_time, 1790451650);
   assert.equal(trade.amount, 2360);
   assert.equal(trade.buyer, P2WPKH);
@@ -276,23 +276,23 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 
 // ---- /digits ---------------------------------------------------------------------------------
 {
-  const ok = digits({ tip_height: 970_100, from: 970_097, to: 970_100, digits: "0f7c" }, 1008);
-  assert.deepEqual(ok, { tip_height: 970_100, from: 970_097, to: 970_100, digits: "0f7c" }, "a consistent record passes as is");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_097, to: 970_100, digits: "0F7C" }, 1008).digits, "0f7c", "lower-cased");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_100, to: 970_100, digits: "a" }, 1), { tip_height: 970_100, from: 970_100, to: 970_100, digits: "a" }, "limit 1");
+  const ok = digits({ tip_height: 970_196, from: 970_193, to: 970_196, digits: "0f7c" }, 1008);
+  assert.deepEqual(ok, { tip_height: 970_196, from: 970_193, to: 970_196, digits: "0f7c" }, "a consistent record passes as is");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_193, to: 970_196, digits: "0F7C" }, 1008).digits, "0f7c", "lower-cased");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_196, to: 970_196, digits: "a" }, 1), { tip_height: 970_196, from: 970_196, to: 970_196, digits: "a" }, "limit 1");
   // to = min(before, tip): a record ending below the tip is fine.
-  assert.equal(digits({ tip_height: 970_100, from: 969_000, to: 969_003, digits: "0123" }, 1008).digits, "0123");
+  assert.equal(digits({ tip_height: 970_196, from: 969_096, to: 969_099, digits: "0123" }, 1008).digits, "0123");
 
-  const EMPTY = { tip_height: 970_100, from: 970_101, to: 970_100, digits: "" };
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_101, to: 970_100, digits: "" }, 1008), EMPTY, "the indexer's empty record (from = to + 1) passes");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_097, to: 970_100, digits: "0f7g" }, 1008), EMPTY, "non-hex → empty, never trimmed");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_097, to: 970_100, digits: "0f7" }, 1008), EMPTY, "length ≠ to − from + 1 → empty");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_097, to: 970_100, digits: "0f7cc" }, 1008), EMPTY, "too long for the range → empty");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_099, to: 970_100, digits: "0f" }, 1), EMPTY, "longer than the limit asked → empty");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_100, to: 970_101, digits: "0f" }, 1008), EMPTY, "past the tip → empty");
-  assert.deepEqual(digits({ tip_height: 970_100, from: 970_099, to: 970_100, digits: ["0", "f"] }, 1008), EMPTY, "digits must be a string");
-  assert.deepEqual(digits({ tip_height: 970_100, from: "x", to: 970_100, digits: "0" }, 1008), EMPTY, "malformed from → empty");
-  assert.deepEqual(digits({ tip_height: 970_100, from: -1, to: 0, digits: "0f" }, 1008), EMPTY, "negative height → empty");
+  const EMPTY = { tip_height: 970_196, from: 970_197, to: 970_196, digits: "" };
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_197, to: 970_196, digits: "" }, 1008), EMPTY, "the indexer's empty record (from = to + 1) passes");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_193, to: 970_196, digits: "0f7g" }, 1008), EMPTY, "non-hex → empty, never trimmed");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_193, to: 970_196, digits: "0f7" }, 1008), EMPTY, "length ≠ to − from + 1 → empty");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_193, to: 970_196, digits: "0f7cc" }, 1008), EMPTY, "too long for the range → empty");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_195, to: 970_196, digits: "0f" }, 1), EMPTY, "longer than the limit asked → empty");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_196, to: 970_197, digits: "0f" }, 1008), EMPTY, "past the tip → empty");
+  assert.deepEqual(digits({ tip_height: 970_196, from: 970_195, to: 970_196, digits: ["0", "f"] }, 1008), EMPTY, "digits must be a string");
+  assert.deepEqual(digits({ tip_height: 970_196, from: "x", to: 970_196, digits: "0" }, 1008), EMPTY, "malformed from → empty");
+  assert.deepEqual(digits({ tip_height: 970_196, from: -1, to: 0, digits: "0f" }, 1008), EMPTY, "negative height → empty");
   assert.deepEqual(digits({ tip_height: null, from: 1, to: 2, digits: "0f" }, 1008), { tip_height: null, from: null, to: null, digits: "" }, "no tip → empty with null heights");
   assert.deepEqual(digits(null, 1008), { tip_height: null, from: null, to: null, digits: "" }, "no envelope → empty");
   assert.deepEqual(digits("0f7c", 1008), { tip_height: null, from: null, to: null, digits: "" }, "a bare string is not the contract");
@@ -302,10 +302,10 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
 // ---- /digits?days ----------------------------------------------------------------------------
 {
   const SINCE = 1_790_000_000;
-  const env = { tip_height: 970_100, from: 970_097, to: 970_100, digits: "0F7C", since: SINCE, complete: true };
-  const emptyAs = (status, tip = 970_100) => ({ tip_height: tip, from: tip === null ? null : tip + 1, to: tip, digits: "", since: null, complete: null, status });
-  assert.deepEqual(digitsByDaysRow(env), { tip_height: 970_100, from: 970_097, to: 970_100, digits: "0f7c", since: SINCE, complete: true, status: "ok" }, "a consistent day window passes (lower-cased)");
-  assert.deepEqual(digitsByDaysRow({ ...env, complete: false }), { tip_height: 970_100, from: 970_097, to: 970_100, digits: "0f7c", since: SINCE, complete: false, status: "ok" }, "log ran out before the window's edge");
+  const env = { tip_height: 970_196, from: 970_193, to: 970_196, digits: "0F7C", since: SINCE, complete: true };
+  const emptyAs = (status, tip = 970_196) => ({ tip_height: tip, from: tip === null ? null : tip + 1, to: tip, digits: "", since: null, complete: null, status });
+  assert.deepEqual(digitsByDaysRow(env), { tip_height: 970_196, from: 970_193, to: 970_196, digits: "0f7c", since: SINCE, complete: true, status: "ok" }, "a consistent day window passes (lower-cased)");
+  assert.deepEqual(digitsByDaysRow({ ...env, complete: false }), { tip_height: 970_196, from: 970_193, to: 970_196, digits: "0f7c", since: SINCE, complete: false, status: "ok" }, "log ran out before the window's edge");
   // complete is strictly boolean; since an integer ≥ 0. Anything else is a malformed answer — never "still loading".
   for (const c of [undefined, null, "true", 1, {}, [true]]) assert.deepEqual(digitsByDaysRow({ ...env, complete: c }), emptyAs("invalid"), `complete ${JSON.stringify(c)} → invalid`);
   assert.equal(digitsByDaysRow({ ...env, since: 0 }).since, 0);
@@ -313,32 +313,32 @@ const P2WPKH = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
   assert.equal(digitsByDaysRow({ ...env, since: "1790000000" }).since, SINCE, "a numeric string is the same integer");
   // An indexer from before day windows ignores `days` and answers its block-count default with neither
   // since nor complete: that is not the asked window, so nothing of it is shown — and it is not "loading".
-  const oldIndexer = { tip_height: 970_100, from: 969_093, to: 970_100, digits: "a".repeat(1008) };
+  const oldIndexer = { tip_height: 970_196, from: 969_189, to: 970_196, digits: "a".repeat(1008) };
   assert.deepEqual(digitsByDaysRow(oldIndexer), emptyAs("unsupported"), "no since / complete → unsupported, empty");
   assert.deepEqual(digitsByDaysRow({ ...oldIndexer, since: null, complete: null }), emptyAs("unsupported"), "null since / complete → unsupported");
   assert.deepEqual(digitsByDaysRow({ ...oldIndexer, complete: false }), emptyAs("invalid"), "complete without since → invalid");
   assert.deepEqual(digitsByDaysRow({ ...oldIndexer, since: SINCE }), emptyAs("invalid"), "since without complete → invalid");
   // A window is by time, so its length is not tied to a day count — up to DIGITS_MAX heights pass.
   const long = "0".repeat(10_080);
-  assert.equal(digitsByDaysRow({ tip_height: 970_100, from: 970_100 - 10_079, to: 970_100, digits: long, since: SINCE, complete: true }).digits.length, 10_080);
+  assert.equal(digitsByDaysRow({ tip_height: 970_196, from: 970_196 - 10_079, to: 970_196, digits: long, since: SINCE, complete: true }).digits.length, 10_080);
   assert.deepEqual(
-    digitsByDaysRow({ tip_height: 970_100, from: 970_100 - 10_080, to: 970_100, digits: long + "0", since: SINCE, complete: true }),
+    digitsByDaysRow({ tip_height: 970_196, from: 970_196 - 10_080, to: 970_196, digits: long + "0", since: SINCE, complete: true }),
     emptyAs("invalid"),
     "longer than DIGITS_MAX → empty, invalid",
   );
   // The empty window keeps its complete flag: true = blocks held, none inside the window
   // (to = the newest held height); false = nothing held yet.
   assert.deepEqual(
-    digitsByDaysRow({ tip_height: 970_100, from: 970_101, to: 970_100, digits: "", since: SINCE, complete: true }),
-    { tip_height: 970_100, from: 970_101, to: 970_100, digits: "", since: SINCE, complete: true, status: "ok" },
+    digitsByDaysRow({ tip_height: 970_196, from: 970_197, to: 970_196, digits: "", since: SINCE, complete: true }),
+    { tip_height: 970_196, from: 970_197, to: 970_196, digits: "", since: SINCE, complete: true, status: "ok" },
   );
   assert.deepEqual(
-    digitsByDaysRow({ tip_height: 970_100, from: 970_101, to: 970_100, digits: "", since: SINCE, complete: false }),
-    { tip_height: 970_100, from: 970_101, to: 970_100, digits: "", since: SINCE, complete: false, status: "ok" },
+    digitsByDaysRow({ tip_height: 970_196, from: 970_197, to: 970_196, digits: "", since: SINCE, complete: false }),
+    { tip_height: 970_196, from: 970_197, to: 970_196, digits: "", since: SINCE, complete: false, status: "ok" },
   );
   // Anything the digit checks reject is the empty record, invalid (complete null — nothing vouches either way).
   assert.deepEqual(digitsByDaysRow({ ...env, digits: "0f7g" }), emptyAs("invalid"), "non-hex → invalid");
-  assert.deepEqual(digitsByDaysRow({ ...env, to: 970_101 }), emptyAs("invalid"), "past the tip → invalid");
+  assert.deepEqual(digitsByDaysRow({ ...env, to: 970_197 }), emptyAs("invalid"), "past the tip → invalid");
   assert.deepEqual(digitsByDaysRow(null), emptyAs("invalid", null), "no envelope");
   assert.deepEqual(digitsByDaysRow("0f7c"), emptyAs("invalid", null), "a bare string is not the contract");
 

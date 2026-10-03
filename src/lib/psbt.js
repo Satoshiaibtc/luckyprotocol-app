@@ -5,12 +5,12 @@
 // protocol outputs in the exact order the indexer expects, and returns an
 // UNSIGNED PSBT (hex) that the UniSat extension signs + finalizes.
 //
-// Every transaction built here has nLockTime = PROTOCOL_LOCKTIME (969,599)
+// Every transaction built here has nLockTime = PROTOCOL_LOCKTIME (969,695)
 // and every input nSequence = RBF_SEQUENCE (0xfffffffd):
 // the lock time is only enforced when some input's sequence is below
 // 0xffffffff, and 0xfffffffd also signals replace-by-fee, which "Speed up"
 // (buildSpeedUpPsbt) relies on. Such a tx can only confirm in block
-// 969,600 (ACTIVATION_HEIGHT) or later.
+// 969,696 (ACTIVATION_HEIGHT) or later.
 //
 // DEPLOY layout (§2.1): vout0 546 → self (deployer proof)
 //                       vout1 5,460 → PROJECT_FEE_ADDRESS
